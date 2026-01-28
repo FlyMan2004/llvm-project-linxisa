@@ -340,6 +340,15 @@ add_mlir_upstream_c_api_library(MLIRCAPIPtr
   MLIRPtrDialect
 )
 
+add_mlir_upstream_c_api_library(MLIRCAPIPTO
+  PTO.cpp
+
+  PARTIAL_SOURCES_INTENDED
+  LINK_LIBS PUBLIC
+  MLIRCAPIIR
+  MLIRPTODialect
+)
+
 add_mlir_upstream_c_api_library(MLIRCAPIQuant
   Quant.cpp
 

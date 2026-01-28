@@ -396,6 +396,15 @@ declare_mlir_dialect_python_bindings(
 declare_mlir_dialect_python_bindings(
   ADD_TO_PARENT MLIRPythonSources.Dialects
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mlir"
+  TD_FILE dialects/PTOOps.td
+  SOURCES
+    dialects/pto.py
+  DIALECT_NAME pto
+  GEN_ENUM_BINDINGS)
+
+declare_mlir_dialect_python_bindings(
+  ADD_TO_PARENT MLIRPythonSources.Dialects
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mlir"
   TD_FILE dialects/ROCDLOps.td
   SOURCES
     dialects/rocdl.py
@@ -650,6 +659,20 @@ declare_mlir_python_extension(MLIRPythonExtension.Dialects.PDL.Nanobind
   EMBED_CAPI_LINK_LIBS
     MLIRCAPIIR
     MLIRCAPIPDL
+)
+
+declare_mlir_python_extension(MLIRPythonExtension.Dialects.pto
+  MODULE_NAME _pto
+  ADD_TO_PARENT MLIRPythonSources.Dialects.pto
+  ROOT_DIR "${PYTHON_SOURCE_DIR}"
+  PYTHON_BINDINGS_LIBRARY pybind11
+  SOURCES
+    DialectPTO.cpp
+  PRIVATE_LINK_LIBS
+    LLVMSupport
+  EMBED_CAPI_LINK_LIBS
+    MLIRCAPIIR
+    MLIRCAPIPTO
 )
 
 declare_mlir_python_extension(MLIRPythonExtension.Dialects.SparseTensor.Nanobind

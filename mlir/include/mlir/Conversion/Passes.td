@@ -1641,5 +1641,8 @@ def ConvertXeGPUToXeVMPass : Pass<"convert-xegpu-to-xevm"> {
                            "LLVM::LLVMDialect", "index::IndexDialect",
                            "gpu::GPUDialect", "scf::SCFDialect"];
 }
-
+def PTOInsertLoadStoreForMixCV : Pass<"pto-insert-load-store-for-mixcv", "func::FuncOp"> {
+  let summary = "Insert load/store for mixed Cube/Vector domains";
+  let constructor = "mlir::pto::createPTOInsertLoadStoreForMixCVPass()";
+}
 #endif // MLIR_CONVERSION_PASSES

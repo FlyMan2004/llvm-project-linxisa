@@ -211,6 +211,7 @@ tools = [
     "mlir-linalg-ods-yaml-gen",
     "mlir-reduce",
     "mlir-pdll",
+    'ptoas',
     "not",
 ]
 

@@ -1,0 +1,78 @@
+from mlir.ir import Context, Location, Module, InsertionPoint
+from mlir.dialects import func, arith, pto
+from mlir.ir import F32Type, IndexType, IntegerType
+
+
+def build():
+    with Context() as ctx:
+        pto.register_dialect(ctx, load=True)
+
+        with Location.unknown(ctx):
+            m = Module.create()
+
+            f32 = F32Type.get(ctx)
+            ptr_f32 = pto.PtrType.get(f32, ctx)
+
+            tv2_f32 = pto.TensorViewType.get(2, f32, ctx)
+            tile_view_f32 = pto.TileViewType.get([32, 32], f32, ctx)
+            ub = pto.AddressSpaceAttr.get(pto.AddressSpace.UB, ctx)
+            bl = pto.BLayoutAttr.get(pto.BLayout.RowMajor, ctx)
+            sl = pto.SLayoutAttr.get(pto.SLayout.NoneBox, ctx)
+            pd = pto.PadValueAttr.get(pto.PadValue.Null, ctx)
+
+            cfg = pto.TileBufConfigAttr.get(bl, sl, 512, pd, ctx)
+            tile_buf_f32 = pto.TileBufType.get([32, 32], f32, ub, [32, 32], cfg, ctx)
+
+            i32 = IntegerType.get_signless(32, ctx)
+            ptr_i32 = pto.PtrType.get(i32, ctx)
+
+            tv2_i32 = pto.TensorViewType.get(2, i32, ctx)
+            tile_view_i32 = pto.TileViewType.get([32, 32], i32, ctx)
+            tile_buf_i32 = pto.TileBufType.get([32, 32], i32, ub, [32, 32], cfg, ctx)
+
+            fn_ty = func.FunctionType.get([ptr_f32, ptr_f32, ptr_i32], [])
+            with InsertionPoint(m.body):
+                fn = func.FuncOp("vec_cmp_kernel_2d", fn_ty)
+                entry = fn.add_entry_block()
+
+            with InsertionPoint(entry):
+                # constants
+                c0 = arith.ConstantOp(IndexType.get(ctx), 0).result
+                c1 = arith.ConstantOp(IndexType.get(ctx), 1).result
+                c32 = arith.ConstantOp(IndexType.get(ctx), 32).result
+
+                # Add constants for subview offsets and sizes
+                subview_offset = arith.ConstantOp(IndexType.get(ctx), 0).result  # constant for offset
+                subview_size = arith.ConstantOp(IndexType.get(ctx), 32).result  # constant for size
+
+                arg0, arg1, arg2 = entry.arguments
+
+                tv0 = pto.MakeTensorViewOp(tv2_f32, arg0, [c32, c32], [c32, c1]).result
+                tv1 = pto.MakeTensorViewOp(tv2_f32, arg1, [c32, c32], [c32, c1]).result
+                tv2 = pto.MakeTensorViewOp(tv2_i32, arg2, [c32, c32], [c32, c1]).result
+
+                # Use constants for subview offsets and sizes
+                sv0 = pto.SubviewOp(tile_view_f32, tv0, [subview_offset, subview_offset], [subview_size, subview_size]).result
+                sv1 = pto.SubviewOp(tile_view_f32, tv1, [subview_offset, subview_offset], [subview_size, subview_size]).result
+
+                tb0 = pto.AllocTileOp(tile_buf_f32).result
+                tb1 = pto.AllocTileOp(tile_buf_f32).result
+                tb2 = pto.AllocTileOp(tile_buf_i32).result
+
+                pto.TLoadOp(None, sv0, tb0)  # result=None
+                pto.TLoadOp(None, sv1, tb1)  # result=None
+
+                pto.TCmpOp(tb0, tb1, tb2)
+
+                sv2 = pto.SubviewOp(tile_view_i32, tv2, [subview_offset, subview_offset], [subview_size, subview_size]).result
+
+                pto.TStoreOp(None, tb2, sv2)
+
+                func.ReturnOp([])
+
+            m.operation.verify()
+            return m
+
+
+if __name__ == "__main__":
+    print(build())

@@ -1,0 +1,274 @@
+//===- PTO.cpp - C API for PTO dialect -----------------------------------===//
+//
+// This file provides the C API for the PTO dialect and its custom types.
+//
+// It must be built into an MLIR CAPI library (e.g. MLIRCAPIPTO) and linked
+// by any consumers (e.g. Python extension).
+//
+//===----------------------------------------------------------------------===//
+
+#include "mlir-c/Dialect/PTO.h"
+
+// unwrap/wrap + MLIR dialect registration C-API support.
+#include "mlir/CAPI/IR.h"
+
+#include "mlir/CAPI/Registration.h"
+
+// IMPORTANT: include the C++ dialect header that declares PtrType/TensorViewType.
+// This header should itself include the generated PTOTypeDefs.h.inc.
+#include "mlir/Dialect/PTO/IR/PTO.h"
+
+using namespace mlir;
+
+// Dialect registration (provides mlirGetDialectHandle__pto__()).
+// NOTE: adjust the third argument if your dialect class name/namespace differs.
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(PTO, pto, mlir::pto::PTODialect)
+
+//===----------------------------------------------------------------------===//
+// Type queries / constructors for !pto.ptr<elem>
+//===----------------------------------------------------------------------===//
+
+bool mlirPTOTypeIsAPtrType(MlirType type) {
+  return isa<mlir::pto::PtrType>(unwrap(type));;
+}
+
+MlirType mlirPTOPtrTypeGet(MlirContext ctx, MlirType elementType) {
+  auto c = unwrap(ctx);
+  auto elem = unwrap(elementType);
+  return wrap(mlir::pto::PtrType::get(c, elem));
+}
+
+MlirType mlirPTOPtrTypeGetElementType(MlirType type) {
+  auto t = cast<mlir::pto::PtrType>(unwrap(type));;
+  return wrap(t.getElementType());
+}
+
+bool mlirPTOAttrIsAAddressSpaceAttr(MlirAttribute attr) {
+  return mlir::isa<mlir::pto::AddressSpaceAttr>(unwrap(attr));
+}
+
+MlirAttribute mlirPTOAddressSpaceAttrGet(MlirContext ctx, int32_t value) {
+  auto c = unwrap(ctx);
+
+  // 你的 ODS 里 AddressSpaceAttr 的参数是 EnumParameter<PTO_AddressSpaceEnum>
+  // 通常对应 C++ 里是一个 enum class AddressSpace : int32_t
+  auto v = static_cast<mlir::pto::AddressSpace>(value);
+
+  return wrap(mlir::pto::AddressSpaceAttr::get(c, v));
+}
+
+int32_t mlirPTOAddressSpaceAttrGetValue(MlirAttribute attr) {
+  auto a = mlir::cast<mlir::pto::AddressSpaceAttr>(unwrap(attr));
+  return static_cast<int32_t>(a.getAddressSpace());
+}
+
+//===----------------------------------------------------------------------===//
+// Type queries / constructors for !pto.tensor_view<rank x elem>
+//===----------------------------------------------------------------------===//
+
+bool mlirPTOTypeIsATensorViewType(MlirType type) {
+  return isa<mlir::pto::TensorViewType>(unwrap(type));
+}
+
+MlirType mlirPTOTensorViewTypeGet(MlirContext ctx, int64_t rank,
+                                  MlirType elementType) {
+  auto c = unwrap(ctx);
+  auto elem = unwrap(elementType);
+  return wrap(mlir::pto::TensorViewType::get(c, rank, elem));
+}
+
+int64_t mlirPTOTensorViewTypeGetRank(MlirType type) {
+  auto t = cast<mlir::pto::TensorViewType>(unwrap(type));
+  return t.getRank();
+}
+
+MlirType mlirPTOTensorViewTypeGetElementType(MlirType type) {
+  auto t = cast<mlir::pto::TensorViewType>(unwrap(type));
+  return wrap(t.getElementType());
+}
+
+//===----------------------------------------------------------------------===//
+// !pto.tile_view<shape x elem>
+//===----------------------------------------------------------------------===//
+
+bool mlirPTOTypeIsATileViewType(MlirType type) {
+  return isa<mlir::pto::TileViewType>(unwrap(type));
+}
+
+MlirType mlirPTOTileViewTypeGet(MlirContext ctx, intptr_t rank,
+                                const int64_t *shape, MlirType elementType) {
+  auto c = unwrap(ctx);
+  auto elem = unwrap(elementType);
+  llvm::ArrayRef<int64_t> shp(shape, static_cast<size_t>(rank));
+  return wrap(mlir::pto::TileViewType::get(c, shp, elem));
+}
+
+intptr_t mlirPTOTileViewTypeGetRank(MlirType type) {
+  auto t = cast<mlir::pto::TileViewType>(unwrap(type));
+  return static_cast<intptr_t>(t.getShape().size());
+}
+
+MlirType mlirPTOTileViewTypeGetElementType(MlirType type) {
+  auto t = mlir::cast<mlir::pto::TileViewType>(unwrap(type));
+  return wrap(t.getElementType());
+}
+
+const int64_t *mlirPTOTileViewTypeGetShape(MlirType type, intptr_t *numDimsOut) {
+  auto t = cast<mlir::pto::TileViewType>(unwrap(type));
+  auto shape = t.getShape();
+  *numDimsOut = static_cast<intptr_t>(shape.size());
+  return shape.data();
+}
+
+//===----------------------------------------------------------------------===//
+// !pto.tile<shape x elem>
+//===----------------------------------------------------------------------===//
+
+bool mlirPTOTypeIsATileType(MlirType type) {
+  return isa<mlir::pto::TileType>(unwrap(type));
+}
+
+MlirType mlirPTOTileTypeGet(MlirContext ctx, intptr_t rank,
+                            const int64_t *shape, MlirType elementType) {
+  auto c = unwrap(ctx);
+  auto elem = unwrap(elementType);
+  llvm::ArrayRef<int64_t> shp(shape, static_cast<size_t>(rank));
+  return wrap(mlir::pto::TileType::get(c, shp, elem));
+}
+
+intptr_t mlirPTOTileTypeGetRank(MlirType type) {
+  auto t = cast<mlir::pto::TileType>(unwrap(type));
+  return static_cast<intptr_t>(t.getShape().size());
+}
+
+MlirType mlirPTOTileTypeGetElementType(MlirType type) {
+  auto t = cast<mlir::pto::TileType>(unwrap(type));
+  return wrap(t.getElementType());
+}
+
+const int64_t *mlirPTOTileTypeGetShape(MlirType type, intptr_t *numDimsOut) {
+  auto t = cast<mlir::pto::TileType>(unwrap(type));
+  auto shape = t.getShape();
+  *numDimsOut = static_cast<intptr_t>(shape.size());
+  return shape.data();
+}
+
+bool mlirPTOTypeIsATileBufType(MlirType type) {
+  return unwrap(type).isa<mlir::pto::TileBufType>();
+}
+
+MlirType mlirPTOTileBufTypeGet(MlirContext ctx, intptr_t rank,
+                               const int64_t *shape, MlirType elementType,
+                               MlirAttribute memorySpace) {
+  MLIRContext *c = unwrap(ctx);
+  auto shp = llvm::ArrayRef<int64_t>(shape, rank);
+  auto cfg = mlir::pto::TileBufConfigAttr::getDefault(c);
+  auto ty = mlir::pto::TileBufType::get(c, shp, unwrap(elementType), unwrap(memorySpace), llvm::ArrayRef<int64_t>{}, cfg);
+  return wrap(ty);
+}
+
+MlirType mlirPTOTileBufTypeGetWithConfig(MlirContext ctx, intptr_t rank,
+                                         const int64_t *shape, MlirType elementType,
+                                         MlirAttribute memorySpace, MlirAttribute config) {
+  MLIRContext *c = unwrap(ctx);
+  auto shp = llvm::ArrayRef<int64_t>(shape, rank);
+  auto cfg = unwrap(config).dyn_cast_or_null<mlir::pto::TileBufConfigAttr>();
+  if (!cfg) cfg = mlir::pto::TileBufConfigAttr::getDefault(c);
+  auto ty = mlir::pto::TileBufType::get(c, shp, unwrap(elementType), unwrap(memorySpace), cfg);
+  return wrap(ty);
+}
+
+MlirType mlirPTOTileBufTypeGetWithValidShape(MlirContext ctx,
+                                             intptr_t rank,
+                                             const int64_t *shape,
+                                             MlirType elementType,
+                                             MlirAttribute memorySpace,
+                                             intptr_t validRank,
+                                             const int64_t *validShape) {
+  MLIRContext *c = unwrap(ctx);
+  auto shp = llvm::ArrayRef<int64_t>(shape, rank);
+  auto vs  = llvm::ArrayRef<int64_t>(validShape, validRank);
+  auto cfg = mlir::pto::TileBufConfigAttr::getDefault(c);
+
+  auto ty = mlir::pto::TileBufType::get(c, shp, unwrap(elementType),
+                                       unwrap(memorySpace), vs, cfg);
+  return wrap(ty);
+}
+
+MlirType mlirPTOTileBufTypeGetWithValidShapeAndConfig(MlirContext ctx,
+                                                      intptr_t rank,
+                                                      const int64_t *shape,
+                                                      MlirType elementType,
+                                                      MlirAttribute memorySpace,
+                                                      intptr_t validRank,
+                                                      const int64_t *validShape,
+                                                      MlirAttribute config) {
+  MLIRContext *c = unwrap(ctx);
+  auto shp = llvm::ArrayRef<int64_t>(shape, rank);
+  auto vs  = llvm::ArrayRef<int64_t>(validShape, validRank);
+  auto cfg = mlir::cast<mlir::pto::TileBufConfigAttr>(unwrap(config));
+
+  auto ty = mlir::pto::TileBufType::get(c, shp, unwrap(elementType),
+                                       unwrap(memorySpace), vs, cfg);
+  return wrap(ty);
+}
+
+MlirAttribute mlirPTOBLayoutAttrGet(MlirContext ctx, int32_t value) {
+  auto *c = unwrap(ctx);
+  auto i32 = mlir::IntegerType::get(c, 32);
+  return wrap(mlir::IntegerAttr::get(i32, value));
+}
+
+MlirAttribute mlirPTOSLayoutAttrGet(MlirContext ctx, int32_t value) {
+  auto *c = unwrap(ctx);
+  auto i32 = mlir::IntegerType::get(c, 32);
+  return wrap(mlir::IntegerAttr::get(i32, value));
+}
+
+MlirAttribute mlirPTOPadValueAttrGet(MlirContext ctx, int32_t value) {
+  auto *c = unwrap(ctx);
+  auto i32 = mlir::IntegerType::get(c, 32);
+  return wrap(mlir::IntegerAttr::get(i32, value));
+}
+
+MlirAttribute mlirPTORoundModeAttrGet(MlirContext ctx, int32_t value) {
+  auto *c = unwrap(ctx);
+  auto i32 = mlir::IntegerType::get(c, 32);
+  return wrap(mlir::IntegerAttr::get(i32, value));
+}
+
+bool mlirPTOAttrIsATileBufConfigAttr(MlirAttribute attr) {
+  return unwrap(attr).isa<mlir::pto::TileBufConfigAttr>();
+}
+
+MlirAttribute mlirPTOTileBufConfigAttrGetDefault(MlirContext ctx) {
+  auto *c = unwrap(ctx);
+  return wrap(mlir::pto::TileBufConfigAttr::getDefault(c));
+}
+
+MlirAttribute mlirPTOTileBufConfigAttrGet(MlirContext ctx,
+                                          MlirAttribute bLayout,
+                                          MlirAttribute sLayout,
+                                          MlirAttribute sFractalSize,
+                                          MlirAttribute pad) {
+  auto *c = unwrap(ctx);
+
+  // bLayout/sLayout/pad：要求至少是 IntegerAttr（PTOEnums 里是 IntegerAttr 子类）
+  auto bl = unwrap(bLayout).dyn_cast<mlir::IntegerAttr>();
+  auto sl = unwrap(sLayout).dyn_cast<mlir::IntegerAttr>();
+  auto pv = unwrap(pad).dyn_cast<mlir::IntegerAttr>();
+  if (!bl || !sl || !pv)
+    return MlirAttribute{nullptr};
+
+  // size：要求 i32 IntegerAttr
+  auto sz = unwrap(sFractalSize).dyn_cast<mlir::IntegerAttr>();
+  if (!sz || !sz.getType().isInteger(32))
+    return MlirAttribute{nullptr};
+
+  // 如果你的 TileBufConfigAttr 参数类型是 Attribute（推荐），直接传 Attribute
+  mlir::Attribute blA = bl;
+  mlir::Attribute slA = sl;
+  mlir::Attribute pvA = pv;
+
+  return wrap(mlir::pto::TileBufConfigAttr::get(c, blA, slA, sz, pvA));
+}

@@ -41,8 +41,8 @@ void FuncDialect::initialize() {
   declarePromisedInterface<ConvertToEmitCPatternInterface, FuncDialect>();
   declarePromisedInterface<DialectInlinerInterface, FuncDialect>();
   declarePromisedInterface<ConvertToLLVMPatternInterface, FuncDialect>();
-  declarePromisedInterfaces<bufferization::BufferizableOpInterface, CallOp,
-                            FuncOp, ReturnOp>();
+  //declarePromisedInterfaces<bufferization::BufferizableOpInterface, CallOp,
+  //                          FuncOp, ReturnOp>();
 }
 
 /// Materialize a single constant operation from a given attribute value with

@@ -120,6 +120,7 @@ set(MLIR_TEST_DEPENDS
   mlir-rewrite
   mlir-tblgen
   mlir-translate
+  ptoas
   tblgen-lsp-server
   tblgen-to-irdl
   )
