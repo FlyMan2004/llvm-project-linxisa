@@ -40,6 +40,8 @@ StringRef Triple::getArchTypeName(ArchType Kind) {
   case csky:           return "csky";
   case dxil:           return "dxil";
   case hexagon:        return "hexagon";
+  case linx32:         return "linx32";
+  case linx64:         return "linx64";
   case hsail64:        return "hsail64";
   case hsail:          return "hsail";
   case kalimba:        return "kalimba";
@@ -203,6 +205,9 @@ StringRef Triple::getArchTypePrefix(ArchType Kind) {
   case mips64el:    return "mips";
 
   case hexagon:     return "hexagon";
+
+  case linx32:
+  case linx64:      return "linx";
 
   case amdgcn:      return "amdgcn";
   case r600:        return "r600";
@@ -519,6 +524,8 @@ Triple::ArchType Triple::getArchTypeForLLVMName(StringRef Name) {
       .Case("loongarch32", loongarch32)
       .Case("loongarch64", loongarch64)
       .Case("dxil", dxil)
+      .Case("linx32", linx32)
+      .Case("linx64", linx64)
       .Case("xtensa", xtensa)
       .Default(UnknownArch);
 }
@@ -667,6 +674,8 @@ static Triple::ArchType parseArch(StringRef ArchName) {
           .Case("csky", Triple::csky)
           .Case("loongarch32", Triple::loongarch32)
           .Case("loongarch64", Triple::loongarch64)
+          .Case("linx32", Triple::linx32)
+          .Case("linx64", Triple::linx64)
           .Cases({"dxil", "dxilv1.0", "dxilv1.1", "dxilv1.2", "dxilv1.3",
                   "dxilv1.4", "dxilv1.5", "dxilv1.6", "dxilv1.7", "dxilv1.8",
                   "dxilv1.9"},
@@ -997,6 +1006,8 @@ static Triple::ObjectFormatType getDefaultFormat(const Triple &T) {
   case Triple::bpfel:
   case Triple::csky:
   case Triple::hexagon:
+  case Triple::linx32:
+  case Triple::linx64:
   case Triple::hsail64:
   case Triple::hsail:
   case Triple::kalimba:
@@ -1730,6 +1741,7 @@ unsigned Triple::getArchPointerBitWidth(llvm::Triple::ArchType Arch) {
   case llvm::Triple::csky:
   case llvm::Triple::dxil:
   case llvm::Triple::hexagon:
+  case llvm::Triple::linx32:
   case llvm::Triple::hsail:
   case llvm::Triple::kalimba:
   case llvm::Triple::lanai:
@@ -1766,6 +1778,7 @@ unsigned Triple::getArchPointerBitWidth(llvm::Triple::ArchType Arch) {
   case llvm::Triple::bpfeb:
   case llvm::Triple::bpfel:
   case llvm::Triple::hsail64:
+  case llvm::Triple::linx64:
   case llvm::Triple::loongarch64:
   case llvm::Triple::mips64:
   case llvm::Triple::mips64el:
@@ -1840,6 +1853,7 @@ Triple Triple::get32BitArchVariant() const {
   case Triple::csky:
   case Triple::dxil:
   case Triple::hexagon:
+  case Triple::linx32:
   case Triple::hsail:
   case Triple::kalimba:
   case Triple::lanai:
@@ -1889,6 +1903,7 @@ Triple Triple::get32BitArchVariant() const {
   case Triple::riscv64be:
     T.setArch(Triple::riscv32be);
     break;
+  case Triple::linx64:         T.setArch(Triple::linx32);  break;
   case Triple::sparcv9:        T.setArch(Triple::sparc);   break;
   case Triple::spir64:         T.setArch(Triple::spir);    break;
   case Triple::spirv:
@@ -1931,6 +1946,7 @@ Triple Triple::get64BitArchVariant() const {
   case Triple::bpfeb:
   case Triple::bpfel:
   case Triple::hsail64:
+  case Triple::linx64:
   case Triple::loongarch64:
   case Triple::mips64:
   case Triple::mips64el:
@@ -1970,6 +1986,7 @@ Triple Triple::get64BitArchVariant() const {
   case Triple::riscv32be:
     T.setArch(Triple::riscv64be);
     break;
+  case Triple::linx32:          T.setArch(Triple::linx64);     break;
   case Triple::sparc:           T.setArch(Triple::sparcv9);    break;
   case Triple::spir:            T.setArch(Triple::spir64);     break;
   case Triple::spirv:
@@ -1997,6 +2014,8 @@ Triple Triple::getBigEndianArchVariant() const {
   case Triple::avr:
   case Triple::dxil:
   case Triple::hexagon:
+  case Triple::linx32:
+  case Triple::linx64:
   case Triple::hsail64:
   case Triple::hsail:
   case Triple::kalimba:
@@ -2110,6 +2129,8 @@ bool Triple::isLittleEndian() const {
   case Triple::csky:
   case Triple::dxil:
   case Triple::hexagon:
+  case Triple::linx32:
+  case Triple::linx64:
   case Triple::hsail64:
   case Triple::hsail:
   case Triple::kalimba:

@@ -1,0 +1,13 @@
+#ifndef LLVM_LIB_TARGET_LINXISA_TARGETINFO_LINXISATARGETINFO_H
+#define LLVM_LIB_TARGET_LINXISA_TARGETINFO_LINXISATARGETINFO_H
+
+namespace llvm {
+
+class Target;
+
+Target &getTheLinx32Target();
+Target &getTheLinx64Target();
+
+} // namespace llvm
+
+#endif // LLVM_LIB_TARGET_LINXISA_TARGETINFO_LINXISATARGETINFO_H

@@ -1,0 +1,77 @@
+//===-- LinxISATargetMachine.cpp - Define TargetMachine for LinxISA -------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "LinxISATargetMachine.h"
+#include "LinxISA.h"
+#include "TargetInfo/LinxISATargetInfo.h"
+#include "llvm/CodeGen/Passes.h"
+#include "llvm/CodeGen/TargetPassConfig.h"
+#include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/Compiler.h"
+
+using namespace llvm;
+
+extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeLinxISATarget() {
+  RegisterTargetMachine<LinxISATargetMachine> X32(getTheLinx32Target());
+  RegisterTargetMachine<LinxISATargetMachine> X64(getTheLinx64Target());
+
+  PassRegistry &PR = *PassRegistry::getPassRegistry();
+  initializeLinxISAAsmPrinterPass(PR);
+  initializeLinxISABlockifyPass(PR);
+  initializeLinxISADAGToDAGISelLegacyPass(PR);
+}
+
+static Reloc::Model
+getEffectiveRelocModel(std::optional<Reloc::Model> RM) {
+  return RM.value_or(Reloc::Static);
+}
+
+LinxISATargetMachine::LinxISATargetMachine(
+    const Target &T, const Triple &TT, StringRef CPU, StringRef FS,
+    const TargetOptions &Options, std::optional<Reloc::Model> RM,
+    std::optional<CodeModel::Model> CM, CodeGenOptLevel OL, bool JIT)
+    : CodeGenTargetMachineImpl(
+          T, TT.computeDataLayout(), TT, CPU, FS, Options,
+          getEffectiveRelocModel(RM),
+          getEffectiveCodeModel(CM, CodeModel::Small), OL),
+      TLOF(std::make_unique<TargetLoweringObjectFileELF>()),
+      Subtarget(TT, CPU, FS, *this) {
+  initAsmInfo();
+}
+
+namespace {
+
+class LinxISAPassConfig : public TargetPassConfig {
+public:
+  LinxISAPassConfig(LinxISATargetMachine &TM, PassManagerBase *PM)
+      : TargetPassConfig(TM, *PM) {}
+
+  LinxISATargetMachine &getLinxISATargetMachine() const {
+    return getTM<LinxISATargetMachine>();
+  }
+
+  void addIRPasses() override {
+    addPass(createAtomicExpandLegacyPass());
+    TargetPassConfig::addIRPasses();
+  }
+
+  bool addInstSelector() override {
+    addPass(createLinxISAISelDag(getLinxISATargetMachine()));
+    return false;
+  }
+
+  void addPreEmitPass() override { addPass(createLinxISABlockifyPass()); }
+};
+
+} // namespace
+
+TargetPassConfig *
+LinxISATargetMachine::createPassConfig(PassManagerBase &PM) {
+  return new LinxISAPassConfig(*this, &PM);
+}

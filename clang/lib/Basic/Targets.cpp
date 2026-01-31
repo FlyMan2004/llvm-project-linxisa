@@ -23,6 +23,7 @@
 #include "Targets/DirectX.h"
 #include "Targets/Hexagon.h"
 #include "Targets/Lanai.h"
+#include "Targets/LinxISA.h"
 #include "Targets/LoongArch.h"
 #include "Targets/M68k.h"
 #include "Targets/MSP430.h"
@@ -475,6 +476,22 @@ std::unique_ptr<TargetInfo> AllocateTarget(const llvm::Triple &Triple,
       return std::make_unique<HurdTargetInfo<RISCV64TargetInfo>>(Triple, Opts);
     default:
       return std::make_unique<RISCV64TargetInfo>(Triple, Opts);
+    }
+
+  case llvm::Triple::linx32:
+    switch (os) {
+    case llvm::Triple::Linux:
+      return std::make_unique<LinuxTargetInfo<Linx32TargetInfo>>(Triple, Opts);
+    default:
+      return std::make_unique<Linx32TargetInfo>(Triple, Opts);
+    }
+
+  case llvm::Triple::linx64:
+    switch (os) {
+    case llvm::Triple::Linux:
+      return std::make_unique<LinuxTargetInfo<Linx64TargetInfo>>(Triple, Opts);
+    default:
+      return std::make_unique<Linx64TargetInfo>(Triple, Opts);
     }
 
   case llvm::Triple::sparc:
