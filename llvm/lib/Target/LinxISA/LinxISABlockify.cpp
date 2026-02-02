@@ -57,6 +57,34 @@ static bool isMarkerInstr(const MachineInstr &MI) {
   }
 }
 
+static bool isFrameMacroInstr(const MachineInstr &MI) {
+  switch (MI.getOpcode()) {
+  case LinxISA::FENTRY:
+  case LinxISA::FEXIT:
+  case LinxISA::FRET_RA:
+  case LinxISA::FRET_STK:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool isStandaloneFrameMacroBlock(const MachineBasicBlock &MBB) {
+  const MachineInstr *MacroMI = nullptr;
+  for (const MachineInstr &MI : MBB) {
+    if (MI.isDebugInstr() || MI.isCFIInstruction())
+      continue;
+    if (isMarkerInstr(MI))
+      continue;
+    if (!isFrameMacroInstr(MI))
+      return false;
+    if (MacroMI)
+      return false;
+    MacroMI = &MI;
+  }
+  return MacroMI != nullptr;
+}
+
 static Register getTQueueUseReg(unsigned Index) {
   switch (Index) {
   case 1:
@@ -81,7 +109,7 @@ static Register getUQueueUseReg(unsigned Index) {
   case 3:
     return LinxISA::U3; // u#3
   case 4:
-    return LinxISA::U4; // u#4 (encodes as t)
+    return LinxISA::U4; // u#4
   default:
     return Register();
   }
@@ -119,6 +147,34 @@ public:
       return ContBB;
     };
 
+    auto splitAfterInstr = [&](MachineBasicBlock &MBB, MachineInstr &MI)
+        -> MachineBasicBlock * {
+      MachineFunction &MF = *MBB.getParent();
+      auto *ContBB = MF.CreateMachineBasicBlock(MBB.getBasicBlock());
+      MF.insert(std::next(MBB.getIterator()), ContBB);
+
+      auto SplitPt = std::next(MI.getIterator());
+      ContBB->splice(ContBB->end(), &MBB, SplitPt, MBB.end());
+
+      ContBB->transferSuccessorsAndUpdatePHIs(&MBB);
+      MBB.addSuccessor(ContBB);
+      return ContBB;
+    };
+
+    auto splitBeforeInstr = [&](MachineBasicBlock &MBB, MachineInstr &MI)
+        -> MachineBasicBlock * {
+      MachineFunction &MF = *MBB.getParent();
+      auto *TailBB = MF.CreateMachineBasicBlock(MBB.getBasicBlock());
+      MF.insert(std::next(MBB.getIterator()), TailBB);
+
+      auto SplitPt = MI.getIterator();
+      TailBB->splice(TailBB->end(), &MBB, SplitPt, MBB.end());
+
+      TailBB->transferSuccessorsAndUpdatePHIs(&MBB);
+      MBB.addSuccessor(TailBB);
+      return TailBB;
+    };
+
     // Ensure PSEUDO_CALL ends a block. This matches BlockISA: the call is the
     // block's outgoing control-flow (encoded in the BSTART header), and the
     // return target is the next block (encoded via SETRET).
@@ -144,6 +200,84 @@ public:
         MachineBasicBlock *ContBB = splitAfterCall(*MBB, MI);
         CallSplitWorklist.push_back(ContBB);
         Changed = true;
+        break;
+      }
+    }
+
+    // Ensure frame macro instructions are standalone blocks.
+    //
+    // FENTRY/FEXIT/FRET.* are "block instructions": they already contain the
+    // required block markers and micro-ops for stack/register management. Some
+    // mid/late CodeGen passes may merge these blocks back into surrounding
+    // blocks; re-split here so the final assembly keeps them isolated.
+    SmallVector<MachineBasicBlock *, 32> MacroSplitWorklist;
+    MacroSplitWorklist.reserve(MF.size());
+    for (MachineBasicBlock &MBB : MF)
+      MacroSplitWorklist.push_back(&MBB);
+
+    while (!MacroSplitWorklist.empty()) {
+      MachineBasicBlock *MBB = MacroSplitWorklist.pop_back_val();
+      MachineInstr *MacroMI = nullptr;
+      for (MachineInstr &MI : *MBB) {
+        if (MI.isDebugInstr() || MI.isCFIInstruction() || isMarkerInstr(MI))
+          continue;
+        if (isFrameMacroInstr(MI)) {
+          MacroMI = &MI;
+          break;
+        }
+      }
+
+      if (!MacroMI || isStandaloneFrameMacroBlock(*MBB))
+        continue;
+
+      auto hasRealInstrBefore = [&](const MachineInstr &Anchor) -> bool {
+        for (const MachineInstr &MI : *MBB) {
+          if (MI.isDebugInstr() || MI.isCFIInstruction() || isMarkerInstr(MI))
+            continue;
+          if (&MI == &Anchor)
+            return false;
+          return true;
+        }
+        return false;
+      };
+      auto hasRealInstrAfter = [&](const MachineInstr &Anchor) -> bool {
+        bool SeenAnchor = false;
+        for (const MachineInstr &MI : *MBB) {
+          if (MI.isDebugInstr() || MI.isCFIInstruction() || isMarkerInstr(MI))
+            continue;
+          if (!SeenAnchor) {
+            SeenAnchor = (&MI == &Anchor);
+            continue;
+          }
+          return true;
+        }
+        return false;
+      };
+
+      switch (MacroMI->getOpcode()) {
+      case LinxISA::FENTRY: {
+        if (hasRealInstrBefore(*MacroMI))
+          report_fatal_error("Linx: FENTRY must be the first instruction in its block");
+        if (!hasRealInstrAfter(*MacroMI))
+          continue;
+        MachineBasicBlock *ContBB = splitAfterInstr(*MBB, *MacroMI);
+        MacroSplitWorklist.push_back(ContBB);
+        Changed = true;
+        break;
+      }
+      case LinxISA::FEXIT:
+      case LinxISA::FRET_RA:
+      case LinxISA::FRET_STK: {
+        if (hasRealInstrAfter(*MacroMI))
+          report_fatal_error("Linx: frame macro must be the last instruction in its block");
+        if (!hasRealInstrBefore(*MacroMI))
+          continue;
+        MachineBasicBlock *TailBB = splitBeforeInstr(*MBB, *MacroMI);
+        MacroSplitWorklist.push_back(TailBB);
+        Changed = true;
+        break;
+      }
+      default:
         break;
       }
     }
@@ -179,10 +313,28 @@ public:
         ICall,
       };
 
+      // Frame prologue/epilogue macros (FENTRY/FEXIT/FRET.*) are standalone
+      // blocks in LinxISA: they already contain the required block markers and
+      // micro-ops for stack/register management. Do not surround them with
+      // BSTART/BSTOP or attempt to rewrite their control-flow.
+      if (isStandaloneFrameMacroBlock(MBB)) {
+        // If the pass runs twice, strip any stale explicit markers.
+        for (auto It = MBB.begin(); It != MBB.end();) {
+          if (isMarkerInstr(*It)) {
+            It = MBB.erase(It);
+            Changed = true;
+            continue;
+          }
+          ++It;
+        }
+        continue;
+      }
+
       ExitKind Kind = ExitKind::Fall;
       MachineBasicBlock *TargetBB = nullptr;   // DIRECT/COND
       MachineBasicBlock *ReturnBB = nullptr;   // CALL (return target)
       std::optional<MachineOperand> CallTargetOp; // CALL (callee)
+      std::optional<Register> HeaderSetcTgtReg;   // inserted immediately after BSTART
 
       // Identify the last two non-debug, non-marker instructions.
       MachineInstr *Last = nullptr;
@@ -214,9 +366,9 @@ public:
         }
         case LinxISA::PSEUDO_RET: {
           Kind = ExitKind::Ret;
-          // Return target is provided via C.SETC.TGT ra.
-          BuildMI(MBB, Last->getIterator(), DebugLoc(), TII.get(LinxISA::CSETC_TGT))
-              .addReg(LinxISA::R10);
+          // Return target is always `ra`; place SETC.TGT right after the BSTART
+          // marker for readability.
+          HeaderSetcTgtReg = LinxISA::R10;
           Last->eraseFromParent();
           Changed = true;
           break;
@@ -224,8 +376,13 @@ public:
         case LinxISA::JR: {
           const Register Reg = Last->getOperand(0).getReg();
           Kind = (Reg == LinxISA::R10) ? ExitKind::Ret : ExitKind::Ind;
-          BuildMI(MBB, Last->getIterator(), DebugLoc(), TII.get(LinxISA::CSETC_TGT))
-              .addReg(Reg);
+          if (Reg == LinxISA::R10) {
+            HeaderSetcTgtReg = Reg;
+          } else {
+            BuildMI(MBB, Last->getIterator(), DebugLoc(),
+                    TII.get(LinxISA::CSETC_TGT))
+                .addReg(Reg);
+          }
           Last->eraseFromParent();
           Changed = true;
           break;
@@ -243,8 +400,15 @@ public:
             MachineBasicBlock *BrTargetBB = Prev->getOperand(2).getMBB();
             MachineBasicBlock *JumpTargetBB = Last->getOperand(0).getMBB();
             MachineBasicBlock *FallthroughBB = MBB.getNextNode();
-            if (!FallthroughBB)
-              report_fatal_error("Linx: conditional+jump block requires fallthrough");
+            auto makeTrampoline = [&](MachineBasicBlock *Target) -> MachineBasicBlock * {
+              MachineFunction &MF = *MBB.getParent();
+              auto *TrampBB = MF.CreateMachineBasicBlock(MBB.getBasicBlock());
+              MF.insert(std::next(MBB.getIterator()), TrampBB);
+              TrampBB->addSuccessor(Target);
+              BuildMI(*TrampBB, TrampBB->end(), DebugLoc(), TII.get(LinxISA::JUMP))
+                  .addMBB(Target);
+              return TrampBB;
+            };
 
             unsigned SetcOpc = 0;
             Register LHSReg = Prev->getOperand(0).getReg();
@@ -298,7 +462,30 @@ public:
               BrOpcForSetc = invertBranch(BrOpcForSetc);
               SetcOpc = pickSetc(BrOpcForSetc);
             } else {
-              report_fatal_error("Linx: conditional+jump block without fallthrough to either successor");
+              // Neither successor is laid out as fallthrough. Insert a small
+              // trampoline block so we can keep BlockISA's "conditional +
+              // implicit fallthrough" shape without requiring global block
+              // reordering.
+              //
+              //   Bcc BrTarget; JUMP JumpTarget
+              // becomes:
+              //   (block header encodes conditional jump to BrTarget)
+              //   fallthrough -> tramp
+              //   tramp: JUMP JumpTarget
+              MachineBasicBlock *TrampBB = makeTrampoline(JumpTargetBB);
+
+              // Fix up the Machine-CFG: JumpTarget is no longer reached
+              // directly from MBB. Update PHIs and edge lists.
+              if (MBB.isSuccessor(JumpTargetBB)) {
+                JumpTargetBB->replacePhiUsesWith(&MBB, TrampBB);
+                MBB.removeSuccessor(JumpTargetBB);
+              }
+              if (!MBB.isSuccessor(TrampBB))
+                MBB.addSuccessor(TrampBB);
+
+              Kind = ExitKind::Cond;
+              TargetBB = BrTargetBB;
+              SetcOpc = pickSetc(BrOpcForSetc);
             }
 
             auto SetcIt = findSetcInsertPt(MBB, *Prev, LHSReg, RHSReg);
@@ -489,8 +676,10 @@ public:
       MachineInstr *BStartMI = nullptr;
       switch (Kind) {
       case ExitKind::Fall:
+        // Prefer the compressed BrType marker: C.BSTART (FALL).
         BStartMI = BuildMI(MBB, InsertBStart, DebugLoc(),
-                           TII.get(LinxISA::BSTART_STD_FALL))
+                           TII.get(LinxISA::CBSTART_STD))
+                       .addImm(1) // BrType = FALL
                        .getInstr();
         break;
       case ExitKind::Direct:
@@ -522,22 +711,35 @@ public:
         break;
       }
       case ExitKind::Ret:
+        // Prefer the compressed BrType marker: C.BSTART (RET).
         BStartMI = BuildMI(MBB, InsertBStart, DebugLoc(),
-                           TII.get(LinxISA::BSTART_STD_RET))
+                           TII.get(LinxISA::CBSTART_STD))
+                       .addImm(7) // BrType = RET
                        .getInstr();
         break;
       case ExitKind::Ind:
+        // Prefer the compressed BrType marker: C.BSTART (IND).
         BStartMI = BuildMI(MBB, InsertBStart, DebugLoc(),
-                           TII.get(LinxISA::BSTART_STD_IND))
+                           TII.get(LinxISA::CBSTART_STD))
+                       .addImm(5) // BrType = IND
                        .getInstr();
         break;
       case ExitKind::ICall:
+        // Prefer the compressed BrType marker: C.BSTART (ICALL).
         BStartMI = BuildMI(MBB, InsertBStart, DebugLoc(),
-                           TII.get(LinxISA::BSTART_STD_ICALL))
+                           TII.get(LinxISA::CBSTART_STD))
+                       .addImm(6) // BrType = ICALL
                        .getInstr();
         break;
       }
       Changed = true;
+
+      if (HeaderSetcTgtReg) {
+        BuildMI(MBB, std::next(BStartMI->getIterator()), DebugLoc(),
+                TII.get(LinxISA::CSETC_TGT))
+            .addReg(*HeaderSetcTgtReg);
+        Changed = true;
+      }
 
       // Assign block-local single-use values to the hand queues.
       //
@@ -687,6 +889,7 @@ public:
         SmallVector<unsigned, 32> AssignedU;
         SmallVector<Hand, 32> AssignedHand(Segs.size(), Hand::None);
         SmallVector<unsigned, 32> AssignedBetween(Segs.size(), 0);
+        DenseMap<const MachineInstr *, unsigned> UsedHandReads; // bit0=T, bit1=U
 
         auto countBetween = [&](ArrayRef<unsigned> Assigned, const Segment &S) {
           unsigned Between = 0;
@@ -708,16 +911,25 @@ public:
           if (!CanT && !CanU)
             continue;
 
+          // Per-queue port rule: at most one T read and one U read per
+          // instruction. Avoid mapping multiple operands in the same MI to the
+          // same hand.
+          const unsigned Mask = UsedHandReads.lookup(S.UseMI);
+          const bool CanTInMI = CanT && ((Mask & 0x1u) == 0);
+          const bool CanUInMI = CanU && ((Mask & 0x2u) == 0);
+          if (!CanTInMI && !CanUInMI)
+            continue;
+
           Hand H = Hand::None;
           unsigned Between = 0;
 
           // Prefer mapping defs that can become 16-bit ops to the T-hand.
           const bool PreferT = isTCompressibleDef(*S.DefMI);
 
-          if (PreferT && CanT) {
+          if (PreferT && CanTInMI) {
             H = Hand::T;
             Between = BetweenT;
-          } else if (CanT && CanU) {
+          } else if (CanTInMI && CanUInMI) {
             if (BetweenT <= BetweenU) {
               H = Hand::T;
               Between = BetweenT;
@@ -725,7 +937,7 @@ public:
               H = Hand::U;
               Between = BetweenU;
             }
-          } else if (CanT) {
+          } else if (CanTInMI) {
             H = Hand::T;
             Between = BetweenT;
           } else {
@@ -739,6 +951,13 @@ public:
             AssignedT.push_back(I);
           else if (H == Hand::U)
             AssignedU.push_back(I);
+
+          if (S.UseMI) {
+            if (H == Hand::T)
+              UsedHandReads[S.UseMI] |= 0x1u;
+            else if (H == Hand::U)
+              UsedHandReads[S.UseMI] |= 0x2u;
+          }
         }
 
         for (unsigned I : Sorted) {

@@ -22,6 +22,7 @@
 .sw?
 #OS X specific files.
 .DS_store
+.DS_Store
 
 # Ignore the user specified CMake presets in subproject directories.
 /*/CMakeUserPresets.json
@@ -89,3 +90,7 @@ pythonenv*
 
 # cutile ir
 /cutile/samples/ir_artifacts
+
+# Local LinxISA scratch artifacts.
+/test_linx
+/test_linx.*

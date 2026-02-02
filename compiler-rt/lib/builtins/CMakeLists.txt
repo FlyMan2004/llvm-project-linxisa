@@ -866,6 +866,20 @@ set(s390x_SOURCES
   ${GENERIC_TF_SOURCES}
 )
 
+# Linx ISA (linx32 and linx64)
+set(linx_SOURCES
+  linx/fp_mode.c
+  ${GENERIC_SOURCES}
+)
+set(linx32_SOURCES
+  linx/int_mul.S
+  ${linx_SOURCES}
+)
+set(linx64_SOURCES
+  linx/int_mul.S
+  ${linx_SOURCES}
+)
+
 
 set(wasm_SOURCES
   wasm/__c_longjmp.S

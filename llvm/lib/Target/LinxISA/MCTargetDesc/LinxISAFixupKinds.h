@@ -44,6 +44,9 @@ enum Fixups {
   // PC-relative long setret immediate (HL.SETRET imm32, scaled by 2 bytes).
   FIXUP_LINX_HL_SETRET32_PCREL,
 
+  // PC-relative 20-bit offset for ADDTPC (global address, not scaled).
+  FIXUP_LINX_PCREL_HI20,
+
   // Marker.
   LastTargetFixupKind,
   NumTargetFixupKinds = LastTargetFixupKind - FirstTargetFixupKind

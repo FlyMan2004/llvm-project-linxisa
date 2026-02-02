@@ -40,9 +40,16 @@ def T4  : LinxISAReg<27, "t#4">;
 
 def U1  : LinxISAReg<28, "u#1">;
 def U2  : LinxISAReg<29, "u#2">;
-def U3  : LinxISAReg<30, "u">;
-def U4  : LinxISAReg<31, "t">;
+def U3  : LinxISAReg<30, "u#3">;
+def U4  : LinxISAReg<31, "u#4">;
 
+// GPR_Arch: Architectural GPRs only (R0-R23), no T/U queue references.
+// Use this for operands that must hold actual values (like comparison results).
+def GPR_Arch : RegisterClass<"Linx", [i64, i32], 64,
+    (sequence "R%i", 0, 23)>;
+
+// GPR: Full GPR class including T/U queue read-only references.
+// The T/U queue registers can be used as source operands to read from the queue.
 def GPR : RegisterClass<"Linx", [i64, i32], 64,
     (add (sequence "R%i", 0, 23),
          T1, T2, T3, T4,

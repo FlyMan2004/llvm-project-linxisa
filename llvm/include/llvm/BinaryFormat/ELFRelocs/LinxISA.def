@@ -1,0 +1,27 @@
+//===-- LinxISA.def - LinxISA ELF Relocations -----------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+ELF_RELOC(R_LINX_NONE, 0)
+
+// Control-flow / PC-relative fixups.
+ELF_RELOC(R_LINX_B12_PCREL, 1)
+ELF_RELOC(R_LINX_J22_PCREL, 2)
+ELF_RELOC(R_LINX_CBSTART12_PCREL, 3)
+ELF_RELOC(R_LINX_B17_PCREL, 4)
+ELF_RELOC(R_LINX_HL_BSTART30_PCREL, 5)
+ELF_RELOC(R_LINX_CSETRET5_PCREL, 6)
+ELF_RELOC(R_LINX_SETRET20_PCREL, 7)
+ELF_RELOC(R_LINX_HL_SETRET32_PCREL, 8)
+
+// Generic ABI-level relocations (minimal set for bring-up).
+ELF_RELOC(R_LINX_RELATIVE, 9)
+ELF_RELOC(R_LINX_64, 10)
+ELF_RELOC(R_LINX_32, 11)
+ELF_RELOC(R_LINX_JUMP_SLOT, 12)
+ELF_RELOC(R_LINX_GLOB_DAT, 13)
+ELF_RELOC(R_LINX_COPY, 14)

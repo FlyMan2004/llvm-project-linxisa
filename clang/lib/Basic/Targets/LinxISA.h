@@ -49,17 +49,15 @@ public:
 
   std::string_view getClobbers() const override { return ""; }
 
+  bool validateAsmConstraint(const char *&Name,
+                             TargetInfo::ConstraintInfo &Info) const override;
+
   int getEHDataRegisterNumber(unsigned RegNo) const override {
     if (RegNo == 0)
       return 2; // a0
     if (RegNo == 1)
       return 3; // a1
     return -1;
-  }
-
-  bool validateAsmConstraint(const char *&Name,
-                             TargetInfo::ConstraintInfo &Info) const override {
-    return false;
   }
 
   bool hasBitIntType() const override { return true; }

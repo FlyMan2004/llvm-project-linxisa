@@ -50,6 +50,9 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   // Bring-up: avoid generating jump tables.
   setOperationAction(ISD::BR_JT, MVT::Other, Expand);
 
+  // Lower atomic fences via libcalls (e.g. __sync_synchronize) for bring-up.
+  setOperationAction(ISD::ATOMIC_FENCE, MVT::Other, Expand);
+
   setOperationAction(ISD::SIGN_EXTEND, MVT::i64, Custom);
   setOperationAction(ISD::ZERO_EXTEND, MVT::i64, Custom);
   setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i64, Custom);
@@ -60,11 +63,74 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::ROTR, MVT::i32, Expand);
   setOperationAction(ISD::ROTR, MVT::i64, Expand);
 
+  // Drop prefetches for now.
+  setOperationAction(ISD::PREFETCH, MVT::Other, Expand);
+
   // Bring-up: avoid introducing target-specific select/cmov patterns.
   setOperationAction(ISD::SELECT, MVT::i32, Custom);
   setOperationAction(ISD::SELECT, MVT::i64, Custom);
   setOperationAction(ISD::SELECT_CC, MVT::i32, Expand);
   setOperationAction(ISD::SELECT_CC, MVT::i64, Expand);
+
+  // GlobalAddress must be custom-lowered to PC-relative addressing.
+  setOperationAction(ISD::GlobalAddress, MVT::i64, Custom);
+  setOperationAction(ISD::GlobalAddress, MVT::i32, Custom);
+
+  //===----------------------------------------------------------------------===//
+  // Floating Point Operations
+  //===----------------------------------------------------------------------===//
+  //
+  // For floating point operations, we need to set them to Expand to allow
+  // libcall generation. Without this, we get "unsupported library call operation"
+  // errors when trying to compile floating point code.
+
+  // 32-bit floating point operations
+  setOperationAction(ISD::FADD, MVT::f32, Expand);
+  setOperationAction(ISD::FSUB, MVT::f32, Expand);
+  setOperationAction(ISD::FMUL, MVT::f32, Expand);
+  setOperationAction(ISD::FDIV, MVT::f32, Expand);
+  setOperationAction(ISD::FREM, MVT::f32, Expand);
+  setOperationAction(ISD::FNEG, MVT::f32, Expand);
+  setOperationAction(ISD::FABS, MVT::f32, Expand);
+  setOperationAction(ISD::FSQRT, MVT::f32, Expand);
+  setOperationAction(ISD::FCOPYSIGN, MVT::f32, Expand);
+  setOperationAction(ISD::SETCC, MVT::f32, Expand);
+  setOperationAction(ISD::FEXP2, MVT::f32, Expand);
+  setOperationAction(ISD::FLOG2, MVT::f32, Expand);
+
+  // 64-bit floating point operations
+  setOperationAction(ISD::FADD, MVT::f64, Expand);
+  setOperationAction(ISD::FSUB, MVT::f64, Expand);
+  setOperationAction(ISD::FMUL, MVT::f64, Expand);
+  setOperationAction(ISD::FDIV, MVT::f64, Expand);
+  setOperationAction(ISD::FREM, MVT::f64, Expand);
+  setOperationAction(ISD::FNEG, MVT::f64, Expand);
+  setOperationAction(ISD::FABS, MVT::f64, Expand);
+  setOperationAction(ISD::FSQRT, MVT::f64, Expand);
+  setOperationAction(ISD::FCOPYSIGN, MVT::f64, Expand);
+  setOperationAction(ISD::SETCC, MVT::f64, Expand);
+  setOperationAction(ISD::FEXP2, MVT::f64, Expand);
+  setOperationAction(ISD::FLOG2, MVT::f64, Expand);
+
+  // Float-to-int conversions
+  setOperationAction(ISD::FP_TO_SINT, MVT::i32, Expand);
+  setOperationAction(ISD::FP_TO_UINT, MVT::i32, Expand);
+  setOperationAction(ISD::FP_TO_SINT, MVT::i64, Expand);
+  setOperationAction(ISD::FP_TO_UINT, MVT::i64, Expand);
+
+  // Int-to-float conversions
+  setOperationAction(ISD::SINT_TO_FP, MVT::f32, Expand);
+  setOperationAction(ISD::UINT_TO_FP, MVT::f32, Expand);
+  setOperationAction(ISD::SINT_TO_FP, MVT::f64, Expand);
+  setOperationAction(ISD::UINT_TO_FP, MVT::f64, Expand);
+
+  // Float-to-float conversions
+  setOperationAction(ISD::FP_ROUND, MVT::f32, Expand);
+  setOperationAction(ISD::FP_EXTEND, MVT::f64, Expand);
+
+  // FMA (fused multiply-add)
+  setOperationAction(ISD::FMA, MVT::f32, Expand);
+  setOperationAction(ISD::FMA, MVT::f64, Expand);
 
   // Function alignments.
   setMinFunctionAlignment(Align(2));
@@ -88,6 +154,8 @@ SDValue LinxISATargetLowering::LowerOperation(SDValue Op,
     return LowerSELECT(Op, DAG);
   case ISD::SETCC:
     return LowerSETCC(Op, DAG);
+  case ISD::GlobalAddress:
+    return LowerGlobalAddress(Op, DAG);
   default:
     return SDValue();
   }
@@ -382,6 +450,21 @@ SDValue LinxISATargetLowering::LowerSETCC(SDValue Op,
       DAG.getMachineNode(CmpOpc, DL, Op.getValueType(), LHS, RHS), 0);
 }
 
+SDValue LinxISATargetLowering::LowerGlobalAddress(SDValue Op,
+                                                  SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT Ty = Op.getValueType();
+  GlobalAddressSDNode *N = cast<GlobalAddressSDNode>(Op);
+  const GlobalValue *GV = N->getGlobal();
+  int64_t Offset = N->getOffset();
+
+  // Use ADDTPC to compute PC-relative address of the global.
+  // ADDTPC rd, imm20 computes rd = PC + sext(imm20)
+  // The assembler will create a relocation to resolve the actual offset.
+  SDValue GA = DAG.getTargetGlobalAddress(GV, DL, Ty, Offset);
+  return SDValue(DAG.getMachineNode(LinxISA::ADDTPC, DL, Ty, GA), 0);
+}
+
 static SDValue convertLocVTToValVT(SDValue V, MVT ValVT, const SDLoc &DL,
                                   SelectionDAG &DAG) {
   if (V.getValueType() != ValVT)
@@ -393,8 +476,11 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &DL,
     SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
-  if (IsVarArg)
-    report_fatal_error("Linx: varargs not supported yet");
+  // Varargs support is limited during bring-up.
+  // All varargs must be passed on stack.
+  if (IsVarArg && CallConv != CallingConv::C) {
+    report_fatal_error("Linx: varargs not supported for non-C calling conventions");
+  }
 
   MachineFunction &MF = DAG.getMachineFunction();
   MachineFrameInfo &MFI = MF.getFrameInfo();
@@ -477,8 +563,11 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
   CallingConv::ID CallConv = CLI.CallConv;
   bool IsVarArg = CLI.IsVarArg;
 
-  if (IsVarArg)
-    report_fatal_error("Linx: varargs calls not supported yet");
+  // Varargs support is limited during bring-up.
+  // Allow varargs calls but they must use stack passing only.
+  if (IsVarArg && CallConv != CallingConv::C) {
+    report_fatal_error("Linx: varargs calls not supported for non-C calling conventions");
+  }
 
   // Analyze operands of the call, assigning locations to each operand.
   SmallVector<CCValAssign, 16> ArgLocs;
@@ -581,8 +670,10 @@ SDValue LinxISATargetLowering::LowerReturn(
     const {
   if (!Chain.getNode())
     report_fatal_error("Linx: LowerReturn called with null chain");
-  if (IsVarArg)
-    report_fatal_error("Linx: varargs not supported yet");
+  // Varargs return support is limited during bring-up.
+  if (IsVarArg && CallConv != CallingConv::C) {
+    report_fatal_error("Linx: varargs not supported for non-C calling conventions");
+  }
 
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, IsVarArg, DAG.getMachineFunction(), RVLocs,

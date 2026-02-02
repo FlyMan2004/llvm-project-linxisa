@@ -38,6 +38,87 @@ ArrayRef<TargetInfo::GCCRegAlias> LinxISATargetInfo::getGCCRegAliases() const {
   return llvm::ArrayRef(GCCRegAliases);
 }
 
+bool LinxISATargetInfo::validateAsmConstraint(
+    const char *&Name, TargetInfo::ConstraintInfo &Info) const {
+  // LinxISA inline assembly constraints
+  // r - any general purpose register
+  // d - destination register (GPR)
+  // s - source register (GPR)
+  // I - immediate (12-bit signed)
+  // J - immediate (20-bit for LUI)
+  // K - immediate (5-bit unsigned)
+  // n - immediate (32-bit signed)
+  // e - even register (for paired registers)
+  // z - zero register (r0)
+  // Z - first special register (ra/r10)
+
+  switch (Name[0]) {
+  case 'r': {
+    // General purpose register
+    Info.setAllowsRegister();
+    return true;
+  }
+  case 'd':
+  case 's': {
+    // Destination/source register
+    Info.setAllowsRegister();
+    return true;
+  }
+  case 'I': {
+    // 12-bit signed immediate
+    Info.setRequiresImmediate();
+    return true;
+  }
+  case 'J': {
+    // 20-bit immediate (for LUI)
+    Info.setRequiresImmediate();
+    return true;
+  }
+  case 'K': {
+    // 5-bit unsigned immediate
+    Info.setRequiresImmediate();
+    return true;
+  }
+  case 'n': {
+    // 32-bit signed immediate
+    Info.setRequiresImmediate();
+    return true;
+  }
+  case 'z': {
+    // Zero register constraint
+    Info.setAllowsRegister();
+    return true;
+  }
+  case 'e': {
+    // Even register (for paired register access)
+    Info.setAllowsRegister();
+    return true;
+  }
+  case 'Z': {
+    // Special register (ra for return address)
+    Info.setAllowsRegister();
+    return true;
+  }
+  case 'i': {
+    // Any immediate value
+    Info.setRequiresImmediate();
+    return true;
+  }
+  case 'm': {
+    // Memory operand
+    Info.setAllowsMemory();
+    return true;
+  }
+  case 'p': {
+    // Memory operand with base register
+    Info.setAllowsMemory();
+    return true;
+  }
+  default:
+    return false;
+  }
+}
+
 void LinxISATargetInfo::getTargetDefines(const LangOptions &Opts,
                                         MacroBuilder &Builder) const {
   Builder.defineMacro("__LINX__");

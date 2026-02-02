@@ -93,6 +93,8 @@ set(PPC32 powerpc powerpcspe)
 set(PPC64 powerpc64 powerpc64le)
 set(RISCV32 riscv32)
 set(RISCV64 riscv64)
+set(LINX32 linx32)
+set(LINX64 linx64)
 set(S390X s390x)
 set(SPARC sparc)
 set(SPARCV9 sparcv9)
@@ -110,7 +112,7 @@ endif()
 set(ALL_BUILTIN_SUPPORTED_ARCH
   ${X86} ${X86_64} ${AMDGPU} ${ARM32} ${ARM64} ${AVR}
   ${HEXAGON} ${MIPS32} ${MIPS64} ${NVPTX} ${PPC32} ${PPC64}
-  ${RISCV32} ${RISCV64} ${S390X} ${SPARC} ${SPARCV9}
+  ${RISCV32} ${RISCV64} ${LINX32} ${LINX64} ${S390X} ${SPARC} ${SPARCV9}
   ${WASM32} ${WASM64} ${VE} ${LOONGARCH64} ${M68K})
 
 include(CompilerRTUtils)

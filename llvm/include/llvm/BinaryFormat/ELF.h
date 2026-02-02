@@ -321,6 +321,8 @@ enum {
   EM_AMDGPU = 224,        // AMD GPU architecture
   EM_RISCV = 243,         // RISC-V
   EM_LANAI = 244,         // Lanai 32-bit processor
+  // Linx Instruction Set Architecture (LinxISA)
+  EM_LINXISA = 233,
   EM_BPF = 247,           // Linux kernel bpf virtual machine
   EM_VE = 251,            // NEC SX-Aurora VE
   EM_CSKY = 252,          // C-SKY 32-bit processor
@@ -723,6 +725,11 @@ enum {
 #define ELF_RISCV_NONSTANDARD_RELOC(_vendor, name, value) name = value,
 #include "ELFRelocs/RISCV_nonstandard.def"
 #undef ELF_RISCV_NONSTANDARD_RELOC
+};
+
+// ELF Relocation types for LinxISA.
+enum {
+#include "ELFRelocs/LinxISA.def"
 };
 
 enum {

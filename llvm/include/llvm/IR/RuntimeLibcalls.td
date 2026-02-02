@@ -3196,6 +3196,26 @@ def RISCVSystemLibrary
            DefaultStackProtector)>;
 
 //===----------------------------------------------------------------------===//
+// LinxISA Runtime Libcalls
+//===----------------------------------------------------------------------===//
+
+def isLinxISA : RuntimeLibcallPredicate<[{
+  TT.getArch() == Triple::linx32 || TT.getArch() == Triple::linx64
+}]>;
+
+def isLinx64 : RuntimeLibcallPredicate<[{
+  TT.getArch() == Triple::linx64
+}]>;
+
+def LinxISASystemLibrary
+    : SystemRuntimeLibrary<isLinxISA,
+      (add DefaultRuntimeLibcallImpls,
+           // Enable i128 helpers for Linx64 when they are referenced (e.g. via
+           // legalization for wide operations).
+           LibcallImpls<(add Int128RTLibcalls), isLinx64>,
+           DefaultStackProtector)>;
+
+//===----------------------------------------------------------------------===//
 // SPARC Runtime Libcalls
 //===----------------------------------------------------------------------===//
 

@@ -427,8 +427,9 @@ static bool ExecuteAssemblerImpl(AssemblerInvocation &Opts,
   // Get the target specific parser.
   std::string Error;
   const Target *TheTarget = TargetRegistry::lookupTarget(Opts.Triple, Error);
-  if (!TheTarget)
+  if (!TheTarget) {
     return Diags.Report(diag::err_target_unknown_triple) << Opts.Triple.str();
+  }
 
   ErrorOr<std::unique_ptr<MemoryBuffer>> Buffer = [&] {
     // FIXME(sandboxing): Make this a proper input file.

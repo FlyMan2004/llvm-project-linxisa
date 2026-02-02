@@ -1,0 +1,1310 @@
+//===-- LinxISAAsmParser.cpp - Parse Linx assembly to MCInsts -------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "MCTargetDesc/LinxISAOpcodeTables.h"
+#include "MCTargetDesc/LinxISAMCTargetDesc.h"
+#include "TargetInfo/LinxISATargetInfo.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSwitch.h"
+#include "llvm/MC/MCAsmInfo.h"
+#include "llvm/MC/MCExpr.h"
+#include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCParser/AsmLexer.h"
+#include "llvm/MC/MCParser/MCParsedAsmOperand.h"
+#include "llvm/MC/MCParser/MCTargetAsmParser.h"
+#include "llvm/MC/MCRegister.h"
+#include "llvm/MC/MCStreamer.h"
+#include "llvm/MC/MCSubtargetInfo.h"
+#include "llvm/MC/MCTargetOptions.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/Compiler.h"
+#include "llvm/Support/raw_ostream.h"
+#include <cctype>
+#include <optional>
+#include <string>
+
+using namespace llvm;
+
+namespace {
+
+static std::string toUpperStr(StringRef S) {
+  std::string Out;
+  Out.reserve(S.size());
+  for (char C : S)
+    Out.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(C))));
+  return Out;
+}
+
+static std::optional<unsigned> parseRegCode(StringRef Name) {
+  StringRef N = Name.trim();
+  if (N.size() >= 2 && (N[0] == 'r' || N[0] == 'R') &&
+      std::isdigit(static_cast<unsigned char>(N[1]))) {
+    N = N.drop_front();
+    unsigned V = 0;
+    if (!N.getAsInteger(10, V) && V < 32)
+      return V;
+    return std::nullopt;
+  }
+
+  std::string Upper = toUpperStr(N);
+  return StringSwitch<std::optional<unsigned>>(Upper)
+      .Case("ZERO", 0u)
+      .Case("SP", 1u)
+      .Case("A0", 2u)
+      .Case("A1", 3u)
+      .Case("A2", 4u)
+      .Case("A3", 5u)
+      .Case("A4", 6u)
+      .Case("A5", 7u)
+      .Case("A6", 8u)
+      .Case("A7", 9u)
+      .Case("RA", 10u)
+      .Case("S0", 11u)
+      .Case("S1", 12u)
+      .Case("S2", 13u)
+      .Case("S3", 14u)
+      .Case("S4", 15u)
+      .Case("S5", 16u)
+      .Case("S6", 17u)
+      .Case("S7", 18u)
+      .Case("S8", 19u)
+      .Case("X0", 20u)
+      .Case("X1", 21u)
+      .Case("X2", 22u)
+      .Case("X3", 23u)
+      .Case("T#1", 24u)
+      .Case("T#2", 25u)
+      .Case("T#3", 26u)
+      .Case("T#4", 27u)
+      .Case("U#1", 28u)
+      .Case("U#2", 29u)
+      .Case("U#3", 30u)
+      .Case("U#4", 31u)
+      // Queue aliases.
+      .Case("U", 30u)
+      .Case("T", 31u)
+      .Default(std::nullopt);
+}
+
+static MCRegister regCodeToMCReg(unsigned Code) {
+  static const MCRegister Regs[32] = {
+      LinxISA::R0,  LinxISA::R1,  LinxISA::R2,  LinxISA::R3,
+      LinxISA::R4,  LinxISA::R5,  LinxISA::R6,  LinxISA::R7,
+      LinxISA::R8,  LinxISA::R9,  LinxISA::R10, LinxISA::R11,
+      LinxISA::R12, LinxISA::R13, LinxISA::R14, LinxISA::R15,
+      LinxISA::R16, LinxISA::R17, LinxISA::R18, LinxISA::R19,
+      LinxISA::R20, LinxISA::R21, LinxISA::R22, LinxISA::R23,
+      LinxISA::T1,  LinxISA::T2,  LinxISA::T3,  LinxISA::T4,
+      LinxISA::U1,  LinxISA::U2,  LinxISA::U3,  LinxISA::U4,
+  };
+  if (Code < 32)
+    return Regs[Code];
+  return MCRegister();
+}
+
+static bool isConstExpr(const MCExpr *E, int64_t &Out) {
+  if (auto *CE = dyn_cast<MCConstantExpr>(E)) {
+    Out = CE->getValue();
+    return true;
+  }
+  return false;
+}
+
+static std::optional<unsigned> parseSrcRTypeSuffix(StringRef Suffix) {
+  std::string Up = toUpperStr(Suffix);
+  if (Up == "SW")
+    return 0u;
+  if (Up == "UW")
+    return 1u;
+  if (Up == "NEG" || Up == "NOT")
+    return 2u;
+  return std::nullopt;
+}
+
+static std::optional<unsigned> parseBrType(StringRef Tok) {
+  std::string Up = toUpperStr(Tok);
+  return StringSwitch<std::optional<unsigned>>(Up)
+      .Case("FALL", 1u)
+      .Case("DIRECT", 2u)
+      .Case("COND", 3u)
+      .Case("CALL", 4u)
+      .Case("IND", 5u)
+      .Case("ICALL", 6u)
+      .Case("RET", 7u)
+      .Default(std::nullopt);
+}
+
+enum class BStartKind {
+  Unknown,
+  Fall,
+  Direct,
+  Cond,
+  Call,
+  Ind,
+  ICall,
+  Ret,
+  DirectOrCall, // "BSTART {DIRECT, CALL}"
+};
+
+static BStartKind brTypeToBStartKind(unsigned BrType) {
+  switch (BrType & 0x7u) {
+  case 1:
+    return BStartKind::Fall;
+  case 2:
+    return BStartKind::Direct;
+  case 3:
+    return BStartKind::Cond;
+  case 4:
+    return BStartKind::Call;
+  case 5:
+    return BStartKind::Ind;
+  case 6:
+    return BStartKind::ICall;
+  case 7:
+    return BStartKind::Ret;
+  default:
+    return BStartKind::Unknown;
+  }
+}
+
+static BStartKind bstartKindFromAsmFmt(StringRef AsmFmt) {
+  // Order matters: ICALL contains "CALL" as a substring.
+  if (AsmFmt.contains_insensitive("{DIRECT, CALL}"))
+    return BStartKind::DirectOrCall;
+  if (AsmFmt.contains_insensitive(" ICALL"))
+    return BStartKind::ICall;
+  if (AsmFmt.contains_insensitive(" IND"))
+    return BStartKind::Ind;
+  if (AsmFmt.contains_insensitive(" RET"))
+    return BStartKind::Ret;
+  if (AsmFmt.contains_insensitive(" COND"))
+    return BStartKind::Cond;
+  if (AsmFmt.contains_insensitive(" DIRECT"))
+    return BStartKind::Direct;
+  if (AsmFmt.contains_insensitive(" CALL"))
+    return BStartKind::Call;
+  if (AsmFmt.contains_insensitive(" FALL"))
+    return BStartKind::Fall;
+  return BStartKind::Unknown;
+}
+
+static std::optional<unsigned> parseBlockTypeFromMnemonic(StringRef Mnemonic) {
+  std::string Up = toUpperStr(Mnemonic);
+  size_t Dot = Up.find('.');
+  if (Dot == std::string::npos)
+    return std::nullopt;
+  std::string Suffix = Up.substr(Dot + 1);
+  if (Suffix == "STD")
+    return 0u;
+  if (Suffix == "SYS")
+    return 1u;
+  if (Suffix == "FP")
+    return 2u;
+  return std::nullopt;
+}
+
+static int64_t memScaleFromMnemonic(StringRef Mnemonic) {
+  std::string Up = toUpperStr(Mnemonic);
+  if (Up == "LBI" || Up == "LBUI" || Up == "SBI")
+    return 1;
+  if (Up == "LHI" || Up == "LHUI" || Up == "SHI")
+    return 2;
+  if (Up == "LWI" || Up == "LWUI" || Up == "SWI" || Up == "C.LWI" ||
+      Up == "C.SWI")
+    return 4;
+  if (Up == "LDI" || Up == "SDI" || Up == "C.LDI" || Up == "C.SDI")
+    return 8;
+  return 1;
+}
+
+struct ParsedReg {
+  unsigned Code = 0;
+  unsigned SrcRType = 0; // default .sw
+  unsigned Shamt = 0;
+  bool HasExplicitType = false;
+  bool HasExplicitShift = false;
+  SMLoc Loc;
+};
+
+struct ParsedMem {
+  ParsedReg Base;
+  bool HasIndex = false;
+  ParsedReg Index;
+  const MCExpr *OffExpr = nullptr;
+  SMLoc StartLoc;
+  SMLoc EndLoc;
+};
+
+struct ParsedImm {
+  const MCExpr *Expr = nullptr;
+  SMLoc Loc;
+};
+
+struct ParsedKeyword {
+  std::string TextUpper;
+  SMLoc Loc;
+};
+
+struct ParsedInst {
+  SmallVector<ParsedReg, 8> Regs;
+  SmallVector<ParsedImm, 4> Imms;
+  SmallVector<ParsedKeyword, 2> Keywords;
+  std::optional<ParsedMem> Mem;
+  std::optional<ParsedReg> ArrowDest;
+  std::optional<ParsedImm> SetRetTarget;
+};
+
+class LinxOperand : public MCParsedAsmOperand {
+public:
+  enum Kind { Token, Reg, Imm, Mem, Keyword, ArrowDest, SetRetTarget };
+
+private:
+  Kind K;
+  SMLoc StartLoc;
+  SMLoc EndLoc;
+
+  std::string Tok;
+  ParsedReg R;
+  const MCExpr *E = nullptr;
+  ParsedMem M;
+  ParsedKeyword KW;
+
+public:
+  explicit LinxOperand(Kind K, SMLoc Start, SMLoc End)
+      : K(K), StartLoc(Start), EndLoc(End) {}
+
+  static std::unique_ptr<LinxOperand> createToken(StringRef Tok, SMLoc Loc) {
+    auto Op = std::make_unique<LinxOperand>(Token, Loc, Loc);
+    Op->Tok = Tok.str();
+    return Op;
+  }
+
+  static std::unique_ptr<LinxOperand> createReg(const ParsedReg &R, SMLoc End) {
+    auto Op = std::make_unique<LinxOperand>(Reg, R.Loc, End);
+    Op->R = R;
+    return Op;
+  }
+
+  static std::unique_ptr<LinxOperand> createImm(const MCExpr *E, SMLoc Loc,
+                                                SMLoc End) {
+    auto Op = std::make_unique<LinxOperand>(Imm, Loc, End);
+    Op->E = E;
+    return Op;
+  }
+
+  static std::unique_ptr<LinxOperand> createSetRetTarget(const MCExpr *E,
+                                                         SMLoc Loc,
+                                                         SMLoc End) {
+    auto Op = std::make_unique<LinxOperand>(SetRetTarget, Loc, End);
+    Op->E = E;
+    return Op;
+  }
+
+  static std::unique_ptr<LinxOperand> createMem(const ParsedMem &M) {
+    auto Op = std::make_unique<LinxOperand>(Mem, M.StartLoc, M.EndLoc);
+    Op->M = M;
+    return Op;
+  }
+
+  static std::unique_ptr<LinxOperand> createKeyword(StringRef Text, SMLoc Loc,
+                                                    SMLoc End) {
+    auto Op = std::make_unique<LinxOperand>(Keyword, Loc, End);
+    Op->KW.TextUpper = toUpperStr(Text);
+    Op->KW.Loc = Loc;
+    return Op;
+  }
+
+  static std::unique_ptr<LinxOperand> createArrowDest(const ParsedReg &D,
+                                                      SMLoc End) {
+    auto Op = std::make_unique<LinxOperand>(ArrowDest, D.Loc, End);
+    Op->R = D;
+    return Op;
+  }
+
+  bool isToken() const override { return K == Token || K == Keyword; }
+  bool isImm() const override { return K == Imm; }
+  bool isReg() const override { return K == Reg || K == ArrowDest; }
+  MCRegister getReg() const override {
+    if (!isReg())
+      return MCRegister();
+    return regCodeToMCReg(R.Code);
+  }
+  bool isMem() const override { return K == Mem; }
+
+  SMLoc getStartLoc() const override { return StartLoc; }
+  SMLoc getEndLoc() const override { return EndLoc; }
+
+  void print(raw_ostream &OS, const MCAsmInfo &MAI) const override {
+    switch (K) {
+    case Token:
+      OS << "Tok(" << Tok << ")";
+      break;
+    case Keyword:
+      OS << "Kw(" << KW.TextUpper << ")";
+      break;
+    case Reg:
+      OS << "Reg(" << R.Code << ")";
+      break;
+    case ArrowDest:
+      OS << "ArrowDest(" << R.Code << ")";
+      break;
+    case Imm:
+    case SetRetTarget:
+      OS << "Imm(";
+      if (E)
+        MAI.printExpr(OS, *E);
+      OS << ")";
+      break;
+    case Mem:
+      OS << "Mem";
+      break;
+    }
+  }
+
+  Kind getKind() const { return K; }
+  StringRef getToken() const { return Tok; }
+  const ParsedReg &getParsedReg() const { return R; }
+  const MCExpr *getExpr() const { return E; }
+  const ParsedMem &getMem() const { return M; }
+  const ParsedKeyword &getKeyword() const { return KW; }
+};
+
+class LinxISAAsmParser : public MCTargetAsmParser {
+public:
+  LinxISAAsmParser(const MCSubtargetInfo &STI, MCAsmParser & /*Parser*/,
+                   const MCInstrInfo &MII, const MCTargetOptions &Options)
+      : MCTargetAsmParser(Options, STI, MII) {}
+
+  void Initialize(MCAsmParser &Parser) override {
+    MCTargetAsmParser::Initialize(Parser);
+    // Allow tokens like `t#1`/`u#2` to be lexed as identifiers.
+    getLexer().setAllowHashInIdentifier(true);
+  }
+
+  bool parseRegister(MCRegister &Reg, SMLoc &StartLoc,
+                     SMLoc &EndLoc) override;
+
+  ParseStatus tryParseRegister(MCRegister &Reg, SMLoc &StartLoc,
+                               SMLoc &EndLoc) override;
+
+  bool parseInstruction(ParseInstructionInfo &Info, StringRef Name,
+                        SMLoc NameLoc, OperandVector &Operands) override;
+
+  bool matchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
+                               OperandVector &Operands, MCStreamer &Out,
+                               uint64_t &ErrorInfo,
+                               bool MatchingInlineAsm) override;
+  void convertToMapAndConstraints(unsigned Kind,
+                                  const OperandVector &Operands) override {}
+
+private:
+  bool parseRegOperand(ParsedReg &Out);
+  bool parseImmOperand(const MCExpr *&OutExpr, SMLoc &Start, SMLoc &End);
+  bool parseMemOperand(ParsedMem &OutMem);
+  bool parseArrowDestOperand(ParsedReg &OutDest);
+
+  bool buildParsedInst(OperandVector &Operands, ParsedInst &Out);
+  bool buildMCInstForForm(unsigned FormIndex, const ParsedInst &PI,
+                          MCInst &OutInst, std::string &Err);
+};
+
+static const StringMap<SmallVector<unsigned, 4>> &getMnemonicMap() {
+  static StringMap<SmallVector<unsigned, 4>> Map;
+  if (!Map.empty())
+    return Map;
+
+  auto addKey = [&](StringRef Key, unsigned Index) {
+    std::string Up = toUpperStr(Key);
+    Map[Up].push_back(Index);
+  };
+
+  for (unsigned i = 0; i < linxisa_inst_forms_count; ++i) {
+    const linxisa_inst_form &F = linxisa_inst_forms[i];
+    if (F.mnemonic && F.mnemonic[0])
+      addKey(F.mnemonic, i);
+
+    if (F.asm_fmt && F.asm_fmt[0]) {
+      StringRef Fmt(F.asm_fmt);
+      StringRef First = Fmt.split(' ').first;
+      First = First.rtrim(",");
+      if (!First.empty() && First[0] != '#')
+        addKey(First, i);
+    }
+
+    // Aliases for readability: treat `*.STD` as the default `*`.
+    if (F.mnemonic) {
+      StringRef M(F.mnemonic);
+      if (M.starts_with("BSTART.STD"))
+        addKey("BSTART", i);
+      if (M.starts_with("C.BSTART.STD"))
+        addKey("C.BSTART", i);
+    }
+  }
+
+  return Map;
+}
+
+ParseStatus LinxISAAsmParser::tryParseRegister(MCRegister &Reg,
+                                               SMLoc &StartLoc,
+                                               SMLoc &EndLoc) {
+  if (!getTok().is(AsmToken::Identifier))
+    return ParseStatus::NoMatch;
+
+  StringRef Tok = getTok().getString();
+  auto Code = parseRegCode(Tok);
+  if (!Code)
+    return ParseStatus::NoMatch;
+
+  StartLoc = getTok().getLoc();
+  EndLoc = getTok().getEndLoc();
+  Reg = regCodeToMCReg(*Code);
+  Lex();
+  return ParseStatus::Success;
+}
+
+bool LinxISAAsmParser::parseRegister(MCRegister &Reg, SMLoc &StartLoc,
+                                     SMLoc &EndLoc) {
+  ParseStatus S = tryParseRegister(Reg, StartLoc, EndLoc);
+  if (S.isSuccess())
+    return false;
+  return Error(getTok().getLoc(), "expected register");
+}
+
+bool LinxISAAsmParser::parseImmOperand(const MCExpr *&OutExpr, SMLoc &Start,
+                                       SMLoc &End) {
+  Start = getTok().getLoc();
+  if (getParser().parseExpression(OutExpr, End))
+    return true;
+  return false;
+}
+
+bool LinxISAAsmParser::parseRegOperand(ParsedReg &Out) {
+  if (!getTok().is(AsmToken::Identifier))
+    return Error(getTok().getLoc(), "expected register");
+
+  StringRef Tok = getTok().getString();
+  StringRef Base = Tok;
+  StringRef Suffix;
+  if (size_t Dot = Tok.find('.'); Dot != StringRef::npos) {
+    Base = Tok.take_front(Dot);
+    Suffix = Tok.drop_front(Dot + 1);
+  }
+
+  auto Code = parseRegCode(Base);
+  if (!Code)
+    return Error(getTok().getLoc(), "unknown register name");
+
+  Out = ParsedReg();
+  Out.Code = *Code;
+  Out.Loc = getTok().getLoc();
+
+  if (!Suffix.empty()) {
+    if (auto T = parseSrcRTypeSuffix(Suffix)) {
+      Out.SrcRType = *T;
+      Out.HasExplicitType = true;
+    }
+  }
+
+  Lex(); // consume reg token
+
+  // Optional shift: `<< N`.
+  if (getTok().is(AsmToken::LessLess)) {
+    Lex();
+    const MCExpr *ShiftExpr = nullptr;
+    SMLoc ShiftLoc, ShiftEnd;
+    if (parseImmOperand(ShiftExpr, ShiftLoc, ShiftEnd))
+      return true;
+    int64_t ShiftVal = 0;
+    if (!isConstExpr(ShiftExpr, ShiftVal) || ShiftVal < 0 || ShiftVal > 63)
+      return Error(ShiftLoc, "expected constant shift amount");
+    Out.Shamt = static_cast<unsigned>(ShiftVal);
+    Out.HasExplicitShift = true;
+  }
+
+  return false;
+}
+
+bool LinxISAAsmParser::parseMemOperand(ParsedMem &OutMem) {
+  SMLoc Start = getTok().getLoc();
+  if (parseToken(AsmToken::LBrac, "expected '['"))
+    return true;
+
+  ParsedReg Base;
+  if (parseRegOperand(Base))
+    return true;
+
+  if (parseToken(AsmToken::Comma, "expected ',' in memory operand"))
+    return true;
+
+  ParsedMem M;
+  M.Base = Base;
+  M.StartLoc = Start;
+
+  // Offset can be a register (index) or an expression (immediate).
+  if (getTok().is(AsmToken::Identifier)) {
+    // Try index register first.
+    StringRef Tok = getTok().getString();
+    StringRef BaseTok = Tok;
+    if (size_t Dot = Tok.find('.'); Dot != StringRef::npos)
+      BaseTok = Tok.take_front(Dot);
+    if (parseRegCode(BaseTok)) {
+      ParsedReg Index;
+      if (parseRegOperand(Index))
+        return true;
+      M.HasIndex = true;
+      M.Index = Index;
+    } else {
+      const MCExpr *Expr = nullptr;
+      SMLoc ExprLoc, ExprEnd;
+      if (parseImmOperand(Expr, ExprLoc, ExprEnd))
+        return true;
+      M.OffExpr = Expr;
+    }
+  } else {
+    const MCExpr *Expr = nullptr;
+    SMLoc ExprLoc, ExprEnd;
+    if (parseImmOperand(Expr, ExprLoc, ExprEnd))
+      return true;
+    M.OffExpr = Expr;
+  }
+
+  if (parseToken(AsmToken::RBrac, "expected ']'"))
+    return true;
+
+  M.EndLoc = getTok().getLoc();
+  OutMem = M;
+  return false;
+}
+
+bool LinxISAAsmParser::parseArrowDestOperand(ParsedReg &OutDest) {
+  if (parseToken(AsmToken::MinusGreater, "expected '->'"))
+    return true;
+
+  ParsedReg D;
+  D.Code = 30; // default: U-hand (`->`)
+  D.Loc = getTok().getLoc();
+
+  if (getTok().is(AsmToken::Identifier)) {
+    auto Code = parseRegCode(getTok().getString());
+    if (!Code)
+      return Error(getTok().getLoc(), "unknown destination after '->'");
+    D.Code = *Code;
+    Lex();
+  }
+
+  OutDest = D;
+  return false;
+}
+
+bool LinxISAAsmParser::parseInstruction(ParseInstructionInfo &Info,
+                                        StringRef Name, SMLoc NameLoc,
+                                        OperandVector &Operands) {
+  (void)Info;
+
+  Operands.push_back(LinxOperand::createToken(Name, NameLoc));
+
+  while (!getTok().is(AsmToken::EndOfStatement)) {
+    if (getTok().is(AsmToken::Comma)) {
+      Lex();
+      continue;
+    }
+
+    if (getTok().is(AsmToken::MinusGreater)) {
+      ParsedReg D;
+      if (parseArrowDestOperand(D))
+        return true;
+      Operands.push_back(LinxOperand::createArrowDest(D, getTok().getLoc()));
+      continue;
+    }
+
+    if (getTok().is(AsmToken::LBrac)) {
+      ParsedMem M;
+      if (parseMemOperand(M))
+        return true;
+      Operands.push_back(LinxOperand::createMem(M));
+      continue;
+    }
+
+    if (getTok().is(AsmToken::Identifier)) {
+      // Fused BSTART return-target syntax: `ra=<label>`.
+      if (getTok().getString().equals_insensitive("ra") &&
+          getLexer().peekTok().is(AsmToken::Equal)) {
+        SMLoc Start = getTok().getLoc();
+        Lex();
+        if (parseToken(AsmToken::Equal, "expected '=' after 'ra'"))
+          return true;
+
+        const MCExpr *Expr = nullptr;
+        SMLoc ExprStart, ExprEnd;
+        if (parseImmOperand(Expr, ExprStart, ExprEnd))
+          return true;
+        Operands.push_back(
+            LinxOperand::createSetRetTarget(Expr, Start, ExprEnd));
+        continue;
+      }
+
+      // Keywords used by block headers (BSTART/C.BSTART).
+      if (auto Br = parseBrType(getTok().getString())) {
+        SMLoc L = getTok().getLoc();
+        SMLoc E = getTok().getEndLoc();
+        StringRef T = getTok().getString();
+        Lex();
+        Operands.push_back(LinxOperand::createKeyword(T, L, E));
+        continue;
+      }
+
+      // Registers (including suffixed forms like a0.sw).
+      StringRef Tok = getTok().getString();
+      StringRef BaseTok = Tok;
+      if (size_t Dot = Tok.find('.'); Dot != StringRef::npos)
+        BaseTok = Tok.take_front(Dot);
+      if (parseRegCode(BaseTok)) {
+        ParsedReg R;
+        if (parseRegOperand(R))
+          return true;
+        Operands.push_back(LinxOperand::createReg(R, getTok().getLoc()));
+        continue;
+      }
+
+      // Otherwise treat as expression.
+      const MCExpr *Expr = nullptr;
+      SMLoc Start, End;
+      if (parseImmOperand(Expr, Start, End))
+        return true;
+      Operands.push_back(LinxOperand::createImm(Expr, Start, End));
+      continue;
+    }
+
+    // Expression (numbers, symbols with +/-).
+    const MCExpr *Expr = nullptr;
+    SMLoc Start, End;
+    if (parseImmOperand(Expr, Start, End))
+      return true;
+    Operands.push_back(LinxOperand::createImm(Expr, Start, End));
+  }
+
+  return false;
+}
+
+bool LinxISAAsmParser::buildParsedInst(OperandVector &Operands, ParsedInst &Out) {
+  Out = ParsedInst();
+  for (unsigned i = 1; i < Operands.size(); ++i) {
+    auto *Op = static_cast<LinxOperand *>(Operands[i].get());
+    switch (Op->getKind()) {
+    case LinxOperand::Reg:
+      Out.Regs.push_back(Op->getParsedReg());
+      break;
+    case LinxOperand::ArrowDest:
+      Out.ArrowDest = Op->getParsedReg();
+      break;
+    case LinxOperand::Imm: {
+      ParsedImm I;
+      I.Expr = Op->getExpr();
+      I.Loc = Op->getStartLoc();
+      Out.Imms.push_back(I);
+      break;
+    }
+    case LinxOperand::SetRetTarget: {
+      ParsedImm I;
+      I.Expr = Op->getExpr();
+      I.Loc = Op->getStartLoc();
+      Out.SetRetTarget = I;
+      break;
+    }
+    case LinxOperand::Mem:
+      Out.Mem = Op->getMem();
+      break;
+    case LinxOperand::Keyword:
+      Out.Keywords.push_back(Op->getKeyword());
+      break;
+    case LinxOperand::Token:
+      break;
+    }
+  }
+  return false;
+}
+
+static bool hasField(const linxisa_inst_form &Form, StringRef FieldName) {
+  for (unsigned i = 0; i < Form.field_count; ++i) {
+    const linxisa_field &F = linxisa_fields[Form.field_start + i];
+    if (!F.name)
+      continue;
+    if (FieldName == StringRef(F.name))
+      return true;
+  }
+  return false;
+}
+
+bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &PI,
+                                          MCInst &OutInst, std::string &Err) {
+  const linxisa_inst_form &Form = linxisa_inst_forms[FormIndex];
+  StringRef AsmFmt(Form.asm_fmt ? Form.asm_fmt : "");
+
+  auto require = [&](bool Cond, const Twine &Msg) -> bool {
+    if (!Cond) {
+      Err = Msg.str();
+      return false;
+    }
+    return true;
+  };
+
+  OutInst.clear();
+  OutInst.setOpcode(FormIndex);
+
+  // Helpers for emitting a field value in spec order.
+  auto emitFieldImm = [&](int64_t V) { OutInst.addOperand(MCOperand::createImm(V)); };
+  auto emitFieldExpr = [&](const MCExpr *E) {
+    OutInst.addOperand(MCOperand::createExpr(E));
+  };
+
+  // Special-case: setret/c.setret/hl.setret.
+  if (AsmFmt.starts_with_insensitive("setret") ||
+      AsmFmt.starts_with_insensitive("c.setret") ||
+      AsmFmt.starts_with_insensitive("hl.setret")) {
+    if (!require(PI.Imms.size() == 1, "expected target for setret"))
+      return false;
+    if (!require(PI.Regs.empty() && PI.Keywords.empty() && !PI.Mem &&
+                     !PI.ArrowDest && !PI.SetRetTarget,
+                 "unexpected operands for setret"))
+      return false;
+    const MCExpr *Target = PI.Imms[0].Expr;
+    int64_t V = 0;
+    bool IsConst = isConstExpr(Target, V);
+
+    if (!require(Form.field_count == 1, "unexpected setret field layout"))
+      return false;
+    if (IsConst)
+      emitFieldImm(V);
+    else
+      emitFieldExpr(Target);
+    return true;
+  }
+
+  // BSTOP/C.BSTOP: no operands.
+  if (AsmFmt.equals_insensitive("bstop") || AsmFmt.equals_insensitive("c.bstop")) {
+    if (!require(Form.field_count == 0, "unexpected bstop field layout"))
+      return false;
+    if (!require(PI.Regs.empty() && PI.Imms.empty() && PI.Keywords.empty() &&
+                     !PI.Mem && !PI.ArrowDest && !PI.SetRetTarget,
+                 "unexpected operands for bstop"))
+      return false;
+    return true;
+  }
+
+  // Block headers: BSTART/C.BSTART/HL.BSTART (branch-kind forms only).
+  const bool IsBStartBranchHeader =
+      (AsmFmt.starts_with_insensitive("bstart") ||
+       AsmFmt.starts_with_insensitive("c.bstart") ||
+       AsmFmt.starts_with_insensitive("hl.bstart")) &&
+      (hasField(Form, "BrType") || AsmFmt.contains_insensitive("{DIRECT, CALL}") ||
+       AsmFmt.contains_insensitive(" FALL") || AsmFmt.contains_insensitive(" DIRECT") ||
+       AsmFmt.contains_insensitive(" COND") || AsmFmt.contains_insensitive(" CALL") ||
+       AsmFmt.contains_insensitive(" ICALL") || AsmFmt.contains_insensitive(" IND") ||
+       AsmFmt.contains_insensitive(" RET"));
+
+  if (IsBStartBranchHeader) {
+    if (!require(PI.Regs.empty() && !PI.Mem && !PI.ArrowDest && !PI.SetRetTarget,
+                 "unexpected operands for bstart"))
+      return false;
+    if (!require(PI.Keywords.size() <= 1, "too many branch kind operands"))
+      return false;
+    if (!require(PI.Imms.size() <= 1, "too many immediate operands"))
+      return false;
+
+    std::optional<unsigned> BrTypeVal;
+    if (!PI.Keywords.empty()) {
+      BrTypeVal = parseBrType(PI.Keywords[0].TextUpper);
+      if (!require(BrTypeVal.has_value(), "unknown branch kind (BrType)"))
+        return false;
+    } else if (hasField(Form, "BrType")) {
+      // FALL is the default when the branch kind is omitted.
+      BrTypeVal = 1u;
+    }
+
+    const MCExpr *LabelExpr = nullptr;
+    if (!PI.Imms.empty())
+      LabelExpr = PI.Imms[0].Expr;
+
+    const bool HasBrTypeField = hasField(Form, "BrType");
+    bool HasLabelField = false;
+    for (unsigned i = 0; i < Form.field_count; ++i) {
+      StringRef FN(linxisa_fields[Form.field_start + i].name);
+      if (FN.starts_with("simm") || FN.starts_with("imm")) {
+        HasLabelField = true;
+        break;
+      }
+    }
+
+    const BStartKind WantKind =
+        BrTypeVal ? brTypeToBStartKind(*BrTypeVal) : BStartKind::Unknown;
+    const BStartKind FormKind = bstartKindFromAsmFmt(AsmFmt);
+    const BStartKind EffectiveKind =
+        HasBrTypeField ? WantKind : FormKind;
+
+    // If the encoding carries BrType, use the parsed/defaulted branch kind.
+    if (HasBrTypeField && !require(BrTypeVal.has_value(),
+                                   "expected branch kind (BrType)"))
+      return false;
+
+    // If the encoding does not carry BrType, ensure the requested kind matches
+    // the chosen encoding.
+    if (!HasBrTypeField && BrTypeVal.has_value()) {
+      if (!require(FormKind != BStartKind::Unknown,
+                   "unknown BSTART encoding kind"))
+        return false;
+      const bool KindOK =
+          (FormKind == WantKind) ||
+          (FormKind == BStartKind::DirectOrCall &&
+           (WantKind == BStartKind::Direct || WantKind == BStartKind::Call));
+      if (!require(KindOK, "branch kind does not match BSTART encoding"))
+        return false;
+    } else if (!HasBrTypeField && !BrTypeVal.has_value()) {
+      // Without an explicit kind, only FALL forms are valid.
+      if (!require(FormKind == BStartKind::Fall,
+                   "expected branch kind (e.g. FALL/DIRECT/CALL)"))
+        return false;
+    }
+
+    // Require a label operand for encodings that carry a label.
+    if (LabelExpr && !HasLabelField)
+      return require(false, "unexpected label operand for this BSTART encoding");
+
+    if (HasLabelField) {
+      const bool NeedsLabel =
+          EffectiveKind == BStartKind::Direct || EffectiveKind == BStartKind::Cond ||
+          EffectiveKind == BStartKind::Call ||
+          EffectiveKind == BStartKind::DirectOrCall;
+      if (EffectiveKind == BStartKind::Fall || EffectiveKind == BStartKind::Unknown) {
+        // FALL encodings may include an optional fixup label.
+      } else if (NeedsLabel) {
+        if (!require(LabelExpr != nullptr, "expected branch target label"))
+          return false;
+      } else {
+        if (!require(LabelExpr == nullptr, "unexpected branch target label"))
+          return false;
+      }
+    }
+
+    unsigned BlockTypeVal = 0;
+    if (hasField(Form, "BlockType")) {
+      if (auto BT = parseBlockTypeFromMnemonic(AsmFmt.split(' ').first))
+        BlockTypeVal = *BT;
+    }
+
+    // Fill fields in encoding order.
+    for (unsigned i = 0; i < Form.field_count; ++i) {
+      StringRef FN(linxisa_fields[Form.field_start + i].name);
+      if (FN == "BrType") {
+        if (!require(BrTypeVal.has_value(), "expected branch kind (BrType)"))
+          return false;
+        emitFieldImm(*BrTypeVal);
+        continue;
+      }
+      if (FN == "BlockType") {
+        emitFieldImm(BlockTypeVal);
+        continue;
+      }
+      if (FN.starts_with("simm") || FN.starts_with("imm")) {
+        if (!LabelExpr) {
+          emitFieldImm(0);
+          continue;
+        }
+        int64_t V = 0;
+        if (isConstExpr(LabelExpr, V))
+          emitFieldImm(V);
+        else
+          emitFieldExpr(LabelExpr);
+        continue;
+      }
+      Err = ("unsupported BSTART field: " + FN).str();
+      return false;
+    }
+    return true;
+  }
+
+  // Memory ops.
+  if (AsmFmt.contains('[')) {
+    if (!require(PI.Mem.has_value(), "expected memory operand"))
+      return false;
+
+    const ParsedMem &M = *PI.Mem;
+    const bool IsLoad = AsmFmt.contains("->");
+
+    // Determine base field from the asm template: `[SrcL, ...]` / `[SrcR, ...]`.
+    StringRef BaseField = "SrcL";
+    if (size_t L = AsmFmt.find('['); L != StringRef::npos) {
+      StringRef Inside = AsmFmt.substr(L + 1);
+      Inside = Inside.split(']').first;
+      StringRef BasePart = Inside.split(',').first.trim();
+      if (BasePart.starts_with_insensitive("srcr"))
+        BaseField = "SrcR";
+      else if (BasePart.starts_with_insensitive("srcl"))
+        BaseField = "SrcL";
+    }
+
+    // For stores, detect encoded value field (SrcD or SrcL). Otherwise value is implicit.
+    std::optional<StringRef> ValueField;
+    if (!IsLoad) {
+      StringRef Prefix = AsmFmt;
+      if (size_t L = Prefix.find('['); L != StringRef::npos)
+        Prefix = Prefix.take_front(L);
+      if (Prefix.contains_insensitive("SrcD"))
+        ValueField = "SrcD";
+      else if (Prefix.contains_insensitive("SrcL"))
+        ValueField = "SrcL";
+    }
+
+    // Provide field values.
+    if (!IsLoad && ValueField.has_value())
+      if (!require(PI.Regs.size() >= 1, "expected store value register"))
+        return false;
+
+    int64_t Scale = memScaleFromMnemonic(Form.mnemonic ? StringRef(Form.mnemonic)
+                                                       : StringRef());
+
+    for (unsigned i = 0; i < Form.field_count; ++i) {
+      StringRef FN(linxisa_fields[Form.field_start + i].name);
+
+      if (FN == "RegDst") {
+        if (!require(IsLoad, "unexpected RegDst on store"))
+          return false;
+        if (!require(PI.ArrowDest.has_value(), "expected destination after '->'"))
+          return false;
+        emitFieldImm(static_cast<int64_t>(PI.ArrowDest->Code));
+        continue;
+      }
+
+      if (FN == BaseField) {
+        emitFieldImm(static_cast<int64_t>(M.Base.Code));
+        continue;
+      }
+
+      if (FN == "SrcD" && !IsLoad) {
+        if (!require(ValueField.has_value() && *ValueField == "SrcD",
+                     "unexpected SrcD for this store"))
+          return false;
+        emitFieldImm(static_cast<int64_t>(PI.Regs[0].Code));
+        continue;
+      }
+
+      if (FN == "SrcL" && !IsLoad && ValueField.has_value() && *ValueField == "SrcL") {
+        emitFieldImm(static_cast<int64_t>(PI.Regs[0].Code));
+        continue;
+      }
+
+      if (FN == "SrcR") {
+        if (M.HasIndex) {
+          emitFieldImm(static_cast<int64_t>(M.Index.Code));
+          continue;
+        }
+        // If this is an imm-offset form, SrcR might be the base field.
+        if (BaseField == "SrcR") {
+          emitFieldImm(static_cast<int64_t>(M.Base.Code));
+          continue;
+        }
+      }
+
+      if (FN == "SrcRType") {
+        if (!require(M.HasIndex, "expected register offset for SrcRType"))
+          return false;
+        emitFieldImm(static_cast<int64_t>(M.Index.SrcRType));
+        continue;
+      }
+
+      if (FN == "shamt") {
+        if (M.HasIndex) {
+          emitFieldImm(static_cast<int64_t>(M.Index.Shamt));
+          continue;
+        }
+        emitFieldImm(0);
+        continue;
+      }
+
+      if (FN.starts_with("simm") || FN.starts_with("uimm")) {
+        if (!require(!M.HasIndex, "expected immediate offset in memory operand"))
+          return false;
+        if (!require(M.OffExpr != nullptr, "missing memory offset"))
+          return false;
+        int64_t ByteOff = 0;
+        if (!require(isConstExpr(M.OffExpr, ByteOff),
+                     "memory offsets must be constant for now"))
+          return false;
+        if (!require(Scale != 0 && (ByteOff % Scale) == 0,
+                     "memory offset is not aligned for instruction scale"))
+          return false;
+        emitFieldImm(ByteOff / Scale);
+        continue;
+      }
+
+      Err = ("unsupported memory field: " + FN).str();
+      return false;
+    }
+
+    // Sanity: for stores with an explicit encoded value reg, require it be present.
+    if (!IsLoad && ValueField.has_value())
+      if (!require(PI.Regs.size() >= 1, "expected store value register"))
+        return false;
+
+    return true;
+  }
+
+  // Non-memory ops: map register sources in common order and immediates in
+  // field order. SrcRType/shamt are treated as attributes of SrcR when present.
+  if (!require(!PI.Mem.has_value(), "unexpected memory operand"))
+    return false;
+
+  unsigned RegIdx = 0;
+  unsigned ImmIdx = 0;
+  std::optional<ParsedReg> SrcROp;
+
+  auto takeReg = [&]() -> std::optional<ParsedReg> {
+    if (RegIdx >= PI.Regs.size())
+      return std::nullopt;
+    return PI.Regs[RegIdx++];
+  };
+
+  auto takeImmExpr = [&]() -> const MCExpr * {
+    if (ImmIdx >= PI.Imms.size())
+      return nullptr;
+    return PI.Imms[ImmIdx++].Expr;
+  };
+
+  for (unsigned i = 0; i < Form.field_count; ++i) {
+    StringRef FN(linxisa_fields[Form.field_start + i].name);
+
+    if (FN == "RegDst") {
+      if (!require(PI.ArrowDest.has_value(), "expected destination after '->'"))
+        return false;
+      emitFieldImm(static_cast<int64_t>(PI.ArrowDest->Code));
+      continue;
+    }
+
+    if (FN == "SrcL" || FN == "SrcD" || FN == "SrcP" || FN == "SrcA") {
+      auto R = takeReg();
+      if (!require(R.has_value(), "missing register operand"))
+        return false;
+      emitFieldImm(static_cast<int64_t>(R->Code));
+      continue;
+    }
+
+    if (FN == "SrcR") {
+      auto R = takeReg();
+      if (!require(R.has_value(), "missing SrcR operand"))
+        return false;
+      SrcROp = *R;
+      emitFieldImm(static_cast<int64_t>(R->Code));
+      continue;
+    }
+
+    if (FN == "SrcRType") {
+      if (!require(SrcROp.has_value(), "missing SrcR for SrcRType"))
+        return false;
+      emitFieldImm(static_cast<int64_t>(SrcROp->SrcRType));
+      continue;
+    }
+
+    if (FN == "shamt") {
+      if (hasField(Form, "SrcR")) {
+        // Shift attached to SrcR operand.
+        if (SrcROp.has_value())
+          emitFieldImm(static_cast<int64_t>(SrcROp->Shamt));
+        else
+          emitFieldImm(0);
+        continue;
+      }
+      const MCExpr *E = takeImmExpr();
+      if (!require(E != nullptr, "missing shamt immediate"))
+        return false;
+      int64_t V = 0;
+      if (!require(isConstExpr(E, V), "shamt must be a constant"))
+        return false;
+      emitFieldImm(V);
+      continue;
+    }
+
+    if (FN.starts_with("simm") || FN.starts_with("uimm") || FN.starts_with("imm")) {
+      const MCExpr *E = takeImmExpr();
+      if (!require(E != nullptr, "missing immediate operand"))
+        return false;
+      int64_t V = 0;
+      if (isConstExpr(E, V))
+        emitFieldImm(V);
+      else
+        emitFieldExpr(E);
+      continue;
+    }
+
+    Err = ("unsupported field: " + FN).str();
+    return false;
+  }
+
+  // Require full consumption of operands for a stable syntax.
+  if (!require(RegIdx == PI.Regs.size(), "too many register operands"))
+    return false;
+  if (!require(ImmIdx == PI.Imms.size(), "too many immediate operands"))
+    return false;
+  if (!require(PI.Keywords.empty(), "unexpected keyword operands"))
+    return false;
+
+  return true;
+}
+
+bool LinxISAAsmParser::matchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
+                                               OperandVector &Operands,
+                                               MCStreamer &Out,
+                                               uint64_t &ErrorInfo,
+                                               bool MatchingInlineAsm) {
+  (void)Opcode;
+  (void)ErrorInfo;
+  (void)MatchingInlineAsm;
+
+  if (Operands.empty())
+    return Error(IDLoc, "empty instruction");
+
+  auto *TokOp = static_cast<LinxOperand *>(Operands[0].get());
+  StringRef Mnemonic = TokOp->getToken();
+  std::string Key = toUpperStr(Mnemonic);
+
+  const auto &Map = getMnemonicMap();
+  auto It = Map.find(Key);
+  if (It == Map.end())
+    return Error(IDLoc, ("unknown instruction '" + Mnemonic + "'").str());
+
+  ParsedInst PI;
+  buildParsedInst(Operands, PI);
+
+  // Fused syntax: `BSTART CALL, <target>, ra=<return>`.
+  if (PI.SetRetTarget.has_value()) {
+    StringRef KeyRef(Key);
+    const bool IsBStart =
+        KeyRef == "BSTART" || KeyRef.starts_with("BSTART.") ||
+        KeyRef == "C.BSTART" || KeyRef.starts_with("C.BSTART.") ||
+        KeyRef == "HL.BSTART" || KeyRef.starts_with("HL.BSTART.");
+    if (!IsBStart)
+      return Error(IDLoc, "unexpected 'ra=' operand (only valid for BSTART)");
+    if (PI.Keywords.empty() || PI.Keywords[0].TextUpper != "CALL")
+      return Error(IDLoc, "expected 'CALL' for fused BSTART 'ra=' syntax");
+    if (PI.Imms.empty() || !PI.Imms[0].Expr)
+      return Error(IDLoc, "expected call target label for BSTART CALL");
+
+    ParsedInst BStartPI = PI;
+    BStartPI.SetRetTarget.reset();
+
+    struct Match {
+      unsigned Index = 0;
+      MCInst Inst;
+      unsigned FixedBits = 0;
+      unsigned LengthBits = 0;
+    };
+
+    std::optional<Match> Best;
+    std::string LastErr;
+
+    for (unsigned FormIndex : It->second) {
+      const linxisa_inst_form &F = linxisa_inst_forms[FormIndex];
+      MCInst MI;
+      std::string Err;
+      if (!buildMCInstForForm(FormIndex, BStartPI, MI, Err)) {
+        LastErr = Err;
+        continue;
+      }
+
+      Match M;
+      M.Index = FormIndex;
+      M.Inst = MI;
+      M.FixedBits = llvm::popcount(static_cast<uint64_t>(F.mask));
+      M.LengthBits = F.length_bits;
+
+      if (!Best || M.FixedBits > Best->FixedBits ||
+          (M.FixedBits == Best->FixedBits && M.LengthBits < Best->LengthBits)) {
+        Best = M;
+      }
+    }
+
+    if (!Best) {
+      if (!LastErr.empty())
+        return Error(IDLoc, LastErr);
+      return Error(IDLoc, "no matching encoding for instruction");
+    }
+
+    Out.emitInstruction(Best->Inst, getSTI());
+
+    auto SetRetIt = Map.find("C.SETRET");
+    if (SetRetIt == Map.end())
+      return Error(IDLoc, "missing C.SETRET encoding table");
+
+    ParsedInst SetRetPI;
+    SetRetPI.Imms.push_back(*PI.SetRetTarget);
+
+    // C.SETRET is a single encoding; build it directly.
+    MCInst SetRetMI;
+    std::string SetRetErr;
+    bool Built = false;
+    for (unsigned FormIndex : SetRetIt->second) {
+      if (buildMCInstForForm(FormIndex, SetRetPI, SetRetMI, SetRetErr)) {
+        Built = true;
+        break;
+      }
+    }
+    if (!Built)
+      return Error(IDLoc, SetRetErr.empty() ? "failed to build C.SETRET" : SetRetErr);
+
+    Out.emitInstruction(SetRetMI, getSTI());
+    return false;
+  }
+
+  struct Match {
+    unsigned Index = 0;
+    MCInst Inst;
+    unsigned FixedBits = 0;
+    unsigned LengthBits = 0;
+  };
+
+  std::optional<Match> Best;
+  std::string LastErr;
+
+  for (unsigned FormIndex : It->second) {
+    const linxisa_inst_form &F = linxisa_inst_forms[FormIndex];
+    MCInst MI;
+    std::string Err;
+    if (!buildMCInstForForm(FormIndex, PI, MI, Err)) {
+      LastErr = Err;
+      continue;
+    }
+
+    Match M;
+    M.Index = FormIndex;
+    M.Inst = MI;
+    M.FixedBits = llvm::popcount(static_cast<uint64_t>(F.mask));
+    M.LengthBits = F.length_bits;
+
+    if (!Best || M.FixedBits > Best->FixedBits ||
+        (M.FixedBits == Best->FixedBits && M.LengthBits < Best->LengthBits)) {
+      Best = M;
+    }
+  }
+
+  if (!Best) {
+    if (!LastErr.empty())
+      return Error(IDLoc, LastErr);
+    return Error(IDLoc, "no matching encoding for instruction");
+  }
+
+  Out.emitInstruction(Best->Inst, getSTI());
+  return false;
+}
+
+} // namespace
+
+extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeLinxISAAsmParser() {
+  RegisterMCAsmParser<LinxISAAsmParser> X(getTheLinx32Target());
+  RegisterMCAsmParser<LinxISAAsmParser> Y(getTheLinx64Target());
+}

@@ -106,6 +106,56 @@ let Defs = [R1], Uses = [R1] in {
 }
 
 //===----------------------------------------------------------------------===//
+// Function Entry/Exit Macro Instructions (LinxISA spec)
+//===----------------------------------------------------------------------===//
+// These are hardware macro instructions that expand to prologue/epilogue code.
+// Syntax: FENTRY/FEXIT/FRET.STK [ra ~ sN], sp!, stacksize
+//
+// The register range [Begin ~ End] specifies which registers to save/restore.
+// Stack size is encoded in the uimm field (8-byte aligned).
+
+// Operands for FENTRY/FEXIT family
+def fentry_stacksize : Operand<i64>, PatLeaf<(i64 imm), [{ 
+  int64_t val = N->getSExtValue();
+  return val >= 0 && val <= 32760 && (val & 7) == 0; // 15-bit, 8-byte aligned
+}]> {
+  let ParserMatchClass = ImmAsmOperand;
+}
+
+def fentry_regbegin : Operand<i64>, PatLeaf<(i64 imm), [{
+  return isUInt<5>(N->getZExtValue());
+}]> {
+  let ParserMatchClass = ImmAsmOperand;
+}
+
+def fentry_regend : Operand<i64>, PatLeaf<(i64 imm), [{
+  return isUInt<5>(N->getZExtValue());
+}]> {
+  let ParserMatchClass = ImmAsmOperand;
+}
+
+// FENTRY (32-bit): Function entry - save registers [Begin ~ End], adjust SP
+// Syntax: FENTRY [ra ~ s2], sp!, 256
+let hasSideEffects = 1, mayStore = 1, Size = 4, Defs = [R1] in
+def FENTRY : LinxISAInst<(outs), (ins fentry_regbegin:$begin, fentry_regend:$end, fentry_stacksize:$stacksize), "", []>;
+
+// FEXIT (32-bit): Function exit - restore registers, adjust SP (for indirect return)
+// Used with subsequent IND block for computed return address
+let hasSideEffects = 1, mayLoad = 1, Size = 4, Uses = [R1], Defs = [R1] in
+def FEXIT : LinxISAInst<(outs), (ins fentry_regbegin:$begin, fentry_regend:$end, fentry_stacksize:$stacksize), "", []>;
+
+// FRET.RA (32-bit): Function return via RA - restore registers, adjust SP, return
+let hasSideEffects = 1, mayLoad = 1, isReturn = 1, isTerminator = 1, isBarrier = 1,
+    Size = 4, Uses = [R1, R10], Defs = [R1] in
+def FRET_RA : LinxISAInst<(outs), (ins fentry_regbegin:$begin, fentry_regend:$end, fentry_stacksize:$stacksize), "", []>;
+
+// FRET.STK (32-bit): Function return via stack - restore registers, adjust SP, return
+// This is the most common return instruction for non-leaf functions
+let hasSideEffects = 1, mayLoad = 1, isReturn = 1, isTerminator = 1, isBarrier = 1,
+    Size = 4, Uses = [R1], Defs = [R1, R10] in
+def FRET_STK : LinxISAInst<(outs), (ins fentry_regbegin:$begin, fentry_regend:$end, fentry_stacksize:$stacksize), "", []>;
+
+//===----------------------------------------------------------------------===//
 // Integer arithmetic/logical ops (selected by patterns)
 //===----------------------------------------------------------------------===//
 
@@ -305,9 +355,11 @@ def CMPLTU : LinxISAInst<(outs GPR:$rd), (ins GPR:$rs1, GPR:$rs2), "", []>;
 def CMPGEU : LinxISAInst<(outs GPR:$rd), (ins GPR:$rs1, GPR:$rs2), "", []>;
 
 // Conditional select. SrcP is a 0/1 predicate value.
+// Note: The predicate must be in an architectural GPR (not T/U queue),
+// because Blockify may rewrite T/U queue values after the comparison.
 let isSelect = 1 in
 def CSELrrr : LinxISAInst<(outs GPR:$rd),
-                          (ins GPR:$pred, GPR:$src_true, GPR:$src_false),
+                          (ins GPR_Arch:$pred, GPR:$src_true, GPR:$src_false),
                           "", []>;
 
 // Multiply/divide/remainder (selected by patterns)

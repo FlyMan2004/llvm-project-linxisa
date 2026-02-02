@@ -389,6 +389,7 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
     int64_t Val = C->getSExtValue();
 
     if (VT == MVT::i64) {
+      const uint64_t UVal = C->getZExtValue();
       if (Val >= 0 && isUInt<12>(Val)) {
         SDValue Imm = CurDAG->getTargetConstant(Val, DL, MVT::i64);
         SDValue Zero = CurDAG->getRegister(LinxISA::R0, MVT::i64);
@@ -440,6 +441,54 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
         ReplaceNode(N, Shr.getNode());
         return;
       }
+
+      // Generic 64-bit materialization: build from high/low 32-bit halves.
+      //
+      //   hi = sext_i64((int32_t)(UVal >> 32))
+      //   lo = zext_i64((uint32_t)UVal)
+      //   res = (hi << 32) | lo
+      //
+      // This avoids the bring-up fatal error for i64 constants used in tests
+      // and allows the backend to select legal i64 materializations without
+      // requiring HL.* immediate arithmetic instructions.
+      uint32_t Hi32 = static_cast<uint32_t>(UVal >> 32);
+      uint32_t Lo32 = static_cast<uint32_t>(UVal & 0xffffffffu);
+
+      SDValue Zero = CurDAG->getRegister(LinxISA::R0, MVT::i64);
+      SDValue ShImm32 = CurDAG->getTargetConstant(32, DL, MVT::i64);
+      SDValue ShAmt32 =
+          SDValue(CurDAG->getMachineNode(LinxISA::ADDIri, DL, MVT::i64, Zero,
+                                         ShImm32),
+                  0);
+
+      // Load hi32 (sign-extended) and shift it into the upper 32 bits.
+      SDValue HiImm = CurDAG->getTargetConstant(
+          static_cast<int64_t>(static_cast<int32_t>(Hi32)), DL, MVT::i64);
+      SDValue Hi =
+          SDValue(CurDAG->getMachineNode(LinxISA::HLLUI, DL, MVT::i64, HiImm),
+                  0);
+      SDValue HiShifted =
+          SDValue(CurDAG->getMachineNode(LinxISA::SLLrr, DL, MVT::i64, Hi,
+                                         ShAmt32),
+                  0);
+
+      // Load lo32 and clear the upper 32 bits to obtain a zero-extended i64.
+      SDValue LoImm = CurDAG->getTargetConstant(
+          static_cast<int64_t>(static_cast<int32_t>(Lo32)), DL, MVT::i64);
+      SDValue Lo =
+          SDValue(CurDAG->getMachineNode(LinxISA::HLLUI, DL, MVT::i64, LoImm),
+                  0);
+      SDValue LoShl = SDValue(
+          CurDAG->getMachineNode(LinxISA::SLLrr, DL, MVT::i64, Lo, ShAmt32), 0);
+      SDValue LoZext = SDValue(CurDAG->getMachineNode(LinxISA::SRLrr, DL,
+                                                      MVT::i64, LoShl, ShAmt32),
+                               0);
+
+      SDValue Res = SDValue(CurDAG->getMachineNode(LinxISA::ORrr, DL, MVT::i64,
+                                                   HiShifted, LoZext),
+                            0);
+      ReplaceNode(N, Res.getNode());
+      return;
     } else if (VT == MVT::i32) {
       if (Val >= 0 && isUInt<12>(Val)) {
         SDValue Imm = CurDAG->getTargetConstant(Val, DL, MVT::i32);

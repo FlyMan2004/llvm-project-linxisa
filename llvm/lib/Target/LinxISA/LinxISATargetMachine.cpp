@@ -32,12 +32,28 @@ getEffectiveRelocModel(std::optional<Reloc::Model> RM) {
   return RM.value_or(Reloc::Static);
 }
 
+static TargetOptions getEffectiveTargetOptions(const TargetOptions &Options) {
+  TargetOptions Opts = Options;
+
+  // LinxISA bring-up defaults to soft-float: the backend currently expands FP
+  // operations to libcalls (e.g. __adddf3). If FloatABI stays as Default, the
+  // runtime-libcalls set may not mark these implementations as available,
+  // causing "unsupported library call operation" fatal errors during
+  // legalization.
+  if (Opts.FloatABIType == FloatABI::Default) {
+    Opts.FloatABIType = FloatABI::Soft;
+  }
+
+  return Opts;
+}
+
 LinxISATargetMachine::LinxISATargetMachine(
     const Target &T, const Triple &TT, StringRef CPU, StringRef FS,
     const TargetOptions &Options, std::optional<Reloc::Model> RM,
     std::optional<CodeModel::Model> CM, CodeGenOptLevel OL, bool JIT)
     : CodeGenTargetMachineImpl(
-          T, TT.computeDataLayout(), TT, CPU, FS, Options,
+          T, TT.computeDataLayout(), TT, CPU, FS,
+          getEffectiveTargetOptions(Options),
           getEffectiveRelocModel(RM),
           getEffectiveCodeModel(CM, CodeModel::Small), OL),
       TLOF(std::make_unique<TargetLoweringObjectFileELF>()),

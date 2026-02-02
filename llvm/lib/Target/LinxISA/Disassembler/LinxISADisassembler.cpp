@@ -1,6 +1,7 @@
 #include "MCTargetDesc/LinxISAOpcodeTables.h"
 #include "TargetInfo/LinxISATargetInfo.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
@@ -105,8 +106,27 @@ static void extractFields(const linxisa_inst_form &Form, uint64_t Insn,
   }
 }
 
+static bool isBStartCall(const linxisa_inst_form &Form) {
+  StringRef AsmFmt(Form.asm_fmt ? Form.asm_fmt : "");
+  return (AsmFmt.starts_with_insensitive("bstart") ||
+          AsmFmt.starts_with_insensitive("hl.bstart")) &&
+         AsmFmt.contains_insensitive(" call,");
+}
+
+static bool isSetRet(const linxisa_inst_form &Form) {
+  StringRef AsmFmt(Form.asm_fmt ? Form.asm_fmt : "");
+  return AsmFmt.starts_with_insensitive("setret") ||
+         AsmFmt.starts_with_insensitive("c.setret") ||
+         AsmFmt.starts_with_insensitive("hl.setret");
+}
+
+static bool isSignedSetRet(const linxisa_inst_form &Form) {
+  StringRef AsmFmt(Form.asm_fmt ? Form.asm_fmt : "");
+  return AsmFmt.starts_with_insensitive("hl.setret");
+}
+
 MCDisassembler::DecodeStatus LinxISADisassembler::getInstruction(
-    MCInst &Instr, uint64_t &Size, ArrayRef<uint8_t> Bytes, uint64_t /*Address*/,
+    MCInst &Instr, uint64_t &Size, ArrayRef<uint8_t> Bytes, uint64_t Address,
     raw_ostream & /*CStream*/) const {
   // Try decode lengths in ascending order. Prefix-only encodings should fail at
   // shorter lengths and match at the full length.
@@ -147,6 +167,56 @@ MCDisassembler::DecodeStatus LinxISADisassembler::getInstruction(
   extractFields(*Matched, Insn, FieldVals);
   for (int64_t V : FieldVals)
     Instr.addOperand(MCOperand::createImm(V));
+
+  // Disassembler sugar: fuse `BSTART ... CALL` + `SETRET` into a single
+  // printed instruction, while still consuming both encodings.
+  if (isBStartCall(*Matched)) {
+    const uint64_t BStartSize = Size;
+    ArrayRef<uint8_t> Tail = Bytes.drop_front(BStartSize);
+
+    unsigned NextOpcode = 0;
+    const linxisa_inst_form *NextForm = nullptr;
+    unsigned NextBits = 0;
+
+    for (unsigned Bits : CandidateBits) {
+      if (!isSupportedLength(Bits))
+        continue;
+      unsigned SizeBytes = Bits / 8;
+      if (Tail.size() < SizeBytes)
+        continue;
+      uint64_t NextInsn = readLE(Tail, SizeBytes);
+      const linxisa_inst_form *Form = findMatch(NextInsn, Bits, NextOpcode);
+      if (!Form)
+        continue;
+      NextForm = Form;
+      NextBits = Bits;
+      break;
+    }
+
+    if (NextForm && isSetRet(*NextForm)) {
+      const uint64_t NextSize = NextBits / 8;
+      uint64_t NextInsn = readLE(Tail, NextSize);
+      SmallVector<int64_t, 16> NextFieldVals;
+      extractFields(*NextForm, NextInsn, NextFieldVals);
+      if (!NextFieldVals.empty()) {
+        const int64_t Enc = NextFieldVals[0];
+        const uint64_t SetRetAddr = Address + BStartSize;
+
+        uint64_t Target = 0;
+        if (isSignedSetRet(*NextForm)) {
+          int64_t Delta = Enc;
+          Delta <<= 1;
+          Target = static_cast<uint64_t>(static_cast<int64_t>(SetRetAddr) + Delta);
+        } else {
+          uint64_t Delta = static_cast<uint64_t>(Enc) << 1;
+          Target = SetRetAddr + Delta;
+        }
+
+        Instr.addOperand(MCOperand::createImm(static_cast<int64_t>(Target)));
+        Size = BStartSize + NextSize;
+      }
+    }
+  }
 
   return Success;
 }

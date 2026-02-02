@@ -142,6 +142,16 @@ uint64_t encodeHLSetRet32Pcrel(uint64_t Value) {
   return Patch;
 }
 
+uint32_t encodePcrelHi20(uint64_t Value) {
+  // ADDTPC uses simm20 in bits [31:12], byte offset (not scaled).
+  int64_t Imm = static_cast<int64_t>(Value);
+  if (!isInt<20>(Imm))
+    report_fatal_error("Linx ADDTPC PC-relative offset out of range");
+
+  uint32_t UImm = static_cast<uint32_t>(Imm) & 0x000FFFFFu;
+  return (UImm << 12);
+}
+
 static unsigned findSpecOpcodeByAsmFmt(StringRef AsmFmt, unsigned LengthBits) {
   for (unsigned Opc = 0; Opc < linxisa_inst_forms_count; ++Opc) {
     const linxisa_inst_form &F = linxisa_inst_forms[Opc];
@@ -306,6 +316,26 @@ public:
     uint64_t Patch = 0;
     unsigned PatchBytes = 4;
     switch (Kind) {
+    case FK_Data_1:
+    case FK_SecRel_1:
+      PatchBytes = 1;
+      Patch = Value;
+      break;
+    case FK_Data_2:
+    case FK_SecRel_2:
+      PatchBytes = 2;
+      Patch = Value;
+      break;
+    case FK_Data_4:
+    case FK_SecRel_4:
+      PatchBytes = 4;
+      Patch = Value;
+      break;
+    case FK_Data_8:
+    case FK_SecRel_8:
+      PatchBytes = 8;
+      Patch = Value;
+      break;
     case LinxISA::FIXUP_LINX_NONE:
       return;
     case LinxISA::FIXUP_LINX_B12_PCREL:
@@ -336,10 +366,17 @@ public:
       PatchBytes = 6;
       Patch = encodeHLSetRet32Pcrel(Value);
       break;
+    case LinxISA::FIXUP_LINX_PCREL_HI20:
+      Patch = encodePcrelHi20(Value);
+      break;
     default:
       llvm_unreachable("Unknown Linx fixup kind");
     }
 
+    if (PatchBytes == 1) {
+      Data[0] |= static_cast<uint8_t>(Patch);
+      return;
+    }
     if (PatchBytes == 2) {
       uint16_t Cur = support::endian::read16le(Data);
       Cur |= static_cast<uint16_t>(Patch);
@@ -359,6 +396,12 @@ public:
       Cur |= Patch;
       for (unsigned i = 0; i < 6; ++i)
         Data[i] = static_cast<uint8_t>((Cur >> (i * 8)) & 0xFF);
+      return;
+    }
+    if (PatchBytes == 8) {
+      uint64_t Cur = support::endian::read64le(Data);
+      Cur |= Patch;
+      support::endian::write64le(Data, Cur);
       return;
     }
 
@@ -384,6 +427,8 @@ public:
         {"FIXUP_LINX_CSETRET5_PCREL", 0, 5, 0},
         {"FIXUP_LINX_SETRET20_PCREL", 0, 20, 0},
         {"FIXUP_LINX_HL_SETRET32_PCREL", 0, 32, 0},
+        // PC-relative 20-bit offset for ADDTPC (global address).
+        {"FIXUP_LINX_PCREL_HI20", 12, 20, 0},
     };
 
     if (Kind < FirstTargetFixupKind)

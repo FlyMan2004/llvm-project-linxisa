@@ -21,17 +21,41 @@ namespace {
 class LinxISAELFObjectWriter : public MCELFObjectTargetWriter {
 public:
   LinxISAELFObjectWriter(uint8_t OSABI, bool Is64Bit)
-      : MCELFObjectTargetWriter(Is64Bit, OSABI, ELF::EM_NONE,
+      : MCELFObjectTargetWriter(Is64Bit, OSABI, ELF::EM_LINXISA,
                                 /*HasRelocationAddend=*/true) {}
 
   ~LinxISAELFObjectWriter() override = default;
 
-  unsigned getRelocType(const MCFixup &, const MCValue &,
+  unsigned getRelocType(const MCFixup &Fixup, const MCValue &,
                         bool IsPCRel) const override {
-    // For now, only support fully-resolved fixups (no dynamic relocations).
-    // Any unresolved expression will result in an ELF relocation of type NONE,
-    // which is acceptable for early bring-up but not a stable ABI.
-    return 0;
+    (void)IsPCRel;
+    // Map Linx fixup kinds to an ELF relocation type. This is a minimal set
+    // sufficient for early bring-up (control-flow and basic data relocations).
+    const unsigned Kind = Fixup.getKind();
+    switch (Kind) {
+    default:
+      return ELF::R_LINX_NONE;
+    case LinxISA::FIXUP_LINX_B12_PCREL:
+      return ELF::R_LINX_B12_PCREL;
+    case LinxISA::FIXUP_LINX_J22_PCREL:
+      return ELF::R_LINX_J22_PCREL;
+    case LinxISA::FIXUP_LINX_CBSTART12_PCREL:
+      return ELF::R_LINX_CBSTART12_PCREL;
+    case LinxISA::FIXUP_LINX_B17_PCREL:
+      return ELF::R_LINX_B17_PCREL;
+    case LinxISA::FIXUP_LINX_HL_BSTART30_PCREL:
+      return ELF::R_LINX_HL_BSTART30_PCREL;
+    case LinxISA::FIXUP_LINX_CSETRET5_PCREL:
+      return ELF::R_LINX_CSETRET5_PCREL;
+    case LinxISA::FIXUP_LINX_SETRET20_PCREL:
+      return ELF::R_LINX_SETRET20_PCREL;
+    case LinxISA::FIXUP_LINX_HL_SETRET32_PCREL:
+      return ELF::R_LINX_HL_SETRET32_PCREL;
+    case FK_Data_4:
+      return ELF::R_LINX_32;
+    case FK_Data_8:
+      return ELF::R_LINX_64;
+    }
   }
 };
 

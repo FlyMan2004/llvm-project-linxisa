@@ -699,6 +699,14 @@ std::string Linux::getDynamicLinker(const ArgList &Args) const {
     Loader = ("ld-linux-" + ArchName + "-" + ABIName + ".so.1").str();
     break;
   }
+  case llvm::Triple::linx32:
+    LibDir = "lib";
+    Loader = "ld-linux-linx32.so.1";
+    break;
+  case llvm::Triple::linx64:
+    LibDir = "lib";
+    Loader = "ld-linux-linx64.so.1";
+    break;
   case llvm::Triple::sparc:
   case llvm::Triple::sparcel:
     LibDir = "lib";

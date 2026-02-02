@@ -93,6 +93,8 @@ void LinxISAMCCodeEmitter::encodeInstruction(const MCInst &MI,
       Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_SETRET20_PCREL);
     } else if (Name == "imm32" && Mnemonic == "HL.SETRET") {
       Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_HL_SETRET32_PCREL);
+    } else if (Name == "imm20" && Mnemonic == "ADDTPC") {
+      Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_PCREL_HI20);
     } else {
       report_fatal_error("Linx: unsupported expression fixup");
     }

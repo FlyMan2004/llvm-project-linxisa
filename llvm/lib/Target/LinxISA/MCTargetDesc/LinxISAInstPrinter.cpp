@@ -226,7 +226,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     OS << "\t";
     if (!emitSetRetTarget())
       OS << "0x0";
-    OS << ", ->ra";
+    OS << ",\t->ra";
     printAnnotation(OS, Annot);
     return;
   }
@@ -238,6 +238,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
                         AsmFmt.starts_with("BSTART.STD") ||
                         AsmFmt.starts_with("BSTART.FP") ||
                         AsmFmt.starts_with("BSTART.SYS") ||
+                        AsmFmt.starts_with("BSTART.") ||
                         AsmFmt.starts_with("BSTART ");
   if (IsCBSTART || IsBSTART) {
     StringRef FirstTok = AsmFmt.split(' ').first.rtrim(",");
@@ -245,26 +246,33 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     // Render C.BSTART<.BlockType> as C.BSTART.<suffix>.
     SmallString<32> PrintedMnemonic;
     if (FirstTok.contains("<.BlockType>")) {
-      PrintedMnemonic = FirstTok.take_front(FirstTok.find('<'));
-      PrintedMnemonic += ".";
       unsigned BT = 0;
       if (auto V = findFieldImm("BlockType"))
         BT = static_cast<unsigned>(*V);
-      if (StringRef S = blockTypeSuffix(BT); !S.empty())
-        PrintedMnemonic += S;
-      else {
-        PrintedMnemonic += "BT";
-        PrintedMnemonic += utostr(BT & 0x1f);
+      PrintedMnemonic = FirstTok.take_front(FirstTok.find('<'));
+      // STD is the default and is omitted for readability.
+      if ((BT & 0x1f) != 0) {
+        PrintedMnemonic += ".";
+        if (StringRef S = blockTypeSuffix(BT); !S.empty())
+          PrintedMnemonic += S;
+        else {
+          PrintedMnemonic += "BT";
+          PrintedMnemonic += utostr(BT & 0x1f);
+        }
       }
       OS << PrintedMnemonic;
     } else if (FirstTok == "C.BSTART" &&
                (AsmFmt.contains(" DIRECT") || AsmFmt.contains(" COND"))) {
-      // These encodings are scalar-block forms; print as .STD for consistency.
-      OS << "C.BSTART.STD";
+      // These encodings are scalar-block forms; the default BlockType is STD.
+      OS << "C.BSTART";
     } else if (FirstTok == "BSTART" &&
                (AsmFmt.contains("{DIRECT, CALL}") || AsmFmt.contains(" COND"))) {
-      // These encodings are scalar-block forms; print as .STD for consistency.
-      OS << "BSTART.STD";
+      // These encodings are scalar-block forms; the default BlockType is STD.
+      OS << "BSTART";
+    } else if (FirstTok == "C.BSTART.STD") {
+      OS << "C.BSTART";
+    } else if (FirstTok == "BSTART.STD") {
+      OS << "BSTART";
     } else {
       OS << FirstTok;
     }
@@ -382,6 +390,20 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       break;
     }
 
+    // Disassembler sugar: if a BSTART CALL MCInst carries an extra operand,
+    // render it as a fused return-target annotation (`ra=...`).
+    if (K == BrKind::Call && MI->getNumOperands() > FieldCount) {
+      const MCOperand &RetOp = MI->getOperand(FieldCount);
+      OS << ", ra=";
+      if (RetOp.isExpr()) {
+        MAI.printExpr(OS, *RetOp.getExpr());
+      } else if (RetOp.isImm()) {
+        OS << "0x"
+           << utohexstr(static_cast<uint64_t>(RetOp.getImm()),
+                        /*LowerCase=*/true);
+      }
+    }
+
     printAnnotation(OS, Annot);
     return;
   }
@@ -421,29 +443,65 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       if (Op->isImm()) {
         unsigned Code = static_cast<unsigned>(Op->getImm()) & 0x1F;
         if (Code == 31) {
-          OS << ", ->t";
+          OS << ",\t->t";
         } else if (Code == 30) {
-          OS << ", ->u";
+          // `->` is the U-hand output by convention.
+          OS << ",\t->";
         } else {
-          OS << ", ->" << reg5Name(Code);
+          OS << ",\t->" << reg5Name(Code);
         }
         return;
       }
     }
 
     if (asmImpliesArrowDest(AsmFmt, "->t")) {
-      OS << ", ->t";
+      OS << ",\t->t";
       return;
     }
     if (asmImpliesArrowDest(AsmFmt, "->u")) {
-      OS << ", ->u";
+      OS << ",\t->";
       return;
     }
     if (asmImpliesArrowDest(AsmFmt, "->ra")) {
-      OS << ", ->ra";
+      OS << ",\t->ra";
       return;
     }
   };
+
+  // Special-case: FENTRY/FEXIT/FRET.RA/FRET.STK with register range syntax.
+  // Format: MNEM [RegBegin ~ RegEnd], sp!, stacksize
+  // Must check BEFORE memory operand check since these also contain '['.
+  if (AsmFmt.contains("[RegSrc0 ~ RegSrcn]") ||
+      AsmFmt.contains("[RegDst0 ~ RegDstn]")) {
+    StringRef Tok = Form.mnemonic ? StringRef(Form.mnemonic) : StringRef("FENTRY");
+    OS << Tok;
+    OS << "\t[";
+    
+    // Get register range from SrcBegin/SrcEnd or DstBegin/DstEnd fields
+    unsigned RegBegin = 10, RegEnd = 14;  // defaults: ra ~ s2
+    if (auto V = findFieldImm("SrcBegin"))
+      RegBegin = static_cast<unsigned>(*V);
+    else if (auto V = findFieldImm("DstBegin"))
+      RegBegin = static_cast<unsigned>(*V);
+    if (auto V = findFieldImm("SrcEnd"))
+      RegEnd = static_cast<unsigned>(*V);
+    else if (auto V = findFieldImm("DstEnd"))
+      RegEnd = static_cast<unsigned>(*V);
+    
+    OS << reg5Name(RegBegin & 0x1F) << " ~ " << reg5Name(RegEnd & 0x1F);
+    OS << "], sp!, ";
+    
+    // Get stack size from uimm field
+    if (auto V = findFieldImm("uimm")) {
+      // uimm is already in bytes (reconstructed from split encoding)
+      OS << *V;
+    } else {
+      OS << "0";
+    }
+    
+    printAnnotation(OS, Annot);
+    return;
+  }
 
   // Pretty printer for memory operands.
   if (AsmFmt.contains('[')) {
@@ -638,26 +696,31 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
   }
 
   // Destination (arrow syntax).
+  auto dstSep = [&]() {
+    OS << (FirstOp ? "\t" : ",\t");
+    FirstOp = false;
+  };
+
   if (auto Op = findField("RegDst")) {
-    sep();
+    dstSep();
     if (Op->isImm()) {
       unsigned Code = static_cast<unsigned>(Op->getImm()) & 0x1F;
       if (Code == 31)
         OS << "->t";
       else if (Code == 30)
-        OS << "->u";
+        OS << "->";
       else
         OS << "->" << reg5Name(Code);
     }
   } else if (!AsmFmt.empty()) {
     if (asmImpliesArrowDest(AsmFmt, "->t")) {
-      sep();
+      dstSep();
       OS << "->t";
     } else if (asmImpliesArrowDest(AsmFmt, "->u")) {
-      sep();
-      OS << "->u";
+      dstSep();
+      OS << "->";
     } else if (asmImpliesArrowDest(AsmFmt, "->ra")) {
-      sep();
+      dstSep();
       OS << "->ra";
     }
   }

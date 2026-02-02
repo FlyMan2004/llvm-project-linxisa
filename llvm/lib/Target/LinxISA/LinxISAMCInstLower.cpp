@@ -717,6 +717,23 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     return;
   }
 
+  case LinxISA::ADDTPC: {
+    // ADDTPC is used for PC-relative addressing of global symbols.
+    // Format: ADDTPC rd, imm20  (rd = PC + sext(imm20))
+    OutMI.setOpcode(getSpecOpcode("ADDTPC", /*LengthBits=*/32, /*Fields=*/2));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+
+    // The second operand can be an immediate or a global address expression
+    const MachineOperand &MO = MI->getOperand(1);
+    MCOperand Op;
+    if (lowerOperand(MO, Op)) {
+      OutMI.addOperand(Op);
+    } else {
+      report_fatal_error("Linx ADDTPC: failed to lower operand");
+    }
+    return;
+  }
+
   case LinxISA::LBI:
   case LinxISA::LBUI:
   case LinxISA::LHI:
@@ -928,12 +945,14 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
 
   case LinxISA::CSELrrr: {
     // `CSEL SrcP, SrcL, SrcR<.neg>, ->{t, u, Rd}`
-    // Use SrcRType=0 (no .neg).
+    // LinxISA csel semantics: if pred != 0, use SrcR (true case), else SrcL (false)
+    // LLVM CSELrrr operands: (rd, pred, src_true, src_false)
+    // Map: SrcL = false case, SrcR = true case, SrcP = predicate
     OutMI.setOpcode(getSpecOpcode("CSEL", /*LengthBits=*/32, /*Fields=*/5));
     OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
-    OutMI.addOperand(MCOperand::createImm(R(2))); // SrcL (true)
-    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcP (predicate)
-    OutMI.addOperand(MCOperand::createImm(R(3))); // SrcR (false)
+    OutMI.addOperand(MCOperand::createImm(R(3))); // SrcL = false case
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcP = predicate
+    OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR = true case
     OutMI.addOperand(MCOperand::createImm(0));    // SrcRType
     return;
   }
@@ -986,6 +1005,47 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(R(0))); // SrcL
     OutMI.addOperand(MCOperand::createImm(0));    // SrcZero (zero)
     OutMI.addOperand(MCOperand::createImm(0));    // simm12
+    return;
+  }
+
+  //===----------------------------------------------------------------------===//
+  // Function Entry/Exit Macro Instructions (LinxISA spec)
+  //===----------------------------------------------------------------------===//
+
+  case LinxISA::FENTRY: {
+    // FENTRY [Begin ~ End], sp!, stacksize
+    // Fields: SrcBegin, SrcEnd, uimm (split encoding)
+    OutMI.setOpcode(getSpecOpcode("FENTRY", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // reg_begin
+    OutMI.addOperand(MCOperand::createImm(I(1))); // reg_end
+    OutMI.addOperand(MCOperand::createImm(I(2))); // stacksize
+    return;
+  }
+
+  case LinxISA::FEXIT: {
+    // FEXIT [Begin ~ End], sp!, stacksize
+    OutMI.setOpcode(getSpecOpcode("FEXIT", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // reg_begin
+    OutMI.addOperand(MCOperand::createImm(I(1))); // reg_end
+    OutMI.addOperand(MCOperand::createImm(I(2))); // stacksize
+    return;
+  }
+
+  case LinxISA::FRET_RA: {
+    // FRET.RA [Begin ~ End], sp!, stacksize
+    OutMI.setOpcode(getSpecOpcode("FRET.RA", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // reg_begin
+    OutMI.addOperand(MCOperand::createImm(I(1))); // reg_end
+    OutMI.addOperand(MCOperand::createImm(I(2))); // stacksize
+    return;
+  }
+
+  case LinxISA::FRET_STK: {
+    // FRET.STK [Begin ~ End], sp!, stacksize
+    OutMI.setOpcode(getSpecOpcode("FRET.STK", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // reg_begin
+    OutMI.addOperand(MCOperand::createImm(I(1))); // reg_end
+    OutMI.addOperand(MCOperand::createImm(I(2))); // stacksize
     return;
   }
 
