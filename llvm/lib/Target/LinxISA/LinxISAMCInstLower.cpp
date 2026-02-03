@@ -144,6 +144,13 @@ bool LinxISAMCInstLower::lowerOperand(const MachineOperand &MO,
     OutOp = MCOperand::createExpr(Expr);
     return true;
   }
+  case MachineOperand::MO_JumpTableIndex: {
+    const MCExpr *Expr =
+        MCSymbolRefExpr::create(Printer.GetJTISymbol(MO.getIndex()), Ctx);
+    Expr = withOffset(Expr, MO.getOffset(), Ctx);
+    OutOp = MCOperand::createExpr(Expr);
+    return true;
+  }
   case MachineOperand::MO_RegisterMask:
     return false;
   default:
@@ -156,9 +163,34 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
 
   const unsigned Opc = MI->getOpcode();
   auto R = [&](unsigned OpNo) -> int64_t {
-    return static_cast<int64_t>(getReg5Encoding(MI->getOperand(OpNo).getReg()));
+    if (OpNo >= MI->getNumOperands()) {
+      MI->print(errs());
+      report_fatal_error("Linx: missing register operand in MC lowering");
+    }
+    const MachineOperand &MO = MI->getOperand(OpNo);
+    if (!MO.isReg()) {
+      MI->print(errs());
+      report_fatal_error("Linx: expected register operand in MC lowering");
+    }
+    Register Reg = MO.getReg();
+    if (!Reg.isPhysical()) {
+      MI->print(errs());
+      report_fatal_error("Linx: expected physical register operand in MC lowering");
+    }
+    return static_cast<int64_t>(getReg5Encoding(Reg));
   };
-  auto I = [&](unsigned OpNo) -> int64_t { return MI->getOperand(OpNo).getImm(); };
+  auto I = [&](unsigned OpNo) -> int64_t {
+    if (OpNo >= MI->getNumOperands()) {
+      MI->print(errs());
+      report_fatal_error("Linx: missing immediate operand in MC lowering");
+    }
+    const MachineOperand &MO = MI->getOperand(OpNo);
+    if (!MO.isImm()) {
+      MI->print(errs());
+      report_fatal_error("Linx: expected immediate operand in MC lowering");
+    }
+    return MO.getImm();
+  };
 
   auto lowerBranchTarget = [&](unsigned OpNo) -> MCOperand {
     const MachineOperand &MO = MI->getOperand(OpNo);
@@ -279,7 +311,7 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/3));
     OutMI.addOperand(MCOperand::createImm(R(0))); // SrcL
     OutMI.addOperand(MCOperand::createImm(R(1))); // SrcR
-    OutMI.addOperand(MCOperand::createImm(0));    // SrcRType (default)
+    OutMI.addOperand(MCOperand::createImm(3));    // SrcRType (default: no modifier)
     return;
   }
 
@@ -312,7 +344,7 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
     OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
     OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR
-    OutMI.addOperand(MCOperand::createImm(0));    // SrcRType (default)
+    OutMI.addOperand(MCOperand::createImm(3));    // SrcRType (default: no modifier)
     OutMI.addOperand(MCOperand::createImm(I(3))); // shamt
     return;
   }
@@ -396,7 +428,7 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
     OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
     OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR
-    OutMI.addOperand(MCOperand::createImm(0));    // SrcRType
+    OutMI.addOperand(MCOperand::createImm(3));    // SrcRType (default: no modifier)
     OutMI.addOperand(MCOperand::createImm(0));    // shamt
     return;
   }
@@ -544,7 +576,7 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
     OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
     OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR
-    OutMI.addOperand(MCOperand::createImm(0));    // SrcRType
+    OutMI.addOperand(MCOperand::createImm(3));    // SrcRType (default: no modifier)
     OutMI.addOperand(MCOperand::createImm(0));    // shamt
     return;
   }
@@ -829,7 +861,7 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
     OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL (base)
     OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR (index)
-    OutMI.addOperand(MCOperand::createImm(0));    // SrcRType (default)
+    OutMI.addOperand(MCOperand::createImm(3));    // SrcRType (default: no modifier)
     OutMI.addOperand(MCOperand::createImm(I(3))); // shamt
     return;
   }
@@ -901,7 +933,7 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(R(0))); // SrcD (value)
     OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL (base)
     OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR (index)
-    OutMI.addOperand(MCOperand::createImm(0));    // SrcRType (default)
+    OutMI.addOperand(MCOperand::createImm(3));    // SrcRType (default: no modifier)
     return;
   }
 
@@ -939,7 +971,7 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
     OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
     OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR
-    OutMI.addOperand(MCOperand::createImm(0));    // SrcRType
+    OutMI.addOperand(MCOperand::createImm(3));    // SrcRType (default: no modifier)
     return;
   }
 
@@ -953,7 +985,7 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(R(3))); // SrcL = false case
     OutMI.addOperand(MCOperand::createImm(R(1))); // SrcP = predicate
     OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR = true case
-    OutMI.addOperand(MCOperand::createImm(0));    // SrcRType
+    OutMI.addOperand(MCOperand::createImm(3));    // SrcRType (default: no modifier)
     return;
   }
 

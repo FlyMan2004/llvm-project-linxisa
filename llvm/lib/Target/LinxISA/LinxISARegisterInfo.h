@@ -29,6 +29,15 @@ public:
 
   Register getFrameRegister(const MachineFunction &MF) const override;
 
+  bool requiresRegisterScavenging(const MachineFunction &MF) const override {
+    return true;
+  }
+
+  bool useFPForScavengingIndex(const MachineFunction &MF) const override {
+    (void)MF;
+    return false;
+  }
+
   bool eliminateFrameIndex(MachineBasicBlock::iterator II, int SPAdj,
                            unsigned FIOperandNum,
                            RegScavenger *RS) const override;
@@ -37,4 +46,3 @@ public:
 } // namespace llvm
 
 #endif // LLVM_LIB_TARGET_LINXISA_LINXISAREGISTERINFO_H
-

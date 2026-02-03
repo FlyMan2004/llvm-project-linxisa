@@ -8,6 +8,7 @@
 
 #include "LinxISATargetMachine.h"
 #include "LinxISA.h"
+#include "LinxISAMachineFunctionInfo.h"
 #include "TargetInfo/LinxISATargetInfo.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
@@ -43,6 +44,10 @@ static TargetOptions getEffectiveTargetOptions(const TargetOptions &Options) {
   if (Opts.FloatABIType == FloatABI::Default) {
     Opts.FloatABIType = FloatABI::Soft;
   }
+
+  // Linx block templates rely on temporary (local) labels being available during
+  // object emission for internal fixups/relaxation. Keep them by default.
+  Opts.MCOptions.MCSaveTempLabels = true;
 
   return Opts;
 }
@@ -90,4 +95,12 @@ public:
 TargetPassConfig *
 LinxISATargetMachine::createPassConfig(PassManagerBase &PM) {
   return new LinxISAPassConfig(*this, &PM);
+}
+
+MachineFunctionInfo *LinxISATargetMachine::createMachineFunctionInfo(
+    BumpPtrAllocator &Allocator, const Function &F,
+    const TargetSubtargetInfo *STI) const {
+  return new (Allocator.Allocate<LinxISAMachineFunctionInfo>())
+      LinxISAMachineFunctionInfo(
+          F, static_cast<const LinxISASubtarget *>(STI));
 }

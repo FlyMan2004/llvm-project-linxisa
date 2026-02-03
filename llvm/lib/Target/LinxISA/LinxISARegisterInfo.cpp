@@ -88,7 +88,6 @@ bool LinxISARegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
                                               int SPAdj,
                                               unsigned FIOperandNum,
                                               RegScavenger *RS) const {
-  (void)RS;
   if (SPAdj != 0)
     report_fatal_error("Linx: non-zero SPAdj not supported");
 
@@ -125,7 +124,18 @@ bool LinxISARegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     if (!isUInt<12>(AbsOff))
       report_fatal_error("Linx: stack frame offset out of range");
 
-    Register BaseReg = MF.getRegInfo().createVirtualRegister(&LinxISA::GPRRegClass);
+    if (!RS)
+      report_fatal_error("Linx: frame index elimination requires RegScavenger");
+
+    // PEI runs after register allocation. Use the register scavenger instead
+    // of creating new virtual registers.
+    Register BaseReg =
+        RS->scavengeRegisterBackwards(LinxISA::GPRRegClass, II,
+                                      /*RestoreAfter=*/true, SPAdj,
+                                      /*AllowSpill=*/true);
+    if (!BaseReg)
+      report_fatal_error("Linx: failed to scavenge a scratch register");
+
     DebugLoc DL = MI.getDebugLoc();
     if (OffsetBytes > 0) {
       BuildMI(*MI.getParent(), II, DL, TII.get(LinxISA::ADDIri), BaseReg)

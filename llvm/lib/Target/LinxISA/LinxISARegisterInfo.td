@@ -7,8 +7,9 @@ class LinxISAReg<bits<16> Enc, string Name> : Register<Name> {
 }
 
 // GPRs (architected) + queue/result pseudo-registers (RegDst/Src* encodings).
-let isConstant = true in
-def R0  : LinxISAReg<0,  "zero">;
+def R0  : LinxISAReg<0,  "zero"> {
+  let isConstant = true;
+}
 def R1  : LinxISAReg<1,  "sp">;
 def R2  : LinxISAReg<2,  "a0">;
 def R3  : LinxISAReg<3,  "a1">;

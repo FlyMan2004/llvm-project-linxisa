@@ -12,10 +12,12 @@
 #include "MCTargetDesc/LinxISAMCTargetDesc.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/Support/Debug.h"
@@ -683,12 +685,16 @@ public:
                        .getInstr();
         break;
       case ExitKind::Direct:
+        if (TargetBB)
+          TargetBB->setLabelMustBeEmitted();
         BStartMI = BuildMI(MBB, InsertBStart, DebugLoc(),
                            TII.get(LinxISA::BSTART_STD_DIRECT))
                        .addMBB(TargetBB)
                        .getInstr();
         break;
       case ExitKind::Cond:
+        if (TargetBB)
+          TargetBB->setLabelMustBeEmitted();
         BStartMI = BuildMI(MBB, InsertBStart, DebugLoc(),
                            TII.get(LinxISA::BSTART_STD_COND))
                        .addMBB(TargetBB)
@@ -704,8 +710,20 @@ public:
         // Set return target for the call (ra = PC + imm20<<1).
         if (ReturnBB) {
           ReturnBB->setLabelMustBeEmitted();
-          BuildMI(MBB, std::next(BStartMI->getIterator()), DebugLoc(),
-                  TII.get(LinxISA::SETRET))
+          // Place SETRET at the end of the call block so prologue code (which
+          // may spill the incoming RA) runs before we clobber RA with the call
+          // return address.
+          auto InsertSetRet = MBB.end();
+          while (InsertSetRet != MBB.begin()) {
+            auto Prev = std::prev(InsertSetRet);
+            if (Prev->isDebugInstr() || Prev->isCFIInstruction() ||
+                isMarkerInstr(*Prev)) {
+              InsertSetRet = Prev;
+              continue;
+            }
+            break;
+          }
+          BuildMI(MBB, InsertSetRet, DebugLoc(), TII.get(LinxISA::SETRET))
               .addMBB(ReturnBB);
         }
         break;
@@ -773,10 +791,52 @@ public:
       };
 
       auto isLiveOutOfBlock = [&](Register Reg) -> bool {
+        // Physical register live-in sets only track "use before def" within a
+        // block, so a reg that is merely live-through a successor (not used
+        // until later) may not appear as live-in to an immediate successor.
+        // Conservatively walk successors and detect any reachable use of Reg
+        // before it is redefined.
+        SmallVector<const MachineBasicBlock *, 8> Worklist;
+        SmallPtrSet<const MachineBasicBlock *, 16> Visited;
+
         for (const MachineBasicBlock *Succ : MBB.successors()) {
-          if (Succ && Succ->isLiveIn(Reg))
-            return true;
+          if (Succ)
+            Worklist.push_back(Succ);
         }
+
+        while (!Worklist.empty()) {
+          const MachineBasicBlock *Succ = Worklist.pop_back_val();
+          if (!Visited.insert(Succ).second)
+            continue;
+
+          // If the successor explicitly records Reg as live-in, we are done.
+          if (Succ->isLiveIn(Reg))
+            return true;
+
+          bool DefinedInSucc = false;
+          for (const MachineInstr &MI : *Succ) {
+            if (MI.isDebugInstr() || MI.isCFIInstruction() || isMarkerInstr(MI))
+              continue;
+
+            if (MI.readsRegister(Reg, &TRI))
+              return true;
+
+            if (MI.definesRegister(Reg, &TRI)) {
+              DefinedInSucc = true;
+              break;
+            }
+          }
+
+          // No read and no def: Reg is live-through this successor, so keep
+          // searching down the CFG.
+          if (!DefinedInSucc) {
+            for (const MachineBasicBlock *Succ2 : Succ->successors()) {
+              if (Succ2)
+                Worklist.push_back(Succ2);
+            }
+          }
+        }
+
         return false;
       };
 
@@ -996,6 +1056,20 @@ public:
         if (InsertBStop == MBB.begin() ||
             std::prev(InsertBStop)->getOpcode() != LinxISA::BSTOP) {
           BuildMI(MBB, InsertBStop, DebugLoc(), TII.get(LinxISA::BSTOP));
+          Changed = true;
+        }
+      }
+    }
+
+    // Jump tables take the address of their destination blocks. Ensure the
+    // targets' labels are emitted even if they are fallthrough blocks with no
+    // direct CFG edge pointing at them.
+    if (const MachineJumpTableInfo *JTI = MF.getJumpTableInfo()) {
+      for (const MachineJumpTableEntry &Entry : JTI->getJumpTables()) {
+        for (MachineBasicBlock *JTBB : Entry.MBBs) {
+          if (!JTBB || JTBB->hasLabelMustBeEmitted())
+            continue;
+          JTBB->setLabelMustBeEmitted();
           Changed = true;
         }
       }

@@ -227,7 +227,7 @@ static int64_t memScaleFromMnemonic(StringRef Mnemonic) {
 
 struct ParsedReg {
   unsigned Code = 0;
-  unsigned SrcRType = 0; // default .sw
+  unsigned SrcRType = 3; // default: no modifier
   unsigned Shamt = 0;
   bool HasExplicitType = false;
   bool HasExplicitShift = false;
@@ -589,16 +589,17 @@ bool LinxISAAsmParser::parseArrowDestOperand(ParsedReg &OutDest) {
     return true;
 
   ParsedReg D;
-  D.Code = 30; // default: U-hand (`->`)
   D.Loc = getTok().getLoc();
 
-  if (getTok().is(AsmToken::Identifier)) {
-    auto Code = parseRegCode(getTok().getString());
-    if (!Code)
-      return Error(getTok().getLoc(), "unknown destination after '->'");
-    D.Code = *Code;
-    Lex();
-  }
+  if (!getTok().is(AsmToken::Identifier))
+    return Error(getTok().getLoc(),
+                 "expected destination after '->' (use '->u' for U-hand)");
+
+  auto Code = parseRegCode(getTok().getString());
+  if (!Code)
+    return Error(getTok().getLoc(), "unknown destination after '->'");
+  D.Code = *Code;
+  Lex();
 
   OutDest = D;
   return false;

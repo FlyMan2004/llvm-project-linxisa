@@ -1,0 +1,203 @@
+# RUN: llc -mtriple=linx64 -run-pass=linx-blockify -o - %s | FileCheck %s
+#
+# Ensure LinxISABlockify does not remap a physical register definition into the
+# hand queues when the value is live-out through an intermediate successor that
+# doesn't use/define the register.
+#
+# CHECK-LABEL: name: fsqrt_min
+# CHECK-NOT: $u4 = ADDIri $r2, 0
+# CHECK: $r13 = ADDIri $r2, 0
+# CHECK: $r3 = ADDIri $r13, 0
+# CHECK: CSELrrr {{.*}} $r13
+
+--- |
+  ; ModuleID = '/tmp/linx_fsqrt_min.ll'
+  source_filename = "/tmp/linx_fsqrt_min.c"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "linx64-unknown-unknown-elf"
+  
+  ; Function Attrs: nofree noinline norecurse nounwind memory(inaccessiblemem: readwrite)
+  define dso_local double @fsqrt_min() local_unnamed_addr #0 {
+    %1 = alloca double, align 8
+    call void @llvm.lifetime.start.p0(ptr nonnull %1)
+    store volatile double 1.600000e+01, ptr %1, align 8, !tbaa !7
+    %2 = load volatile double, ptr %1, align 8, !tbaa !7
+    br label %4
+  
+  3:                                                ; preds = %4
+    call void @llvm.lifetime.end.p0(ptr nonnull %1)
+    ret double %8
+  
+  4:                                                ; preds = %4, %0
+    %lsr.iv = phi i32 [ %lsr.iv.next, %4 ], [ 50, %0 ]
+    %5 = phi double [ %2, %0 ], [ %13, %4 ]
+    %6 = phi double [ 0.000000e+00, %0 ], [ %12, %4 ]
+    %7 = fadd double %6, %5
+    %8 = fmul double %7, 5.000000e-01
+    %9 = fmul double %8, %8
+    %10 = load volatile double, ptr %1, align 8, !tbaa !7
+    %11 = fcmp olt double %9, %10
+    %12 = select i1 %11, double %8, double %6
+    %13 = select i1 %11, double %5, double %8
+    %lsr.iv.next = add nsw i32 %lsr.iv, -1
+    %14 = icmp eq i32 %lsr.iv.next, 0
+    br i1 %14, label %3, label %4, !llvm.loop !9
+  }
+  
+  ; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
+  declare void @llvm.lifetime.start.p0(ptr captures(none)) #1
+  
+  ; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
+  declare void @llvm.lifetime.end.p0(ptr captures(none)) #1
+  
+  attributes #0 = { nofree noinline norecurse nounwind memory(inaccessiblemem: readwrite) "frame-pointer"="all" "no-builtins" "no-jump-tables"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" }
+  attributes #1 = { nocallback nofree nosync nounwind willreturn memory(argmem: readwrite) }
+  
+  !llvm.module.flags = !{!0, !1}
+  !llvm.ident = !{!2}
+  !llvm.errno.tbaa = !{!3}
+  
+  !0 = !{i32 1, !"wchar_size", i32 4}
+  !1 = !{i32 7, !"frame-pointer", i32 2}
+  !2 = !{!"clang version 23.0.0git"}
+  !3 = !{!4, !4, i64 0}
+  !4 = !{!"int", !5, i64 0}
+  !5 = !{!"omnipotent char", !6, i64 0}
+  !6 = !{!"Simple C/C++ TBAA"}
+  !7 = !{!8, !8, i64 0}
+  !8 = !{!"double", !5, i64 0}
+  !9 = distinct !{!9, !10}
+  !10 = !{!"llvm.loop.mustprogress"}
+...
+---
+name:            fsqrt_min
+alignment:       2
+exposesReturnsTwice: false
+legalized:       false
+regBankSelected: false
+selected:        false
+failedISel:      false
+tracksRegLiveness: true
+hasWinCFI:       false
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+callsEHReturn:   false
+callsUnwindInit: false
+hasEHContTarget: false
+hasEHScopes:     false
+hasEHFunclets:   false
+isOutlined:      false
+debugInstrRef:   false
+failsVerification: false
+tracksDebugUserValues: true
+registers:       []
+liveins:         []
+frameInfo:
+  isFrameAddressTaken: false
+  isReturnAddressTaken: false
+  hasStackMap:     false
+  hasPatchPoint:   false
+  stackSize:       80
+  offsetAdjustment: 0
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        true
+  stackProtector:  ''
+  functionContext: ''
+  maxCallFrameSize: 0
+  cvBytesOfCalleeSavedRegisters: 0
+  hasOpaqueSPAdjustment: false
+  hasVAStart:      false
+  hasMustTailInVarArgFunc: false
+  hasTailCall:     false
+  isCalleeSavedInfoValid: true
+  localFrameSize:  0
+fixedStack:      []
+stack:
+  - { id: 0, name: '', type: default, offset: -72, size: 8, alignment: 8, 
+      stack-id: default, callee-saved-register: '', callee-saved-restored: true, 
+      debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
+  - { id: 1, name: '', type: spill-slot, offset: -8, size: 8, alignment: 8, 
+      stack-id: default, callee-saved-register: '$r10', callee-saved-restored: true, 
+      debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
+  - { id: 2, name: '', type: spill-slot, offset: -16, size: 8, alignment: 8, 
+      stack-id: default, callee-saved-register: '$r11', callee-saved-restored: true, 
+      debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
+  - { id: 3, name: '', type: spill-slot, offset: -24, size: 8, alignment: 8, 
+      stack-id: default, callee-saved-register: '$r12', callee-saved-restored: true, 
+      debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
+  - { id: 4, name: '', type: spill-slot, offset: -32, size: 8, alignment: 8, 
+      stack-id: default, callee-saved-register: '$r13', callee-saved-restored: true, 
+      debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
+  - { id: 5, name: '', type: spill-slot, offset: -40, size: 8, alignment: 8, 
+      stack-id: default, callee-saved-register: '$r14', callee-saved-restored: true, 
+      debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
+  - { id: 6, name: '', type: spill-slot, offset: -48, size: 8, alignment: 8, 
+      stack-id: default, callee-saved-register: '$r15', callee-saved-restored: true, 
+      debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
+  - { id: 7, name: '', type: spill-slot, offset: -56, size: 8, alignment: 8, 
+      stack-id: default, callee-saved-register: '$r16', callee-saved-restored: true, 
+      debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
+  - { id: 8, name: '', type: spill-slot, offset: -64, size: 8, alignment: 8, 
+      stack-id: default, callee-saved-register: '$r17', callee-saved-restored: true, 
+      debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
+entry_values:    []
+callSites:       []
+debugValueSubstitutions: []
+constants:       []
+machineFunctionInfo: {}
+body:             |
+  bb.0 (%ir-block.0):
+    successors: %bb.1(0x80000000)
+    liveins: $r11, $r12, $r13, $r14, $r15, $r16, $r17
+  
+    FENTRY 10, 17, 80, implicit-def $r1
+    $r14 = ADDIri $r0, 32
+    $r2 = HLLUI 1076887552
+    $r2 = SLLrr killed $r2, $r14
+    $r3 = HLLUI 0
+    $r3 = SLLrr killed $r3, $r14
+    $r3 = SRLrr killed $r3, $r14
+    $r2 = ORrr killed $r2, killed $r3
+    SDI killed $r2, $r1, 1
+    $r15 = ADDIri $r0, 0
+    $r16 = ADDIWri $r0, 50
+    $r11 = LDI $r1, 1
+    $r17 = SUBIWri $r0, 1
+    $r12 = ADDIri $r15, 0
+  
+  bb.1 (%ir-block.4):
+    successors: %bb.2(0x04000000), %bb.1(0x7c000000)
+    liveins: $r11, $r12, $r14, $r15, $r16, $r17
+  
+    $r2 = ADDIri $r12, 0
+    $r3 = ADDIri $r11, 0
+    PSEUDO_CALL &__adddf3, csr_linx, implicit-def dead $r10, implicit $r1, implicit $r2, implicit $r3, implicit-def $r1, implicit-def $r2
+    $r3 = HLLUI 1071644672
+    $r3 = SLLrr killed $r3, $r14
+    $r4 = HLLUI 0
+    $r4 = SLLrr killed $r4, $r14
+    $r4 = SRLrr killed $r4, $r14
+    $r3 = ORrr killed $r3, killed $r4
+    PSEUDO_CALL &__muldf3, csr_linx, implicit-def dead $r10, implicit $r1, implicit $r2, implicit $r3, implicit-def $r1, implicit-def $r2
+    $r13 = ADDIri $r2, 0
+    $r3 = ADDIri $r13, 0
+    PSEUDO_CALL &__muldf3, csr_linx, implicit-def dead $r10, implicit $r1, implicit $r2, implicit $r3, implicit-def $r1, implicit-def $r2
+    $r3 = LDI $r1, 1
+    PSEUDO_CALL &__ltdf2, csr_linx, implicit-def dead $r10, implicit $r1, implicit $r2, implicit $r3, implicit-def $r1, implicit-def $r2
+    $r16 = nsw ADDWrr killed $r16, $r17
+    $r2 = ADDWrr killed $r2, $r0
+    $r2 = CMPLT killed $r2, $r15
+    $r11 = CSELrrr $r2, killed $r11, $r13
+    $r12 = CSELrrr killed $r2, $r13, killed $r12
+    $r2 = ADDWrr $r16, $r0
+    BEQ killed $r2, $r15, %bb.2
+    JUMP %bb.1
+  
+  bb.2 (%ir-block.3):
+    liveins: $r13
+  
+    FRET_STK 10, 17, 80, implicit-def $r1, implicit-def $r10, implicit $r1
+...

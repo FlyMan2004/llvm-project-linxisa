@@ -11,9 +11,14 @@
 
 #include "LinxISASubtarget.h"
 #include "llvm/CodeGen/CodeGenTargetMachineImpl.h"
+#include "llvm/Support/Allocator.h"
 #include <memory>
 
 namespace llvm {
+
+class Function;
+struct MachineFunctionInfo;
+class TargetSubtargetInfo;
 
 class LinxISATargetMachine : public CodeGenTargetMachineImpl {
   std::unique_ptr<TargetLoweringObjectFile> TLOF;
@@ -35,9 +40,12 @@ public:
   TargetLoweringObjectFile *getObjFileLowering() const override {
     return TLOF.get();
   }
+
+  MachineFunctionInfo *
+  createMachineFunctionInfo(BumpPtrAllocator &Allocator, const Function &F,
+                            const TargetSubtargetInfo *STI) const override;
 };
 
 } // namespace llvm
 
 #endif // LLVM_LIB_TARGET_LINXISA_LINXISATARGETMACHINE_H
-

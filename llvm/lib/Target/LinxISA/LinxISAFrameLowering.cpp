@@ -22,6 +22,7 @@
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/RegisterScavenging.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
@@ -93,6 +94,23 @@ void LinxISAFrameLowering::determineCalleeSaves(MachineFunction &MF,
 
   for (unsigned I = 0; I <= LastIdx; ++I)
     SavedRegs.set(CSRs[I]);
+}
+
+void LinxISAFrameLowering::processFunctionBeforeFrameFinalized(
+    MachineFunction &MF, RegScavenger *RS) const {
+  if (!RS)
+    return;
+
+  // LinxISA frequently needs a post-RA scratch register when eliminating frame
+  // indices for reg-offset loads/stores (e.g. stack arrays indexed by a
+  // runtime value). Provide an emergency spill slot for the register scavenger.
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  const TargetRegisterInfo &TRI = *MF.getSubtarget().getRegisterInfo();
+  const TargetRegisterClass *RC = &LinxISA::GPRRegClass;
+
+  int FI = MFI.CreateSpillStackObject(TRI.getSpillSize(*RC),
+                                      TRI.getSpillAlign(*RC));
+  RS->addScavengingFrameIndex(FI);
 }
 
 void LinxISAFrameLowering::emitPrologue(MachineFunction &MF,

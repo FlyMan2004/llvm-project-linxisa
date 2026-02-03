@@ -8,6 +8,7 @@
 
 #include "LinxISAISelLowering.h"
 #include "LinxISA.h"
+#include "LinxISAMachineFunctionInfo.h"
 #include "LinxISARegisterInfo.h"
 #include "LinxISASubtarget.h"
 #include "MCTargetDesc/LinxISAMCTargetDesc.h"
@@ -40,8 +41,10 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   setBooleanContents(ZeroOrOneBooleanContent);
 
   setOperationAction(ISD::BR, MVT::Other, Custom);
+  setOperationAction(ISD::BRCOND, MVT::Other, Custom);
   setOperationAction(ISD::BR_CC, MVT::i64, Custom);
   setOperationAction(ISD::BR_CC, MVT::i32, Custom);
+  setOperationAction(ISD::BRIND, MVT::Other, Custom);
 
   // i1 is promoted to a register-sized integer before isel.
   setOperationAction(ISD::SETCC, MVT::i64, Custom);
@@ -49,6 +52,8 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
 
   // Bring-up: avoid generating jump tables.
   setOperationAction(ISD::BR_JT, MVT::Other, Expand);
+  setOperationAction(ISD::JumpTable, MVT::i64, Custom);
+  setOperationAction(ISD::JumpTable, MVT::i32, Custom);
 
   // Lower atomic fences via libcalls (e.g. __sync_synchronize) for bring-up.
   setOperationAction(ISD::ATOMIC_FENCE, MVT::Other, Expand);
@@ -56,6 +61,7 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::SIGN_EXTEND, MVT::i64, Custom);
   setOperationAction(ISD::ZERO_EXTEND, MVT::i64, Custom);
   setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i64, Custom);
+  setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i32, Custom);
 
   // Bring-up: expand rotates to shifts + ors.
   setOperationAction(ISD::ROTL, MVT::i32, Expand);
@@ -65,6 +71,10 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
 
   // Drop prefetches for now.
   setOperationAction(ISD::PREFETCH, MVT::Other, Expand);
+
+  // Variadic argument lowering (va_start/va_arg/va_end).
+  setOperationAction(ISD::VASTART, MVT::Other, Custom);
+  setOperationAction({ISD::VAARG, ISD::VACOPY, ISD::VAEND}, MVT::Other, Expand);
 
   // Bring-up: avoid introducing target-specific select/cmov patterns.
   setOperationAction(ISD::SELECT, MVT::i32, Custom);
@@ -142,8 +152,14 @@ SDValue LinxISATargetLowering::LowerOperation(SDValue Op,
   switch (Op.getOpcode()) {
   case ISD::BR:
     return LowerBR(Op, DAG);
+  case ISD::BRCOND:
+    return LowerBRCOND(Op, DAG);
   case ISD::BR_CC:
     return LowerBR_CC(Op, DAG);
+  case ISD::BRIND:
+    return LowerBRIND(Op, DAG);
+  case ISD::JumpTable:
+    return LowerJumpTable(Op, DAG);
   case ISD::SIGN_EXTEND:
     return LowerSIGN_EXTEND(Op, DAG);
   case ISD::ZERO_EXTEND:
@@ -156,6 +172,8 @@ SDValue LinxISATargetLowering::LowerOperation(SDValue Op,
     return LowerSETCC(Op, DAG);
   case ISD::GlobalAddress:
     return LowerGlobalAddress(Op, DAG);
+  case ISD::VASTART:
+    return LowerVASTART(Op, DAG);
   default:
     return SDValue();
   }
@@ -171,6 +189,53 @@ SDValue LinxISATargetLowering::LowerBR(SDValue Op, SelectionDAG &DAG) const {
 
   SDValue Ops[] = {Dest, Chain};
   return SDValue(DAG.getMachineNode(LinxISA::JUMP, DL, MVT::Other, Ops), 0);
+}
+
+SDValue LinxISATargetLowering::LowerBRIND(SDValue Op, SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+
+  // Operand order from ISD::BRIND:
+  //   (Chain, Target)
+  SDValue Chain = Op.getOperand(0);
+  SDValue Target = Op.getOperand(1);
+
+  if (Target.getValueType() != MVT::i64)
+    Target = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i64, Target);
+
+  SDValue Ops[] = {Target, Chain};
+  return SDValue(DAG.getMachineNode(LinxISA::JR, DL, MVT::Other, Ops), 0);
+}
+
+SDValue LinxISATargetLowering::LowerJumpTable(SDValue Op,
+                                             SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT Ty = Op.getValueType();
+
+  auto *JT = cast<JumpTableSDNode>(Op);
+
+  // Use the same PC-relative addressing sequence as globals: ADDTPC rd, jti
+  // The assembler/linker resolves the symbol.
+  SDValue JTI = DAG.getTargetJumpTable(JT->getIndex(), Ty);
+  return SDValue(DAG.getMachineNode(LinxISA::ADDTPC, DL, Ty, JTI), 0);
+}
+
+SDValue LinxISATargetLowering::LowerBRCOND(SDValue Op,
+                                           SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+
+  // Operand order from ISD::BRCOND:
+  //   (Chain, Cond, DestBB)
+  SDValue Chain = Op.getOperand(0);
+  SDValue Cond = Op.getOperand(1);
+  SDValue Dest = Op.getOperand(2);
+
+  // Branch if Cond != 0.
+  if (Cond.getValueType() != MVT::i64) {
+    Cond = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i64, Cond);
+  }
+  SDValue Zero = DAG.getRegister(LinxISA::R0, MVT::i64);
+  SDValue Ops[] = {Cond, Zero, Dest, Chain};
+  return SDValue(DAG.getMachineNode(LinxISA::BNE, DL, MVT::Other, Ops), 0);
 }
 
 SDValue LinxISATargetLowering::LowerBR_CC(SDValue Op, SelectionDAG &DAG) const {
@@ -328,20 +393,29 @@ SDValue LinxISATargetLowering::LowerZERO_EXTEND(SDValue Op,
 SDValue LinxISATargetLowering::LowerSIGN_EXTEND_INREG(
     SDValue Op, SelectionDAG &DAG) const {
   SDLoc DL(Op);
-  if (Op.getValueType() != MVT::i64)
-    return SDValue();
   SDValue Val = Op.getOperand(0);
   EVT FromVT = cast<VTSDNode>(Op.getOperand(1))->getVT();
   unsigned FromBits = FromVT.getScalarSizeInBits();
 
-  // Fast-path: sign-extend the low 32 bits in a GPR.
-  if (FromBits == 32) {
-    SDValue Zero = DAG.getRegister(LinxISA::R0, MVT::i64);
-    return SDValue(DAG.getMachineNode(LinxISA::ADDWrr, DL, MVT::i64, Val, Zero),
-                   0);
+  if (Op.getValueType() == MVT::i64) {
+    // Fast-path: sign-extend the low 32 bits in a GPR.
+    if (FromBits == 32) {
+      SDValue Zero = DAG.getRegister(LinxISA::R0, MVT::i64);
+      return SDValue(
+          DAG.getMachineNode(LinxISA::ADDWrr, DL, MVT::i64, Val, Zero), 0);
+    }
+    return buildExtendInReg(Val, FromBits, /*IsSigned=*/true, DL, DAG);
   }
 
-  return buildExtendInReg(Val, FromBits, /*IsSigned=*/true, DL, DAG);
+  if (Op.getValueType() == MVT::i32) {
+    // Perform the operation in an i64 GPR and truncate back to i32. LinxISA
+    // instruction patterns are defined in terms of i64 operations.
+    SDValue Wide = DAG.getNode(ISD::ANY_EXTEND, DL, MVT::i64, Val);
+    SDValue Ext = buildExtendInReg(Wide, FromBits, /*IsSigned=*/true, DL, DAG);
+    return DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, Ext);
+  }
+
+  return SDValue();
 }
 
 SDValue LinxISATargetLowering::LowerSELECT(SDValue Op, SelectionDAG &DAG) const {
@@ -465,6 +539,23 @@ SDValue LinxISATargetLowering::LowerGlobalAddress(SDValue Op,
   return SDValue(DAG.getMachineNode(LinxISA::ADDTPC, DL, Ty, GA), 0);
 }
 
+SDValue LinxISATargetLowering::LowerVASTART(SDValue Op,
+                                            SelectionDAG &DAG) const {
+  MachineFunction &MF = DAG.getMachineFunction();
+  auto *FuncInfo = MF.getInfo<LinxISAMachineFunctionInfo>();
+
+  SDLoc DL(Op);
+  EVT PtrVT = getPointerTy(MF.getDataLayout());
+  SDValue FI =
+      DAG.getFrameIndex(FuncInfo->getVarArgsFrameIndex(), PtrVT);
+
+  // VASTART stores the address of the first vararg slot into the va_list
+  // object.
+  const Value *SV = cast<SrcValueSDNode>(Op.getOperand(2))->getValue();
+  return DAG.getStore(Op.getOperand(0), DL, FI, Op.getOperand(1),
+                      MachinePointerInfo(SV));
+}
+
 static SDValue convertLocVTToValVT(SDValue V, MVT ValVT, const SDLoc &DL,
                                   SelectionDAG &DAG) {
   if (V.getValueType() != ValVT)
@@ -484,6 +575,7 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
 
   MachineFunction &MF = DAG.getMachineFunction();
   MachineFrameInfo &MFI = MF.getFrameInfo();
+  SmallVector<SDValue, 8> OutChains;
 
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState CCInfo(CallConv, IsVarArg, MF, ArgLocs, *DAG.getContext());
@@ -517,6 +609,24 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
 
     V = convertLocVTToValVT(V, ValVT, DL, DAG);
     InVals.push_back(V);
+  }
+
+  if (IsVarArg) {
+    auto *FuncInfo = MF.getInfo<LinxISAMachineFunctionInfo>();
+    // Clang uses a simple `void*` va_list for LinxISA. For correctness, all
+    // variadic arguments are passed on the stack with natural size/alignment
+    // (see LinxISACallingConv.td). The varargs area therefore begins at the
+    // first stack slot after the fixed arguments.
+    const int VaArgOffset = CCInfo.getStackSize();
+    const int FI = MFI.CreateFixedObject(/*Size=*/1, VaArgOffset,
+                                         /*IsImmutable=*/true);
+    FuncInfo->setVarArgsFrameIndex(FI);
+    FuncInfo->setVarArgsSaveSize(0);
+  }
+
+  if (!OutChains.empty()) {
+    OutChains.push_back(Chain);
+    Chain = DAG.getNode(ISD::TokenFactor, DL, MVT::Other, OutChains);
   }
 
   return Chain;

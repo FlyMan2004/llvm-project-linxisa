@@ -121,6 +121,36 @@ bool LinxISADAGToDAGISel::selectMemAddrRegOffset(SDValue Addr, SDValue &Base,
 
   auto matchIndexAndShift = [&](SDValue V, SDValue &OutIdx,
                                 unsigned &OutShift) -> bool {
+    auto isNeverIndex = [&](SDValue X) -> bool {
+      SDNode *N = X.getNode();
+      if (!N)
+        return false;
+      // Don't treat PC-relative address materialization as an index term.
+      // This avoids selecting addresses like (idx + ADDTPC(symbol)) as
+      // [idx, ADDTPC(symbol)] which would swap base/index for reg-offset loads.
+      if (N->isMachineOpcode()) {
+        unsigned Opc = N->getMachineOpcode();
+        if (Opc == LinxISA::ADDTPC || Opc == LinxISA::LUI ||
+            Opc == LinxISA::HLLUI)
+          return true;
+        return false;
+      }
+
+      switch (N->getOpcode()) {
+      case ISD::GlobalAddress:
+      case ISD::ExternalSymbol:
+      case ISD::TargetGlobalAddress:
+      case ISD::TargetExternalSymbol:
+      case ISD::TargetConstantPool:
+      case ISD::TargetJumpTable:
+      case ISD::TargetBlockAddress:
+        return true;
+      default:
+        break;
+      }
+      return false;
+    };
+
     // base + (idx << shamt)
     if (V.getOpcode() == ISD::SHL) {
       if (auto *CN = dyn_cast<ConstantSDNode>(V.getOperand(1))) {
@@ -129,6 +159,8 @@ bool LinxISADAGToDAGISel::selectMemAddrRegOffset(SDValue Addr, SDValue &Base,
           return false;
         OutIdx = V.getOperand(0);
         OutShift = static_cast<unsigned>(S);
+        if (isNeverIndex(OutIdx))
+          return false;
         if (isa<ConstantSDNode>(OutIdx))
           return false;
         return true;
@@ -137,6 +169,8 @@ bool LinxISADAGToDAGISel::selectMemAddrRegOffset(SDValue Addr, SDValue &Base,
 
     // base + idx (shamt=0)
     if (isa<ConstantSDNode>(V))
+      return false;
+    if (isNeverIndex(V))
       return false;
     OutIdx = V;
     OutShift = 0;
@@ -265,6 +299,17 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
     if (VT == MVT::i64 && FromVT == MVT::i32) {
       SDValue Zero = CurDAG->getRegister(LinxISA::R0, MVT::i64);
       ReplaceNode(N, CurDAG->getMachineNode(LinxISA::ADDWrr, DL, VT, Val, Zero));
+      return;
+    }
+
+    // Sign-extend subword values in the low 32 bits via shifts.
+    if (VT == MVT::i32 && (FromVT == MVT::i8 || FromVT == MVT::i16)) {
+      unsigned FromBits = FromVT.getScalarSizeInBits();
+      unsigned Shift = 32 - FromBits;
+      SDValue ShImm = CurDAG->getTargetConstant(Shift, DL, MVT::i32);
+      SDNode *Shl = CurDAG->getMachineNode(LinxISA::SLLIWri, DL, VT, Val, ShImm);
+      ReplaceNode(N, CurDAG->getMachineNode(LinxISA::SRAIWri, DL, VT,
+                                            SDValue(Shl, 0), ShImm));
       return;
     }
 

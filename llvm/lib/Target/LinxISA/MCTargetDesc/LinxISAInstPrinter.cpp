@@ -115,6 +115,28 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
 
   const linxisa_inst_form &Form = linxisa_inst_forms[Opcode];
   StringRef AsmFmt(Form.asm_fmt ? Form.asm_fmt : "");
+  const StringRef RawTok = AsmFmt.empty() ? StringRef()
+                                          : AsmFmt.split(' ').first.rtrim(",");
+
+  auto stripAngleSuffix = [&](StringRef Tok) -> StringRef {
+    if (size_t Pos = Tok.find('<'); Pos != StringRef::npos)
+      Tok = Tok.take_front(Pos);
+    if (size_t Pos = Tok.find('{'); Pos != StringRef::npos)
+      Tok = Tok.take_front(Pos);
+    return Tok;
+  };
+
+  auto mnemonicTok = [&](StringRef Default) -> StringRef {
+    if (!RawTok.empty()) {
+      StringRef Tok = stripAngleSuffix(RawTok);
+      if (Tok.equals_insensitive("c.break") && Form.mnemonic &&
+          StringRef(Form.mnemonic).equals_insensitive("C.EBREAK"))
+        return "c.ebreak";
+      if (!Tok.empty())
+        return Tok;
+    }
+    return Default;
+  };
 
   // Map field name -> operand (immediate or expression) from MCInst operands in
   // spec field order.
@@ -220,9 +242,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
   if (AsmFmt.starts_with_insensitive("setret") ||
       AsmFmt.starts_with_insensitive("c.setret") ||
       AsmFmt.starts_with_insensitive("hl.setret")) {
-    StringRef Tok = AsmFmt.empty() ? StringRef("setret")
-                                   : AsmFmt.split(' ').first.rtrim(",");
-    OS << Tok;
+    OS << mnemonicTok("setret");
     OS << "\t";
     if (!emitSetRetTarget())
       OS << "0x0";
@@ -241,15 +261,17 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
                         AsmFmt.starts_with("BSTART.") ||
                         AsmFmt.starts_with("BSTART ");
   if (IsCBSTART || IsBSTART) {
-    StringRef FirstTok = AsmFmt.split(' ').first.rtrim(",");
+    StringRef FirstTok = RawTok;
+    StringRef FirstTokBase = stripAngleSuffix(FirstTok);
+    const bool HasBlockTypePlaceholder = AsmFmt.contains("<.BlockType>");
 
     // Render C.BSTART<.BlockType> as C.BSTART.<suffix>.
     SmallString<32> PrintedMnemonic;
-    if (FirstTok.contains("<.BlockType>")) {
+    if (HasBlockTypePlaceholder) {
       unsigned BT = 0;
       if (auto V = findFieldImm("BlockType"))
         BT = static_cast<unsigned>(*V);
-      PrintedMnemonic = FirstTok.take_front(FirstTok.find('<'));
+      PrintedMnemonic = FirstTokBase;
       // STD is the default and is omitted for readability.
       if ((BT & 0x1f) != 0) {
         PrintedMnemonic += ".";
@@ -261,20 +283,20 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
         }
       }
       OS << PrintedMnemonic;
-    } else if (FirstTok == "C.BSTART" &&
+    } else if (FirstTokBase == "C.BSTART" &&
                (AsmFmt.contains(" DIRECT") || AsmFmt.contains(" COND"))) {
       // These encodings are scalar-block forms; the default BlockType is STD.
       OS << "C.BSTART";
-    } else if (FirstTok == "BSTART" &&
+    } else if (FirstTokBase == "BSTART" &&
                (AsmFmt.contains("{DIRECT, CALL}") || AsmFmt.contains(" COND"))) {
       // These encodings are scalar-block forms; the default BlockType is STD.
       OS << "BSTART";
-    } else if (FirstTok == "C.BSTART.STD") {
+    } else if (FirstTokBase == "C.BSTART.STD") {
       OS << "C.BSTART";
-    } else if (FirstTok == "BSTART.STD") {
+    } else if (FirstTokBase == "BSTART.STD") {
       OS << "BSTART";
     } else {
-      OS << FirstTok;
+      OS << FirstTokBase;
     }
 
     enum class BrKind {
@@ -445,8 +467,8 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
         if (Code == 31) {
           OS << ",\t->t";
         } else if (Code == 30) {
-          // `->` is the U-hand output by convention.
-          OS << ",\t->";
+          // `->u` is the explicit U-hand queue push selector.
+          OS << ",\t->u";
         } else {
           OS << ",\t->" << reg5Name(Code);
         }
@@ -459,7 +481,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       return;
     }
     if (asmImpliesArrowDest(AsmFmt, "->u")) {
-      OS << ",\t->";
+      OS << ",\t->u";
       return;
     }
     if (asmImpliesArrowDest(AsmFmt, "->ra")) {
@@ -505,9 +527,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
 
   // Pretty printer for memory operands.
   if (AsmFmt.contains('[')) {
-    StringRef Tok = AsmFmt.empty() ? StringRef("<mem>")
-                                   : AsmFmt.split(' ').first.rtrim(",");
-    OS << Tok;
+    OS << mnemonicTok("<mem>");
     OS << "\t";
 
     const bool HasDest = AsmFmt.contains("->");
@@ -611,9 +631,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
   // Pretty printer for the common "SrcL, SrcR<type><<shamt>" operand form.
   if (findField("SrcL") && findField("SrcR") && findField("SrcRType") &&
       !AsmFmt.contains('[')) {
-    StringRef Tok = AsmFmt.empty() ? StringRef("<op>")
-                                   : AsmFmt.split(' ').first.rtrim(",");
-    OS << Tok;
+    OS << mnemonicTok("<op>");
     OS << "\t";
     emitReg("SrcL");
     OS << ", ";
@@ -626,7 +644,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
 
   // Generic printer: best-effort by listing fields in common ISA order.
   if (!AsmFmt.empty())
-    OS << AsmFmt.split(' ').first;
+    OS << mnemonicTok("<unknown>");
   else if (Form.mnemonic && Form.mnemonic[0])
     OS << StringRef(Form.mnemonic).lower();
   else
@@ -708,7 +726,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       if (Code == 31)
         OS << "->t";
       else if (Code == 30)
-        OS << "->";
+        OS << "->u";
       else
         OS << "->" << reg5Name(Code);
     }
@@ -718,7 +736,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       OS << "->t";
     } else if (asmImpliesArrowDest(AsmFmt, "->u")) {
       dstSep();
-      OS << "->";
+      OS << "->u";
     } else if (asmImpliesArrowDest(AsmFmt, "->ra")) {
       dstSep();
       OS << "->ra";

@@ -128,9 +128,9 @@ static bool isSignedSetRet(const linxisa_inst_form &Form) {
 MCDisassembler::DecodeStatus LinxISADisassembler::getInstruction(
     MCInst &Instr, uint64_t &Size, ArrayRef<uint8_t> Bytes, uint64_t Address,
     raw_ostream & /*CStream*/) const {
-  // Try decode lengths in ascending order. Prefix-only encodings should fail at
-  // shorter lengths and match at the full length.
-  static constexpr unsigned CandidateBits[] = {16, 32, 48, 64};
+  // LinxISA has overlapping encodings across lengths (e.g. templates/prefixes).
+  // Prefer the longest matching encoding to keep the disassembler in sync.
+  static constexpr unsigned CandidateBits[] = {64, 48, 32, 16};
 
   unsigned MatchedOpcode = 0;
   const linxisa_inst_form *Matched = nullptr;
@@ -143,10 +143,12 @@ MCDisassembler::DecodeStatus LinxISADisassembler::getInstruction(
     if (Bytes.size() < SizeBytes)
       continue;
     uint64_t Insn = readLE(Bytes, SizeBytes);
-    const linxisa_inst_form *Form = findMatch(Insn, Bits, MatchedOpcode);
+    unsigned Opcode = 0;
+    const linxisa_inst_form *Form = findMatch(Insn, Bits, Opcode);
     if (!Form)
       continue;
     Matched = Form;
+    MatchedOpcode = Opcode;
     MatchedBits = Bits;
     break;
   }
@@ -174,7 +176,6 @@ MCDisassembler::DecodeStatus LinxISADisassembler::getInstruction(
     const uint64_t BStartSize = Size;
     ArrayRef<uint8_t> Tail = Bytes.drop_front(BStartSize);
 
-    unsigned NextOpcode = 0;
     const linxisa_inst_form *NextForm = nullptr;
     unsigned NextBits = 0;
 
@@ -185,7 +186,8 @@ MCDisassembler::DecodeStatus LinxISADisassembler::getInstruction(
       if (Tail.size() < SizeBytes)
         continue;
       uint64_t NextInsn = readLE(Tail, SizeBytes);
-      const linxisa_inst_form *Form = findMatch(NextInsn, Bits, NextOpcode);
+      unsigned TmpOpcode = 0;
+      const linxisa_inst_form *Form = findMatch(NextInsn, Bits, TmpOpcode);
       if (!Form)
         continue;
       NextForm = Form;
