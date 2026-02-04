@@ -111,12 +111,38 @@ static uint64_t encodeHLSetRet32Pcrel(Ctx &ctx, uint8_t *loc, int64_t value,
   return patch;
 }
 
+static uint32_t encodePcrelHi20(Ctx &ctx, uint8_t *loc, int64_t value,
+                                const Relocation &rel) {
+  // ADDTPC uses an imm20 field in bits [31:12] which is added to the current
+  // TPC/PC page base (i.e. the immediate is scaled by 4KiB).
+  if (value & 0xFFF)
+    Err(ctx) << getErrorLoc(ctx, loc) << "unaligned ADDTPC target";
+
+  int64_t imm = value >> 12;
+  checkInt(ctx, loc, imm, 20, rel);
+  uint32_t uimm = static_cast<uint32_t>(imm) & 0x000FFFFFu;
+  return uimm << 12;
+}
+
+static uint32_t encodeLo12(Ctx &ctx, uint8_t *loc, int64_t value,
+                           const Relocation &rel) {
+  // Low 12 bits for ADDI/ADDIW uimm12 (bits [31:20]).
+  (void)ctx;
+  (void)loc;
+  (void)rel;
+  uint32_t uimm = static_cast<uint32_t>(value) & 0x00000FFFu;
+  return uimm << 20;
+}
+
 class LinxISA final : public TargetInfo {
 public:
   LinxISA(Ctx &ctx);
   RelType getDynRel(RelType type) const override { return type; }
   RelExpr getRelExpr(RelType type, const Symbol &s,
                      const uint8_t *loc) const override;
+  void writeGotPlt(uint8_t *buf, const Symbol &s) const override;
+  void writePlt(uint8_t *buf, const Symbol &sym,
+                uint64_t pltEntryAddr) const override;
   void relocate(uint8_t *loc, const Relocation &rel,
                 uint64_t val) const override;
 };
@@ -130,11 +156,26 @@ LinxISA::LinxISA(Ctx &ctx) : TargetInfo(ctx) {
   iRelativeRel = R_LINX_RELATIVE;
   symbolicRel = ctx.arg.is64 ? R_LINX_64 : R_LINX_32;
   gotRel = symbolicRel;
+
+  // The LinxISA PLT is implemented as a sequence of standalone blocks. Each
+  // entry begins with a BSTART marker so that control-flow is only transferred
+  // to valid block boundaries. The entry loads the resolved address from the
+  // corresponding .got.plt slot and performs an indirect jump via SETC.TGT.
+  //
+  // Bring-up note: this is a non-lazy PLT design. It relies on the dynamic
+  // loader eagerly applying R_LINX_JUMP_SLOT relocations (e.g. link with
+  // -z now).
+  gotPltHeaderEntriesNum = 0;
+  pltHeaderSize = 0;
+  pltEntrySize = 20;
+  ipltEntrySize = pltEntrySize;
 }
 
 RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
                             const uint8_t *loc) const {
   switch (type) {
+  case R_LINX_B17_PLT:
+    return R_PLT_PC;
   case R_LINX_B12_PCREL:
   case R_LINX_J22_PCREL:
   case R_LINX_CBSTART12_PCREL:
@@ -144,9 +185,74 @@ RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
   case R_LINX_SETRET20_PCREL:
   case R_LINX_HL_SETRET32_PCREL:
     return R_PC;
+  case R_LINX_PCREL_HI20:
+    return RE_AARCH64_PAGE_PC;
+  case R_LINX_LO12:
+    return R_ABS;
   default:
     return R_ABS;
   }
+}
+
+void LinxISA::writeGotPlt(uint8_t *buf, const Symbol &s) const {
+  // Non-lazy PLT bring-up: slots are resolved by the dynamic loader (via
+  // R_LINX_JUMP_SLOT) before first use. Keep initial contents zero.
+  if (ctx.arg.is64)
+    write64le(buf, 0);
+  else
+    write32le(buf, 0);
+}
+
+void LinxISA::writePlt(uint8_t *buf, const Symbol &sym,
+                       uint64_t pltEntryAddr) const {
+  // PLT entry (5 x 32-bit):
+  //   0: BSTART.STD IND
+  //   4: ADDTPC  %pcrel_hi(.got.plt[sym]), ->t
+  //   8: LD/LW   [t#1, off], ->u
+  //  12: SETC.TGT u#1
+  //  16: BSTOP
+  constexpr uint32_t BSTART_IND = 0x00005001u;
+  constexpr uint32_t ADDTPC_ZERO = 0x00000f87u;
+  constexpr uint32_t LWI_ZERO = 0x00002019u;
+  constexpr uint32_t LDI_ZERO = 0x00003019u;
+  constexpr uint32_t SETC_TGT_ZERO = 0x0000403bu;
+  constexpr uint32_t BSTOP = 0x00000001u;
+
+  constexpr uint32_t REG_T1 = 24;
+  constexpr uint32_t REG_U_OUT = 30;
+  constexpr uint32_t REG_U1 = 28;
+
+  write32le(buf + 0, BSTART_IND);
+
+  const uint64_t gotPltVA = sym.getGotPltVA(ctx);
+  const uint64_t addtpcAddr = pltEntryAddr + 4;
+  const int64_t pageDelta =
+      static_cast<int64_t>(getAArch64Page(gotPltVA)) -
+      static_cast<int64_t>(getAArch64Page(addtpcAddr));
+  Relocation rel{R_PC, R_LINX_PCREL_HI20, 0, 0, nullptr};
+  const uint32_t addtpc = ADDTPC_ZERO | encodePcrelHi20(ctx, buf + 4, pageDelta, rel);
+  write32le(buf + 4, addtpc);
+
+  const uint64_t offInPage = gotPltVA & 0xFFFu;
+  const unsigned scale = ctx.arg.is64 ? 3 : 2;
+  const uint64_t mask = (1ull << scale) - 1;
+  if (offInPage & mask)
+    Err(ctx) << "unaligned .got.plt entry for " << sym.getName();
+
+  const uint32_t imm12 = static_cast<uint32_t>(offInPage >> scale);
+  if (imm12 >= (1u << 12))
+    Err(ctx) << "out of range .got.plt offset for " << sym.getName();
+
+  uint32_t load = ctx.arg.is64 ? LDI_ZERO : LWI_ZERO;
+  load |= (imm12 << 20);          // imm12
+  load |= (REG_T1 << 15);         // rs1 = t#1
+  load |= (REG_U_OUT << 7);       // rd = ->u
+  write32le(buf + 8, load);
+
+  const uint32_t setc = SETC_TGT_ZERO | (REG_U1 << 15);
+  write32le(buf + 12, setc);
+
+  write32le(buf + 16, BSTOP);
 }
 
 void LinxISA::relocate(uint8_t *loc, const Relocation &rel,
@@ -181,6 +287,7 @@ void LinxISA::relocate(uint8_t *loc, const Relocation &rel,
     write16le(loc, cur);
     return;
   }
+  case R_LINX_B17_PLT:
   case R_LINX_B17_PCREL: {
     uint32_t cur = read32le(loc);
     cur |= encodeB17Pcrel(ctx, loc, sval, rel);
@@ -215,6 +322,18 @@ void LinxISA::relocate(uint8_t *loc, const Relocation &rel,
     cur |= encodeHLSetRet32Pcrel(ctx, loc, sval, rel);
     for (unsigned i = 0; i < 6; ++i)
       loc[i] = static_cast<uint8_t>((cur >> (i * 8)) & 0xFF);
+    return;
+  }
+  case R_LINX_PCREL_HI20: {
+    uint32_t cur = read32le(loc);
+    cur |= encodePcrelHi20(ctx, loc, sval, rel);
+    write32le(loc, cur);
+    return;
+  }
+  case R_LINX_LO12: {
+    uint32_t cur = read32le(loc);
+    cur |= encodeLo12(ctx, loc, sval, rel);
+    write32le(loc, cur);
     return;
   }
 

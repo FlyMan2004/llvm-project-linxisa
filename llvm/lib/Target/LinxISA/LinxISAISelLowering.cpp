@@ -8,6 +8,7 @@
 
 #include "LinxISAISelLowering.h"
 #include "LinxISA.h"
+#include "LinxISABaseInfo.h"
 #include "LinxISAMachineFunctionInfo.h"
 #include "LinxISARegisterInfo.h"
 #include "LinxISASubtarget.h"
@@ -19,6 +20,7 @@
 #include "llvm/CodeGen/TargetCallingConv.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Target/TargetMachine.h"
 
 using namespace llvm;
 
@@ -213,10 +215,14 @@ SDValue LinxISATargetLowering::LowerJumpTable(SDValue Op,
 
   auto *JT = cast<JumpTableSDNode>(Op);
 
-  // Use the same PC-relative addressing sequence as globals: ADDTPC rd, jti
-  // The assembler/linker resolves the symbol.
+  // Use the same PC-relative addressing sequence as globals:
+  //   ADDTPC (page base) + ADDI/ADDIW (low 12 bits).
   SDValue JTI = DAG.getTargetJumpTable(JT->getIndex(), Ty);
-  return SDValue(DAG.getMachineNode(LinxISA::ADDTPC, DL, Ty, JTI), 0);
+
+  SDValue Page = SDValue(DAG.getMachineNode(LinxISA::ADDTPC, DL, Ty, JTI), 0);
+  const unsigned AddOpc =
+      (Ty == MVT::i32) ? LinxISA::ADDIWri : LinxISA::ADDIri;
+  return SDValue(DAG.getMachineNode(AddOpc, DL, Ty, Page, JTI), 0);
 }
 
 SDValue LinxISATargetLowering::LowerBRCOND(SDValue Op,
@@ -329,10 +335,22 @@ static SDValue buildExtendInReg(SDValue Val, unsigned FromBits, bool IsSigned,
     return Val;
 
   const unsigned Shift = 64 - FromBits;
-  SDValue ShAmt = DAG.getConstant(Shift, DL, MVT::i64);
-  SDValue Shl = DAG.getNode(ISD::SHL, DL, MVT::i64, Val, ShAmt);
-  unsigned ShrOpc = IsSigned ? ISD::SRA : ISD::SRL;
-  return DAG.getNode(ShrOpc, DL, MVT::i64, Shl, ShAmt);
+  if (Shift == 0)
+    return Val;
+
+  // Avoid the canonical (shl, sra/srl) combine pattern: post-legalize DAG
+  // combines may fold it back into SIGN_EXTEND_INREG/ZERO_EXTEND, which then
+  // survives into isel and becomes unselectable.
+  SDValue Zero = DAG.getRegister(LinxISA::R0, MVT::i64);
+  SDValue ShImm = DAG.getTargetConstant(Shift, DL, MVT::i64);
+  SDValue ShAmt =
+      SDValue(DAG.getMachineNode(LinxISA::ADDIri, DL, MVT::i64, Zero, ShImm), 0);
+
+  SDValue Shl =
+      SDValue(DAG.getMachineNode(LinxISA::SLLrr, DL, MVT::i64, Val, ShAmt), 0);
+
+  unsigned ShrOpc = IsSigned ? LinxISA::SRArr : LinxISA::SRLrr;
+  return SDValue(DAG.getMachineNode(ShrOpc, DL, MVT::i64, Shl, ShAmt), 0);
 }
 
 SDValue LinxISATargetLowering::LowerSIGN_EXTEND(SDValue Op,
@@ -532,11 +550,17 @@ SDValue LinxISATargetLowering::LowerGlobalAddress(SDValue Op,
   const GlobalValue *GV = N->getGlobal();
   int64_t Offset = N->getOffset();
 
-  // Use ADDTPC to compute PC-relative address of the global.
-  // ADDTPC rd, imm20 computes rd = PC + sext(imm20)
-  // The assembler will create a relocation to resolve the actual offset.
+  // PC-relative global address materialization.
+  //
+  // ADDTPC's immediate is page-scaled (imm20 << 12). Materialize the full
+  // address via:
+  //   ADDTPC (page of symbol) + ADDI/ADDIW (low 12 bits).
   SDValue GA = DAG.getTargetGlobalAddress(GV, DL, Ty, Offset);
-  return SDValue(DAG.getMachineNode(LinxISA::ADDTPC, DL, Ty, GA), 0);
+
+  SDValue Page = SDValue(DAG.getMachineNode(LinxISA::ADDTPC, DL, Ty, GA), 0);
+  const unsigned AddOpc =
+      (Ty == MVT::i32) ? LinxISA::ADDIWri : LinxISA::ADDIri;
+  return SDValue(DAG.getMachineNode(AddOpc, DL, Ty, Page, GA), 0);
 }
 
 SDValue LinxISATargetLowering::LowerVASTART(SDValue Op,
@@ -741,12 +765,20 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
   }
 
   // Direct calls: GlobalAddress/ExternalSymbol to target variants.
+  const TargetMachine &TM = getTargetMachine();
   if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee)) {
-    Callee = DAG.getTargetGlobalAddress(G->getGlobal(), DL, PtrVT, 0);
+    const GlobalValue *GV = G->getGlobal();
+    const unsigned Flags = !TM.shouldAssumeDSOLocal(GV) ? LinxII::MO_PLT : 0;
+    Callee = DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0, Flags);
   } else if (auto *E = dyn_cast<ExternalSymbolSDNode>(Callee)) {
-    Callee = DAG.getTargetExternalSymbol(E->getSymbol(), PtrVT, 0);
+    Callee = DAG.getTargetExternalSymbol(E->getSymbol(), PtrVT, LinxII::MO_PLT);
   } else {
-    report_fatal_error("Linx: only direct calls supported for now");
+    // Indirect call: Callee is a value (register) computed by the program.
+    // The BlockISA lowering pass will translate this into an ICALL block using
+    // SETC.TGT to select the target.
+    if (Callee.getValueType() != PtrVT) {
+      Callee = DAG.getNode(ISD::ZERO_EXTEND, DL, PtrVT, Callee);
+    }
   }
 
   const uint32_t *Mask = STI.getRegisterInfo()->getCallPreservedMask(

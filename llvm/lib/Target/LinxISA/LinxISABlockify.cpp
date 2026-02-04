@@ -356,8 +356,13 @@ public:
       if (Last) {
         switch (Last->getOpcode()) {
         case LinxISA::PSEUDO_CALL: {
-          Kind = ExitKind::Call;
           CallTargetOp = Last->getOperand(0);
+          if (CallTargetOp->isReg()) {
+            Kind = ExitKind::ICall;
+            HeaderSetcTgtReg = CallTargetOp->getReg();
+          } else {
+            Kind = ExitKind::Call;
+          }
           if (!MBB.succ_empty())
             ReturnBB = *MBB.succ_begin();
           else
@@ -723,6 +728,12 @@ public:
             }
             break;
           }
+          // If the block contains only markers, the scan above will stop at the
+          // block header (BSTART). SETRET must stay inside the block and may
+          // not precede the header, otherwise branch targets would land on a
+          // non-BSTART instruction.
+          if (InsertSetRet == BStartMI->getIterator())
+            InsertSetRet = std::next(BStartMI->getIterator());
           BuildMI(MBB, InsertSetRet, DebugLoc(), TII.get(LinxISA::SETRET))
               .addMBB(ReturnBB);
         }
@@ -748,6 +759,26 @@ public:
                            TII.get(LinxISA::CBSTART_STD))
                        .addImm(6) // BrType = ICALL
                        .getInstr();
+        // Indirect calls behave like CALL blocks but select the callee via
+        // SETC.TGT. Emit SETRET so the continuation block is reachable after
+        // the callee returns.
+        if (ReturnBB) {
+          ReturnBB->setLabelMustBeEmitted();
+          auto InsertSetRet = MBB.end();
+          while (InsertSetRet != MBB.begin()) {
+            auto Prev = std::prev(InsertSetRet);
+            if (Prev->isDebugInstr() || Prev->isCFIInstruction() ||
+                isMarkerInstr(*Prev)) {
+              InsertSetRet = Prev;
+              continue;
+            }
+            break;
+          }
+          if (InsertSetRet == BStartMI->getIterator())
+            InsertSetRet = std::next(BStartMI->getIterator());
+          BuildMI(MBB, InsertSetRet, DebugLoc(), TII.get(LinxISA::SETRET))
+              .addMBB(ReturnBB);
+        }
         break;
       }
       Changed = true;
@@ -787,6 +818,23 @@ public:
           return false;
         if (Reserved.test(Reg.id()))
           return false;
+        // The a0-a7 argument registers are ABI-visible at block boundaries
+        // (CALL/ICALL/RET). The block markers we insert do not model these as
+        // explicit register uses, so the hand-queue remapper must not rewrite
+        // values that live in these registers.
+        switch (Reg) {
+        case LinxISA::R2:
+        case LinxISA::R3:
+        case LinxISA::R4:
+        case LinxISA::R5:
+        case LinxISA::R6:
+        case LinxISA::R7:
+        case LinxISA::R8:
+        case LinxISA::R9:
+          return false;
+        default:
+          break;
+        }
         return true;
       };
 

@@ -1287,8 +1287,8 @@ template <class ELFT>
 StringRef ELFObjectFile<ELFT>::getFileFormatName() const {
   constexpr bool IsLittleEndian = ELFT::Endianness == llvm::endianness::little;
   switch (EF.getHeader().e_ident[ELF::EI_CLASS]) {
-  case ELF::ELFCLASS32:
-    switch (EF.getHeader().e_machine) {
+	  case ELF::ELFCLASS32:
+	    switch (EF.getHeader().e_machine) {
     case ELF::EM_68K:
       return "elf32-m68k";
     case ELF::EM_386:
@@ -1311,10 +1311,12 @@ StringRef ELFObjectFile<ELFT>::getFileFormatName() const {
       return "elf32-msp430";
     case ELF::EM_PPC:
       return (IsLittleEndian ? "elf32-powerpcle" : "elf32-powerpc");
-    case ELF::EM_RISCV:
-      return (IsLittleEndian ? "elf32-littleriscv" : "elf32-bigriscv");
-    case ELF::EM_CSKY:
-      return "elf32-csky";
+	    case ELF::EM_RISCV:
+	      return (IsLittleEndian ? "elf32-littleriscv" : "elf32-bigriscv");
+	    case ELF::EM_LINXISA:
+	      return "elf32-linx";
+	    case ELF::EM_CSKY:
+	      return "elf32-csky";
     case ELF::EM_SPARC:
     case ELF::EM_SPARC32PLUS:
       return "elf32-sparc";
@@ -1327,8 +1329,8 @@ StringRef ELFObjectFile<ELFT>::getFileFormatName() const {
     default:
       return "elf32-unknown";
     }
-  case ELF::ELFCLASS64:
-    switch (EF.getHeader().e_machine) {
+	  case ELF::ELFCLASS64:
+	    switch (EF.getHeader().e_machine) {
     case ELF::EM_386:
       return "elf64-i386";
     case ELF::EM_X86_64:
@@ -1337,10 +1339,12 @@ StringRef ELFObjectFile<ELFT>::getFileFormatName() const {
       return (IsLittleEndian ? "elf64-littleaarch64" : "elf64-bigaarch64");
     case ELF::EM_PPC64:
       return (IsLittleEndian ? "elf64-powerpcle" : "elf64-powerpc");
-    case ELF::EM_RISCV:
-      return (IsLittleEndian ? "elf64-littleriscv" : "elf64-bigriscv");
-    case ELF::EM_S390:
-      return "elf64-s390";
+	    case ELF::EM_RISCV:
+	      return (IsLittleEndian ? "elf64-littleriscv" : "elf64-bigriscv");
+	    case ELF::EM_LINXISA:
+	      return "elf64-linx";
+	    case ELF::EM_S390:
+	      return "elf64-s390";
     case ELF::EM_SPARCV9:
       return "elf64-sparc";
     case ELF::EM_MIPS:
@@ -1362,9 +1366,9 @@ StringRef ELFObjectFile<ELFT>::getFileFormatName() const {
   }
 }
 
-template <class ELFT> Triple::ArchType ELFObjectFile<ELFT>::getArch() const {
-  bool IsLittleEndian = ELFT::Endianness == llvm::endianness::little;
-  switch (EF.getHeader().e_machine) {
+	template <class ELFT> Triple::ArchType ELFObjectFile<ELFT>::getArch() const {
+	  bool IsLittleEndian = ELFT::Endianness == llvm::endianness::little;
+	  switch (EF.getHeader().e_machine) {
   case ELF::EM_68K:
     return Triple::m68k;
   case ELF::EM_386:
@@ -1397,17 +1401,26 @@ template <class ELFT> Triple::ArchType ELFObjectFile<ELFT>::getArch() const {
     return IsLittleEndian ? Triple::ppcle : Triple::ppc;
   case ELF::EM_PPC64:
     return IsLittleEndian ? Triple::ppc64le : Triple::ppc64;
-  case ELF::EM_RISCV:
-    switch (EF.getHeader().e_ident[ELF::EI_CLASS]) {
-    case ELF::ELFCLASS32:
-      return IsLittleEndian ? Triple::riscv32 : Triple::riscv32be;
-    case ELF::ELFCLASS64:
-      return IsLittleEndian ? Triple::riscv64 : Triple::riscv64be;
-    default:
-      report_fatal_error("Invalid ELFCLASS!");
-    }
-  case ELF::EM_S390:
-    return Triple::systemz;
+	  case ELF::EM_RISCV:
+	    switch (EF.getHeader().e_ident[ELF::EI_CLASS]) {
+	    case ELF::ELFCLASS32:
+	      return IsLittleEndian ? Triple::riscv32 : Triple::riscv32be;
+	    case ELF::ELFCLASS64:
+	      return IsLittleEndian ? Triple::riscv64 : Triple::riscv64be;
+	    default:
+	      report_fatal_error("Invalid ELFCLASS!");
+	    }
+	  case ELF::EM_LINXISA:
+	    switch (EF.getHeader().e_ident[ELF::EI_CLASS]) {
+	    case ELF::ELFCLASS32:
+	      return Triple::linx32;
+	    case ELF::ELFCLASS64:
+	      return Triple::linx64;
+	    default:
+	      report_fatal_error("Invalid ELFCLASS!");
+	    }
+	  case ELF::EM_S390:
+	    return Triple::systemz;
 
   case ELF::EM_SPARC:
   case ELF::EM_SPARC32PLUS:

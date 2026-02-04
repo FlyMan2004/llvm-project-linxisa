@@ -8,6 +8,8 @@
 
 #include "LinxISAMCInstLower.h"
 #include "LinxISA.h"
+#include "LinxISABaseInfo.h"
+#include "MCTargetDesc/LinxISAMCAsmInfo.h"
 #include "MCTargetDesc/LinxISAMCTargetDesc.h"
 #include "MCTargetDesc/LinxISAOpcodeTables.h"
 #include "llvm/ADT/SmallString.h"
@@ -132,15 +134,21 @@ bool LinxISAMCInstLower::lowerOperand(const MachineOperand &MO,
     return true;
   }
   case MachineOperand::MO_GlobalAddress: {
-    const MCExpr *Expr = MCSymbolRefExpr::create(Printer.getSymbol(MO.getGlobal()), Ctx);
+    const MCExpr *Expr =
+        MCSymbolRefExpr::create(Printer.getSymbol(MO.getGlobal()), Ctx);
     Expr = withOffset(Expr, MO.getOffset(), Ctx);
+    if (MO.getTargetFlags() == LinxII::MO_PLT)
+      Expr = MCSpecifierExpr::create(Expr, LinxISA::S_PLT, Ctx);
     OutOp = MCOperand::createExpr(Expr);
     return true;
   }
   case MachineOperand::MO_ExternalSymbol: {
     const MCExpr *Expr =
-        MCSymbolRefExpr::create(Printer.GetExternalSymbolSymbol(MO.getSymbolName()), Ctx);
+        MCSymbolRefExpr::create(
+            Printer.GetExternalSymbolSymbol(MO.getSymbolName()), Ctx);
     Expr = withOffset(Expr, MO.getOffset(), Ctx);
+    if (MO.getTargetFlags() == LinxII::MO_PLT)
+      Expr = MCSpecifierExpr::create(Expr, LinxISA::S_PLT, Ctx);
     OutOp = MCOperand::createExpr(Expr);
     return true;
   }
@@ -529,7 +537,23 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
       return;
     }
 
+    // Allow symbolic immediates for ADDI/ADDIW (used by the global address
+    // materialization sequence: ADDTPC + ADDI/ADDIW with LO12 relocation).
     if (!Op2.isReg()) {
+      if (Opc == LinxISA::ADDIri || Opc == LinxISA::ADDIWri) {
+        OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/3));
+        OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+        OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
+
+        MCOperand ExprOp;
+        if (!lowerOperand(Op2, ExprOp)) {
+          MI->print(errs());
+          report_fatal_error("Linx: failed to lower ADDI/ADDIW immediate operand");
+        }
+        OutMI.addOperand(ExprOp);
+        return;
+      }
+
       MI->print(errs());
       report_fatal_error("Linx: expected imm/reg operand for *I instruction");
     }

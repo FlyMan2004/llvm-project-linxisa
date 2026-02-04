@@ -27,10 +27,12 @@ public:
       : TargetInfo(Triple) {
     WCharType = SignedInt;
     WIntType = UnsignedInt;
-    LongDoubleWidth = 128;
-    LongDoubleAlign = 128;
-    LongDoubleFormat = &llvm::APFloat::IEEEquad();
-    SuitableAlign = 128;
+    // Bring-up toolchain convention: `long double` is the same as `double`.
+    // This avoids requiring fp128/libquadmath support in freestanding builds.
+    LongDoubleWidth = 64;
+    LongDoubleAlign = 64;
+    LongDoubleFormat = &llvm::APFloat::IEEEdouble();
+    SuitableAlign = 64;
   }
 
   void getTargetDefines(const LangOptions &Opts,

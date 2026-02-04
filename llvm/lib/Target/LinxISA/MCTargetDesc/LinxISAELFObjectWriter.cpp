@@ -43,6 +43,8 @@ public:
       return ELF::R_LINX_CBSTART12_PCREL;
     case LinxISA::FIXUP_LINX_B17_PCREL:
       return ELF::R_LINX_B17_PCREL;
+    case LinxISA::FIXUP_LINX_B17_PLT:
+      return ELF::R_LINX_B17_PLT;
     case LinxISA::FIXUP_LINX_HL_BSTART30_PCREL:
       return ELF::R_LINX_HL_BSTART30_PCREL;
     case LinxISA::FIXUP_LINX_CSETRET5_PCREL:
@@ -51,6 +53,10 @@ public:
       return ELF::R_LINX_SETRET20_PCREL;
     case LinxISA::FIXUP_LINX_HL_SETRET32_PCREL:
       return ELF::R_LINX_HL_SETRET32_PCREL;
+    case LinxISA::FIXUP_LINX_PCREL_HI20:
+      return ELF::R_LINX_PCREL_HI20;
+    case LinxISA::FIXUP_LINX_LO12:
+      return ELF::R_LINX_LO12;
     case FK_Data_4:
       return ELF::R_LINX_32;
     case FK_Data_8:

@@ -500,7 +500,7 @@ bool LinxISAAsmParser::parseRegOperand(ParsedReg &Out) {
 
   auto Code = parseRegCode(Base);
   if (!Code)
-    return Error(getTok().getLoc(), "unknown register name");
+    return Error(getTok().getLoc(), "invalid register name");
 
   Out = ParsedReg();
   Out.Code = *Code;
@@ -597,7 +597,7 @@ bool LinxISAAsmParser::parseArrowDestOperand(ParsedReg &OutDest) {
 
   auto Code = parseRegCode(getTok().getString());
   if (!Code)
-    return Error(getTok().getLoc(), "unknown destination after '->'");
+    return Error(getTok().getLoc(), "invalid destination after '->'");
   D.Code = *Code;
   Lex();
 
@@ -823,7 +823,7 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
     std::optional<unsigned> BrTypeVal;
     if (!PI.Keywords.empty()) {
       BrTypeVal = parseBrType(PI.Keywords[0].TextUpper);
-      if (!require(BrTypeVal.has_value(), "unknown branch kind (BrType)"))
+      if (!require(BrTypeVal.has_value(), "invalid branch kind (BrType)"))
         return false;
     } else if (hasField(Form, "BrType")) {
       // FALL is the default when the branch kind is omitted.
@@ -859,7 +859,7 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
     // the chosen encoding.
     if (!HasBrTypeField && BrTypeVal.has_value()) {
       if (!require(FormKind != BStartKind::Unknown,
-                   "unknown BSTART encoding kind"))
+                   "invalid BSTART encoding kind"))
         return false;
       const bool KindOK =
           (FormKind == WantKind) ||
@@ -1177,7 +1177,7 @@ bool LinxISAAsmParser::matchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
   const auto &Map = getMnemonicMap();
   auto It = Map.find(Key);
   if (It == Map.end())
-    return Error(IDLoc, ("unknown instruction '" + Mnemonic + "'").str());
+    return Error(IDLoc, ("unrecognized instruction '" + Mnemonic + "'").str());
 
   ParsedInst PI;
   buildParsedInst(Operands, PI);

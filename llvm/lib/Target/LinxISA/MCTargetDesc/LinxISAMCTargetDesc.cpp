@@ -53,7 +53,7 @@ static MCInstrInfo *createLinxISAMCInstrInfo() {
       else if (F.mnemonic && F.mnemonic[0])
         Pool->append(F.mnemonic);
       else
-        Pool->append("linxisa.unknown");
+        Pool->append("linxisa.invalid");
       Pool->push_back('\0');
 
       DF[Opcode] = uint8_t(-1U);

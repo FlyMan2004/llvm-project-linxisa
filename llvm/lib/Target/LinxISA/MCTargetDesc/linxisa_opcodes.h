@@ -21,7 +21,7 @@ typedef struct {
 /* A symbolic field (e.g. RegDst, SrcL, simm12, uimm24, ...). */
 typedef struct {
   const char *name;
-  int8_t signed_hint;      /* -1 unknown, 0 unsigned, 1 signed */
+  int8_t signed_hint;      /* -1 unspecified, 0 unsigned, 1 signed */
   uint16_t bit_width;      /* field bit-width */
   uint32_t piece_start;    /* index into linxisa_field_pieces[] */
   uint8_t piece_count;
@@ -40,4 +40,3 @@ extern const linxisa_field linxisa_fields[];
 extern const size_t linxisa_fields_count;
 extern const linxisa_field_piece linxisa_field_pieces[];
 extern const size_t linxisa_field_pieces_count;
-

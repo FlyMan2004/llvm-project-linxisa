@@ -10,7 +10,14 @@ class Triple;
 class LinxISAMCAsmInfo : public MCAsmInfoELF {
 public:
   LinxISAMCAsmInfo(const Triple &TT, bool Is64Bit);
+  void printSpecifierExpr(raw_ostream &OS,
+                          const MCSpecifierExpr &Expr) const override;
 };
+
+namespace LinxISA {
+using Specifier = uint8_t;
+enum { S_None, S_PLT };
+} // namespace LinxISA
 
 } // namespace llvm
 

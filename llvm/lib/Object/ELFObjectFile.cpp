@@ -824,8 +824,8 @@ ELFObjectFileBase::getPltEntries(const MCSubtargetInfo &STI) const {
   const auto *T = TargetRegistry::lookupTarget(Triple, Err);
   if (!T)
     return {};
-  uint32_t JumpSlotReloc = 0, GlobDatReloc = 0;
-  switch (Triple.getArch()) {
+	  uint32_t JumpSlotReloc = 0, GlobDatReloc = 0;
+	  switch (Triple.getArch()) {
     case Triple::x86:
       JumpSlotReloc = ELF::R_386_JUMP_SLOT;
       GlobDatReloc = ELF::R_386_GLOB_DAT;
@@ -848,13 +848,18 @@ ELFObjectFileBase::getPltEntries(const MCSubtargetInfo &STI) const {
       JumpSlotReloc = ELF::R_HEX_JMP_SLOT;
       GlobDatReloc = ELF::R_HEX_GLOB_DAT;
       break;
-    case Triple::riscv32:
-    case Triple::riscv64:
-      JumpSlotReloc = ELF::R_RISCV_JUMP_SLOT;
-      break;
-    default:
-      return {};
-  }
+	    case Triple::riscv32:
+	    case Triple::riscv64:
+	      JumpSlotReloc = ELF::R_RISCV_JUMP_SLOT;
+	      break;
+	    case Triple::linx32:
+	    case Triple::linx64:
+	      JumpSlotReloc = ELF::R_LINX_JUMP_SLOT;
+	      GlobDatReloc = ELF::R_LINX_GLOB_DAT;
+	      break;
+	    default:
+	      return {};
+	  }
   std::unique_ptr<const MCInstrInfo> MII(T->createMCInstrInfo());
   std::unique_ptr<const MCInstrAnalysis> MIA(
       T->createMCInstrAnalysis(MII.get()));

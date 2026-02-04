@@ -303,13 +303,31 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
     }
 
     // Sign-extend subword values in the low 32 bits via shifts.
-    if (VT == MVT::i32 && (FromVT == MVT::i8 || FromVT == MVT::i16)) {
+    if (VT == MVT::i32 &&
+        (FromVT == MVT::i1 || FromVT == MVT::i8 || FromVT == MVT::i16)) {
       unsigned FromBits = FromVT.getScalarSizeInBits();
       unsigned Shift = 32 - FromBits;
       SDValue ShImm = CurDAG->getTargetConstant(Shift, DL, MVT::i32);
       SDNode *Shl = CurDAG->getMachineNode(LinxISA::SLLIWri, DL, VT, Val, ShImm);
       ReplaceNode(N, CurDAG->getMachineNode(LinxISA::SRAIWri, DL, VT,
                                             SDValue(Shl, 0), ShImm));
+      return;
+    }
+
+    // Sign-extend subword values in a 64-bit GPR via reg-reg shifts (immediate
+    // shifts are limited to 5-bit amounts in the current encoding).
+    if (VT == MVT::i64 &&
+        (FromVT == MVT::i1 || FromVT == MVT::i8 || FromVT == MVT::i16)) {
+      unsigned FromBits = FromVT.getScalarSizeInBits();
+      unsigned Shift = 64 - FromBits;
+      SDValue Zero = CurDAG->getRegister(LinxISA::R0, MVT::i64);
+      SDValue ShImm = CurDAG->getTargetConstant(Shift, DL, MVT::i64);
+      SDNode *ShAmt =
+          CurDAG->getMachineNode(LinxISA::ADDIri, DL, MVT::i64, Zero, ShImm);
+      SDNode *Shl = CurDAG->getMachineNode(LinxISA::SLLrr, DL, VT, Val,
+                                           SDValue(ShAmt, 0));
+      ReplaceNode(N, CurDAG->getMachineNode(LinxISA::SRArr, DL, VT,
+                                            SDValue(Shl, 0), SDValue(ShAmt, 0)));
       return;
     }
 

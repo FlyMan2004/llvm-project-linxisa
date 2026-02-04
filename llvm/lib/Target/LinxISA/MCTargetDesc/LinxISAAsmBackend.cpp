@@ -143,13 +143,24 @@ uint64_t encodeHLSetRet32Pcrel(uint64_t Value) {
 }
 
 uint32_t encodePcrelHi20(uint64_t Value) {
-  // ADDTPC uses simm20 in bits [31:12], byte offset (not scaled).
-  int64_t Imm = static_cast<int64_t>(Value);
+  // ADDTPC uses simm20 in bits [31:12] and is scaled by 4KiB (imm20 << 12).
+  // The relocation value is the page delta in bytes:
+  //   (S & ~0xFFF) - (P & ~0xFFF)
+  if (Value & 0xFFF)
+    report_fatal_error("Linx ADDTPC PC-relative page offset is not 4KiB aligned");
+
+  int64_t Imm = static_cast<int64_t>(Value) >> 12;
   if (!isInt<20>(Imm))
-    report_fatal_error("Linx ADDTPC PC-relative offset out of range");
+    report_fatal_error("Linx ADDTPC PC-relative page offset out of range");
 
   uint32_t UImm = static_cast<uint32_t>(Imm) & 0x000FFFFFu;
-  return (UImm << 12);
+  return UImm << 12;
+}
+
+uint32_t encodeLo12(uint64_t Value) {
+  // ADDI/ADDIW low 12-bit absolute offset in bits [31:20].
+  uint32_t UImm = static_cast<uint32_t>(Value) & 0x00000FFFu;
+  return UImm << 20;
 }
 
 static unsigned findSpecOpcodeByAsmFmt(StringRef AsmFmt, unsigned LengthBits) {
@@ -351,6 +362,9 @@ public:
     case LinxISA::FIXUP_LINX_B17_PCREL:
       Patch = encodeB17Pcrel(Value);
       break;
+    case LinxISA::FIXUP_LINX_B17_PLT:
+      Patch = encodeB17Pcrel(Value);
+      break;
     case LinxISA::FIXUP_LINX_HL_BSTART30_PCREL:
       PatchBytes = 6;
       Patch = encodeHLBStart30Pcrel(Value);
@@ -368,6 +382,9 @@ public:
       break;
     case LinxISA::FIXUP_LINX_PCREL_HI20:
       Patch = encodePcrelHi20(Value);
+      break;
+    case LinxISA::FIXUP_LINX_LO12:
+      Patch = encodeLo12(Value);
       break;
     default:
       llvm_unreachable("Unknown Linx fixup kind");
@@ -422,13 +439,16 @@ public:
         {"FIXUP_LINX_J22_PCREL", 0, 22, 0},
         {"FIXUP_LINX_CBSTART12_PCREL", 0, 12, 0},
         {"FIXUP_LINX_B17_PCREL", 0, 17, 0},
+        {"FIXUP_LINX_B17_PLT", 0, 17, 0},
         // simm30 byte offset, instruction-aligned.
         {"FIXUP_LINX_HL_BSTART30_PCREL", 0, 30, 0},
         {"FIXUP_LINX_CSETRET5_PCREL", 0, 5, 0},
         {"FIXUP_LINX_SETRET20_PCREL", 0, 20, 0},
         {"FIXUP_LINX_HL_SETRET32_PCREL", 0, 32, 0},
-        // PC-relative 20-bit offset for ADDTPC (global address).
+        // PC-relative page offset for ADDTPC (imm20 << 12).
         {"FIXUP_LINX_PCREL_HI20", 12, 20, 0},
+        // Absolute low 12 bits for ADDI/ADDIW (uimm12).
+        {"FIXUP_LINX_LO12", 20, 12, 0},
     };
 
     if (Kind < FirstTargetFixupKind)

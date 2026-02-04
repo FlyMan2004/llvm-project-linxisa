@@ -30,6 +30,10 @@ enum Fixups {
   // PC-relative block-start immediate (simm17, scaled by 2 bytes).
   FIXUP_LINX_B17_PCREL,
 
+  // PC-relative block-start immediate targeting a PLT entry (simm17, scaled by
+  // 2 bytes).
+  FIXUP_LINX_B17_PLT,
+
   // PC-relative long block-start immediate (HL.BSTART.* simm30, in bytes,
   // instruction-aligned).
   FIXUP_LINX_HL_BSTART30_PCREL,
@@ -46,6 +50,9 @@ enum Fixups {
 
   // PC-relative 20-bit offset for ADDTPC (global address, not scaled).
   FIXUP_LINX_PCREL_HI20,
+
+  // Absolute low 12 bits for ADDI/ADDIW uimm12 (used with ADDTPC).
+  FIXUP_LINX_LO12,
 
   // Marker.
   LastTargetFixupKind,

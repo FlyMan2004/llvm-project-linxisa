@@ -72,7 +72,7 @@ static uint64_t shlUnsigned64(uint64_t V, unsigned Shift) {
 std::pair<const char *, uint64_t>
 LinxISAInstPrinter::getMnemonic(const MCInst &MI) const {
   static constexpr const char *BadOpcode = "<bad-opcode>";
-  static constexpr const char *Unknown = "<unknown>";
+  static constexpr const char *Invalid = "<invalid>";
 
   const unsigned Opcode = MI.getOpcode();
   if (Opcode >= linxisa_inst_forms_count)
@@ -83,7 +83,7 @@ LinxISAInstPrinter::getMnemonic(const MCInst &MI) const {
     return {Form.mnemonic, 0};
   if (Form.id && Form.id[0])
     return {Form.id, 0};
-  return {Unknown, 0};
+  return {Invalid, 0};
 }
 
 void LinxISAInstPrinter::printRegName(raw_ostream &OS, MCRegister Reg) {
@@ -644,11 +644,11 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
 
   // Generic printer: best-effort by listing fields in common ISA order.
   if (!AsmFmt.empty())
-    OS << mnemonicTok("<unknown>");
+    OS << mnemonicTok("<invalid>");
   else if (Form.mnemonic && Form.mnemonic[0])
     OS << StringRef(Form.mnemonic).lower();
   else
-    OS << "<unknown>";
+    OS << "<invalid>";
 
   const bool IsSetcImm =
       AsmFmt.starts_with_insensitive("setc.") && findField("shamt") &&

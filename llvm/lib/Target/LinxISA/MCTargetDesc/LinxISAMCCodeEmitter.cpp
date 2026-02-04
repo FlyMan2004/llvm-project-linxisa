@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "MCTargetDesc/LinxISAFixupKinds.h"
+#include "MCTargetDesc/LinxISAMCAsmInfo.h"
 #include "MCTargetDesc/LinxISAMCTargetDesc.h"
 #include "MCTargetDesc/LinxISAOpcodeTables.h"
 #include "llvm/MC/MCCodeEmitter.h"
@@ -15,6 +16,7 @@
 #include "llvm/MC/MCFixup.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstrInfo.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
@@ -34,6 +36,31 @@ static uint64_t maskBits(unsigned Width) {
   if (Width >= 64)
     return ~0ull;
   return (1ull << Width) - 1ull;
+}
+
+static bool hasPltVariant(const MCExpr *Expr) {
+  if (!Expr)
+    return false;
+  switch (Expr->getKind()) {
+  case MCExpr::Specifier: {
+    const auto *S = cast<MCSpecifierExpr>(Expr);
+    if (S->getSpecifier() == LinxISA::S_PLT)
+      return true;
+    return hasPltVariant(S->getSubExpr());
+  }
+  case MCExpr::SymbolRef:
+    return false;
+  case MCExpr::Binary: {
+    const auto *B = cast<MCBinaryExpr>(Expr);
+    return hasPltVariant(B->getLHS()) || hasPltVariant(B->getRHS());
+  }
+  case MCExpr::Unary:
+    return hasPltVariant(cast<MCUnaryExpr>(Expr)->getSubExpr());
+  case MCExpr::Constant:
+  case MCExpr::Target:
+    return false;
+  }
+  return false;
 }
 
 static void encodeFieldBits(uint64_t &Insn, const linxisa_field &Field,
@@ -75,8 +102,10 @@ void LinxISAMCCodeEmitter::encodeInstruction(const MCInst &MI,
     StringRef Mnemonic = Form.mnemonic ? StringRef(Form.mnemonic) : StringRef();
 
     // Minimal fixup support for early bring-up: only branch/jump PC-relative
-    // label operands are supported.
+    // label operands are supported, plus the basic global-address sequence
+    // (ADDTPC + ADDI/ADDIW).
     MCFixupKind Kind = FK_NONE;
+    bool PCRel = true;
     if (Name == "simm12" && Mnemonic.starts_with("B.")) {
       Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_B12_PCREL);
     } else if (Name == "simm12" && Mnemonic.starts_with("C.BSTART")) {
@@ -84,7 +113,10 @@ void LinxISAMCCodeEmitter::encodeInstruction(const MCInst &MI,
     } else if (Name == "simm22" && Mnemonic == "J") {
       Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_J22_PCREL);
     } else if (Name == "simm17" && Mnemonic.starts_with("BSTART.")) {
-      Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_B17_PCREL);
+      if (hasPltVariant(Expr))
+        Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_B17_PLT);
+      else
+        Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_B17_PCREL);
     } else if (Name == "simm" && Mnemonic.starts_with("HL.BSTART")) {
       Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_HL_BSTART30_PCREL);
     } else if (Name == "uimm5" && Mnemonic == "C.SETRET") {
@@ -95,11 +127,14 @@ void LinxISAMCCodeEmitter::encodeInstruction(const MCInst &MI,
       Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_HL_SETRET32_PCREL);
     } else if (Name == "imm20" && Mnemonic == "ADDTPC") {
       Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_PCREL_HI20);
+    } else if (Name == "uimm12" && (Mnemonic == "ADDI" || Mnemonic == "ADDIW")) {
+      Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_LO12);
+      PCRel = false;
     } else {
       report_fatal_error("Linx: unsupported expression fixup");
     }
 
-    Fixups.push_back(MCFixup::create(/*Offset=*/0, Expr, Kind, /*PCRel=*/true));
+    Fixups.push_back(MCFixup::create(/*Offset=*/0, Expr, Kind, /*PCRel=*/PCRel));
   }
 
   const unsigned Bytes = Form.length_bits / 8;
