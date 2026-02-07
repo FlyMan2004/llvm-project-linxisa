@@ -21,8 +21,51 @@
 #include "llvm/IR/Function.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
+#include <limits>
+#include <optional>
 
 using namespace llvm;
+
+static int64_t linxEncodeFpSrcType(EVT VT) {
+  if (VT == MVT::f64)
+    return 0; // fd
+  if (VT == MVT::f32)
+    return 1; // fs
+  report_fatal_error("Linx: unsupported floating SrcType");
+}
+
+static int64_t linxEncodeCvtDstTypeFP(EVT VT) {
+  if (VT == MVT::f64)
+    return 0; // FP64
+  if (VT == MVT::f32)
+    return 1; // FP32
+  report_fatal_error("Linx: unsupported FCVT destination FP type");
+}
+
+static int64_t linxEncodeCvtSrcTypeInt(EVT VT) {
+  if (VT == MVT::i64)
+    return 0; // *d
+  if (VT == MVT::i32)
+    return 1; // *w
+  report_fatal_error("Linx: unsupported FCVT integer source type");
+}
+
+static int64_t linxEncodeCvtDstTypeSInt(EVT VT) {
+  if (VT == MVT::i64)
+    return 8; // s64
+  if (VT == MVT::i32)
+    return 9; // s32
+  report_fatal_error("Linx: unsupported FCVT signed integer destination type");
+}
+
+static int64_t linxEncodeCvtDstTypeUInt(EVT VT) {
+  if (VT == MVT::i64)
+    return 0; // u64
+  if (VT == MVT::i32)
+    return 1; // u32
+  report_fatal_error(
+      "Linx: unsupported FCVT unsigned integer destination type");
+}
 
 //===----------------------------------------------------------------------===//
 // Calling convention implementation.
@@ -35,6 +78,12 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
     : TargetLowering(TM, STI), STI(STI) {
   addRegisterClass(MVT::i64, &LinxISA::GPRRegClass);
   addRegisterClass(MVT::i32, &LinxISA::GPRRegClass);
+  addRegisterClass(MVT::f64, &LinxISA::GPRRegClass);
+  addRegisterClass(MVT::f32, &LinxISA::GPRRegClass);
+  // Bring-up: keep tile registers out of the legal type set. Otherwise, Clang
+  // may choose <1024 x i32> for large zero-inits (e.g. with
+  // -ftrivial-auto-var-init=zero) and SelectionDAG will see vector ops we do
+  // not lower yet.
 
   computeRegisterProperties(STI.getRegisterInfo());
   setStackPointerRegisterToSaveRestore(LinxISA::R1);
@@ -42,10 +91,22 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   // LinxISA comparisons produce 0/1 values.
   setBooleanContents(ZeroOrOneBooleanContent);
 
+  // Bring-up: expand i1 memory ops.
+  //
+  // Clang/LLVM may materialize boolean globals (e.g. `static bool`) as i1 in
+  // memory. LinxISA does not support direct i1 load/store, so expand those
+  // operations into byte accesses plus trunc/zext.
+  setOperationAction(ISD::LOAD, MVT::i1, Expand);
+  setOperationAction(ISD::STORE, MVT::i1, Expand);
+
   setOperationAction(ISD::BR, MVT::Other, Custom);
   setOperationAction(ISD::BRCOND, MVT::Other, Custom);
   setOperationAction(ISD::BR_CC, MVT::i64, Custom);
   setOperationAction(ISD::BR_CC, MVT::i32, Custom);
+  // For floating-point conditionals, prefer expanding BR_CC into SETCC+BRCOND
+  // and rely on our custom SETCC lowering to use FEQ/FLT/FGE.
+  setOperationAction(ISD::BR_CC, MVT::f32, Expand);
+  setOperationAction(ISD::BR_CC, MVT::f64, Expand);
   setOperationAction(ISD::BRIND, MVT::Other, Custom);
 
   // i1 is promoted to a register-sized integer before isel.
@@ -71,6 +132,35 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::ROTR, MVT::i32, Expand);
   setOperationAction(ISD::ROTR, MVT::i64, Expand);
 
+  // Bring-up: expand byte swaps (used by e.g. networking and entropy code).
+  setOperationAction(ISD::BSWAP, MVT::i32, Expand);
+  setOperationAction(ISD::BSWAP, MVT::i64, Expand);
+
+  // Bring-up: expand multiply-high operations used by division-by-constant
+  // lowering. LinxISA does not have a dedicated mulhi instruction yet.
+  setOperationAction(ISD::MULHS, MVT::i32, Custom);
+  setOperationAction(ISD::MULHU, MVT::i32, Custom);
+  setOperationAction(ISD::MULHS, MVT::i64, Custom);
+  setOperationAction(ISD::MULHU, MVT::i64, Custom);
+  // Expand {u,s}mul_lohi into MUL + MUL{HU,HS} so generic code (e.g. div64)
+  // doesn't leave ISD::UMUL_LOHI nodes for isel.
+  setOperationAction(ISD::UMUL_LOHI, MVT::i32, Expand);
+  setOperationAction(ISD::UMUL_LOHI, MVT::i64, Expand);
+  setOperationAction(ISD::SMUL_LOHI, MVT::i32, Expand);
+  setOperationAction(ISD::SMUL_LOHI, MVT::i64, Expand);
+
+  // Bit-manipulation count intrinsics.
+  setOperationAction(ISD::CTLZ, MVT::i32, Legal);
+  setOperationAction(ISD::CTLZ, MVT::i64, Legal);
+  setOperationAction(ISD::CTLZ_ZERO_UNDEF, MVT::i32, Legal);
+  setOperationAction(ISD::CTLZ_ZERO_UNDEF, MVT::i64, Legal);
+  setOperationAction(ISD::CTTZ, MVT::i32, Legal);
+  setOperationAction(ISD::CTTZ, MVT::i64, Legal);
+  setOperationAction(ISD::CTTZ_ZERO_UNDEF, MVT::i32, Legal);
+  setOperationAction(ISD::CTTZ_ZERO_UNDEF, MVT::i64, Legal);
+  setOperationAction(ISD::CTPOP, MVT::i32, Legal);
+  setOperationAction(ISD::CTPOP, MVT::i64, Legal);
+
   // Drop prefetches for now.
   setOperationAction(ISD::PREFETCH, MVT::Other, Expand);
 
@@ -81,66 +171,79 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   // Bring-up: avoid introducing target-specific select/cmov patterns.
   setOperationAction(ISD::SELECT, MVT::i32, Custom);
   setOperationAction(ISD::SELECT, MVT::i64, Custom);
+  setOperationAction(ISD::SELECT, MVT::f32, Custom);
+  setOperationAction(ISD::SELECT, MVT::f64, Custom);
   setOperationAction(ISD::SELECT_CC, MVT::i32, Expand);
   setOperationAction(ISD::SELECT_CC, MVT::i64, Expand);
+  setOperationAction(ISD::SELECT_CC, MVT::f32, Expand);
+  setOperationAction(ISD::SELECT_CC, MVT::f64, Expand);
 
   // GlobalAddress must be custom-lowered to PC-relative addressing.
   setOperationAction(ISD::GlobalAddress, MVT::i64, Custom);
   setOperationAction(ISD::GlobalAddress, MVT::i32, Custom);
+  setOperationAction(ISD::BlockAddress, MVT::i64, Custom);
+  setOperationAction(ISD::BlockAddress, MVT::i32, Custom);
+  // Bring-up: model TLS addresses as regular symbol addresses. This is enough
+  // to build single-threaded runtimes and will be replaced by real TLS
+  // lowering once the Linx ELF TLS ABI is finalized.
+  setOperationAction(ISD::GlobalTLSAddress, MVT::i64, Custom);
+  setOperationAction(ISD::GlobalTLSAddress, MVT::i32, Custom);
+  setOperationAction(ISD::ConstantPool, MVT::i64, Custom);
+  setOperationAction(ISD::ConstantPool, MVT::i32, Custom);
 
   //===----------------------------------------------------------------------===//
   // Floating Point Operations
   //===----------------------------------------------------------------------===//
-  //
-  // For floating point operations, we need to set them to Expand to allow
-  // libcall generation. Without this, we get "unsupported library call operation"
-  // errors when trying to compile floating point code.
+  // LinxISA implements scalar floating-point arithmetic using the existing
+  // reg5 register file (no separate architectural FPR file). For bring-up we
+  // enable f32/f64 hard-float operations and keep everything else as libcalls.
 
-  // 32-bit floating point operations
-  setOperationAction(ISD::FADD, MVT::f32, Expand);
-  setOperationAction(ISD::FSUB, MVT::f32, Expand);
-  setOperationAction(ISD::FMUL, MVT::f32, Expand);
-  setOperationAction(ISD::FDIV, MVT::f32, Expand);
+  // f32/f64 arithmetic.
+  setOperationAction(ISD::FADD, MVT::f32, Custom);
+  setOperationAction(ISD::FSUB, MVT::f32, Custom);
+  setOperationAction(ISD::FMUL, MVT::f32, Custom);
+  setOperationAction(ISD::FDIV, MVT::f32, Custom);
+  setOperationAction(ISD::FNEG, MVT::f32, Custom);
+  setOperationAction(ISD::FABS, MVT::f32, Custom);
+  setOperationAction(ISD::SETCC, MVT::f32, Custom);
+
+  setOperationAction(ISD::FADD, MVT::f64, Custom);
+  setOperationAction(ISD::FSUB, MVT::f64, Custom);
+  setOperationAction(ISD::FMUL, MVT::f64, Custom);
+  setOperationAction(ISD::FDIV, MVT::f64, Custom);
+  setOperationAction(ISD::FNEG, MVT::f64, Custom);
+  setOperationAction(ISD::FABS, MVT::f64, Custom);
+  setOperationAction(ISD::SETCC, MVT::f64, Custom);
+
+  // Leave more complex ops as libcalls for now.
   setOperationAction(ISD::FREM, MVT::f32, Expand);
-  setOperationAction(ISD::FNEG, MVT::f32, Expand);
-  setOperationAction(ISD::FABS, MVT::f32, Expand);
   setOperationAction(ISD::FSQRT, MVT::f32, Expand);
   setOperationAction(ISD::FCOPYSIGN, MVT::f32, Expand);
-  setOperationAction(ISD::SETCC, MVT::f32, Expand);
   setOperationAction(ISD::FEXP2, MVT::f32, Expand);
   setOperationAction(ISD::FLOG2, MVT::f32, Expand);
 
-  // 64-bit floating point operations
-  setOperationAction(ISD::FADD, MVT::f64, Expand);
-  setOperationAction(ISD::FSUB, MVT::f64, Expand);
-  setOperationAction(ISD::FMUL, MVT::f64, Expand);
-  setOperationAction(ISD::FDIV, MVT::f64, Expand);
   setOperationAction(ISD::FREM, MVT::f64, Expand);
-  setOperationAction(ISD::FNEG, MVT::f64, Expand);
-  setOperationAction(ISD::FABS, MVT::f64, Expand);
   setOperationAction(ISD::FSQRT, MVT::f64, Expand);
   setOperationAction(ISD::FCOPYSIGN, MVT::f64, Expand);
-  setOperationAction(ISD::SETCC, MVT::f64, Expand);
   setOperationAction(ISD::FEXP2, MVT::f64, Expand);
   setOperationAction(ISD::FLOG2, MVT::f64, Expand);
 
-  // Float-to-int conversions
-  setOperationAction(ISD::FP_TO_SINT, MVT::i32, Expand);
-  setOperationAction(ISD::FP_TO_UINT, MVT::i32, Expand);
-  setOperationAction(ISD::FP_TO_SINT, MVT::i64, Expand);
-  setOperationAction(ISD::FP_TO_UINT, MVT::i64, Expand);
+  // Conversions (action keyed by the source operand type).
+  setOperationAction(ISD::FP_TO_SINT, MVT::i32, Custom);
+  setOperationAction(ISD::FP_TO_UINT, MVT::i32, Custom);
+  setOperationAction(ISD::FP_TO_SINT, MVT::i64, Custom);
+  setOperationAction(ISD::FP_TO_UINT, MVT::i64, Custom);
 
-  // Int-to-float conversions
-  setOperationAction(ISD::SINT_TO_FP, MVT::f32, Expand);
-  setOperationAction(ISD::UINT_TO_FP, MVT::f32, Expand);
-  setOperationAction(ISD::SINT_TO_FP, MVT::f64, Expand);
-  setOperationAction(ISD::UINT_TO_FP, MVT::f64, Expand);
+  setOperationAction(ISD::SINT_TO_FP, MVT::i32, Custom);
+  setOperationAction(ISD::UINT_TO_FP, MVT::i32, Custom);
+  setOperationAction(ISD::SINT_TO_FP, MVT::i64, Custom);
+  setOperationAction(ISD::UINT_TO_FP, MVT::i64, Custom);
 
-  // Float-to-float conversions
-  setOperationAction(ISD::FP_ROUND, MVT::f32, Expand);
-  setOperationAction(ISD::FP_EXTEND, MVT::f64, Expand);
+  // FP_ROUND/FP_EXTEND are keyed by the result type.
+  setOperationAction(ISD::FP_ROUND, MVT::f32, Custom);
+  setOperationAction(ISD::FP_EXTEND, MVT::f64, Custom);
 
-  // FMA (fused multiply-add)
+  // FMA (fused multiply-add) stays as a libcall until explicitly enabled.
   setOperationAction(ISD::FMA, MVT::f32, Expand);
   setOperationAction(ISD::FMA, MVT::f64, Expand);
 
@@ -162,6 +265,10 @@ SDValue LinxISATargetLowering::LowerOperation(SDValue Op,
     return LowerBRIND(Op, DAG);
   case ISD::JumpTable:
     return LowerJumpTable(Op, DAG);
+  case ISD::MULHS:
+    return LowerMULHS(Op, DAG);
+  case ISD::MULHU:
+    return LowerMULHU(Op, DAG);
   case ISD::SIGN_EXTEND:
     return LowerSIGN_EXTEND(Op, DAG);
   case ISD::ZERO_EXTEND:
@@ -172,8 +279,42 @@ SDValue LinxISATargetLowering::LowerOperation(SDValue Op,
     return LowerSELECT(Op, DAG);
   case ISD::SETCC:
     return LowerSETCC(Op, DAG);
+  case ISD::FADD:
+    return LowerFPBinOp(Op, DAG, LinxISA::FADDrr);
+  case ISD::FSUB:
+    return LowerFPBinOp(Op, DAG, LinxISA::FSUBrr);
+  case ISD::FMUL:
+    return LowerFPBinOp(Op, DAG, LinxISA::FMULrr);
+  case ISD::FDIV:
+    return LowerFPBinOp(Op, DAG, LinxISA::FDIVrr);
+  case ISD::FABS:
+    return LowerFPUnOp(Op, DAG, LinxISA::FABSrr);
+  case ISD::FNEG: {
+    SDLoc DL(Op);
+    EVT VT = Op.getValueType();
+    SDValue Zero = DAG.getConstantFP(0.0, DL, VT);
+    return DAG.getNode(ISD::FSUB, DL, VT, Zero, Op.getOperand(0));
+  }
+  case ISD::FP_TO_SINT:
+    return LowerFP_TO_SINT(Op, DAG);
+  case ISD::FP_TO_UINT:
+    return LowerFP_TO_UINT(Op, DAG);
+  case ISD::SINT_TO_FP:
+    return LowerSINT_TO_FP(Op, DAG);
+  case ISD::UINT_TO_FP:
+    return LowerUINT_TO_FP(Op, DAG);
+  case ISD::FP_ROUND:
+    return LowerFP_ROUND(Op, DAG);
+  case ISD::FP_EXTEND:
+    return LowerFP_EXTEND(Op, DAG);
   case ISD::GlobalAddress:
     return LowerGlobalAddress(Op, DAG);
+  case ISD::BlockAddress:
+    return LowerBlockAddress(Op, DAG);
+  case ISD::GlobalTLSAddress:
+    return LowerGlobalTLSAddress(Op, DAG);
+  case ISD::ConstantPool:
+    return LowerConstantPool(Op, DAG);
   case ISD::VASTART:
     return LowerVASTART(Op, DAG);
   default:
@@ -223,6 +364,116 @@ SDValue LinxISATargetLowering::LowerJumpTable(SDValue Op,
   const unsigned AddOpc =
       (Ty == MVT::i32) ? LinxISA::ADDIWri : LinxISA::ADDIri;
   return SDValue(DAG.getMachineNode(AddOpc, DL, Ty, Page, JTI), 0);
+}
+
+static SDValue lowerMulHU64(SDLoc DL, SelectionDAG &DAG, SDValue A, SDValue B) {
+  const EVT VT = MVT::i64;
+
+  auto getLo32 = [&](SDValue V) -> SDValue {
+    SDValue Lo32 = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, V);
+    return DAG.getNode(ISD::ZERO_EXTEND, DL, VT, Lo32);
+  };
+  auto getHi32 = [&](SDValue V) -> SDValue {
+    SDValue Sh = DAG.getNode(ISD::SRL, DL, VT, V,
+                             DAG.getConstant(32, DL, VT));
+    SDValue Hi32 = DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, Sh);
+    return DAG.getNode(ISD::ZERO_EXTEND, DL, VT, Hi32);
+  };
+
+  SDValue ALo = getLo32(A);
+  SDValue AHi = getHi32(A);
+  SDValue BLo = getLo32(B);
+  SDValue BHi = getHi32(B);
+
+  // 64x64 -> high 64 bits via 32-bit limbs.
+  // See Hacker's Delight, 2nd ed., section 8-3 (multiply).
+  SDValue P00 = DAG.getNode(ISD::MUL, DL, VT, ALo, BLo);
+  SDValue P01 = DAG.getNode(ISD::MUL, DL, VT, ALo, BHi);
+  SDValue P10 = DAG.getNode(ISD::MUL, DL, VT, AHi, BLo);
+  SDValue P11 = DAG.getNode(ISD::MUL, DL, VT, AHi, BHi);
+
+  SDValue Mid = DAG.getNode(ISD::ADD, DL, VT, P01, P10);
+  SDValue MidCarry = DAG.getSetCC(DL, VT, Mid, P01, ISD::SETULT); // carry out
+
+  SDValue MidHi = DAG.getNode(ISD::SRL, DL, VT, Mid, DAG.getConstant(32, DL, VT));
+  SDValue MidCarrySh =
+      DAG.getNode(ISD::SHL, DL, VT, MidCarry, DAG.getConstant(32, DL, VT));
+  MidHi = DAG.getNode(ISD::ADD, DL, VT, MidHi, MidCarrySh);
+
+  SDValue LowAdd =
+      DAG.getNode(ISD::ADD, DL, VT, P00,
+                  DAG.getNode(ISD::SHL, DL, VT, Mid, DAG.getConstant(32, DL, VT)));
+  SDValue LowCarry = DAG.getSetCC(DL, VT, LowAdd, P00, ISD::SETULT);
+
+  SDValue High = DAG.getNode(ISD::ADD, DL, VT, P11, MidHi);
+  return DAG.getNode(ISD::ADD, DL, VT, High, LowCarry);
+}
+
+SDValue LinxISATargetLowering::LowerMULHU(SDValue Op,
+                                         SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue A = Op.getOperand(0);
+  SDValue B = Op.getOperand(1);
+  EVT VT = Op.getValueType();
+
+  if (VT == MVT::i32) {
+    SDValue A64 = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i64, A);
+    SDValue B64 = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i64, B);
+    SDValue Prod = DAG.getNode(ISD::MUL, DL, MVT::i64, A64, B64);
+    SDValue Hi = DAG.getNode(ISD::SRL, DL, MVT::i64, Prod,
+                             DAG.getConstant(32, DL, MVT::i64));
+    return DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, Hi);
+  }
+
+  if (VT == MVT::i64)
+    return lowerMulHU64(DL, DAG, A, B);
+
+  return SDValue();
+}
+
+SDValue LinxISATargetLowering::LowerMULHS(SDValue Op,
+                                         SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue A = Op.getOperand(0);
+  SDValue B = Op.getOperand(1);
+  EVT VT = Op.getValueType();
+
+  if (VT == MVT::i32) {
+    SDValue A64 = DAG.getNode(ISD::SIGN_EXTEND, DL, MVT::i64, A);
+    SDValue B64 = DAG.getNode(ISD::SIGN_EXTEND, DL, MVT::i64, B);
+    SDValue Prod = DAG.getNode(ISD::MUL, DL, MVT::i64, A64, B64);
+    SDValue Hi = DAG.getNode(ISD::SRA, DL, MVT::i64, Prod,
+                             DAG.getConstant(32, DL, MVT::i64));
+    return DAG.getNode(ISD::TRUNCATE, DL, MVT::i32, Hi);
+  }
+
+  if (VT == MVT::i64) {
+    // mulhs(a, b) = mulhu(a, b) - (a < 0 ? b : 0) - (b < 0 ? a : 0)
+    SDValue HighUU = lowerMulHU64(DL, DAG, A, B);
+    SDValue Zero = DAG.getRegister(LinxISA::R0, MVT::i64);
+    SDValue ANeg = DAG.getSetCC(DL, MVT::i64, A, Zero, ISD::SETLT);
+    SDValue BNeg = DAG.getSetCC(DL, MVT::i64, B, Zero, ISD::SETLT);
+    SDValue AdjA = DAG.getNode(ISD::SELECT, DL, MVT::i64, ANeg, B, Zero);
+    SDValue AdjB = DAG.getNode(ISD::SELECT, DL, MVT::i64, BNeg, A, Zero);
+    SDValue Tmp = DAG.getNode(ISD::SUB, DL, MVT::i64, HighUU, AdjA);
+    return DAG.getNode(ISD::SUB, DL, MVT::i64, Tmp, AdjB);
+  }
+
+  return SDValue();
+}
+
+SDValue LinxISATargetLowering::LowerBlockAddress(SDValue Op,
+                                                 SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT Ty = Op.getValueType();
+  auto *BA = cast<BlockAddressSDNode>(Op);
+
+  SDValue TBA = DAG.getTargetBlockAddress(BA->getBlockAddress(), Ty,
+                                         BA->getOffset());
+  SDValue Page = SDValue(DAG.getMachineNode(LinxISA::ADDTPC, DL, Ty, TBA), 0);
+  const unsigned AddOpc =
+      (Ty == MVT::i32) ? LinxISA::ADDIWri : LinxISA::ADDIri;
+  return SDValue(DAG.getMachineNode(AddOpc, DL, Ty, Page, TBA), 0);
 }
 
 SDValue LinxISATargetLowering::LowerBRCOND(SDValue Op,
@@ -440,7 +691,7 @@ SDValue LinxISATargetLowering::LowerSELECT(SDValue Op, SelectionDAG &DAG) const 
   SDLoc DL(Op);
   EVT VT = Op.getValueType();
 
-  if (VT != MVT::i32 && VT != MVT::i64)
+  if (VT != MVT::i32 && VT != MVT::i64 && VT != MVT::f32 && VT != MVT::f64)
     return SDValue();
 
   SDValue Cond = Op.getOperand(0);
@@ -450,14 +701,15 @@ SDValue LinxISATargetLowering::LowerSELECT(SDValue Op, SelectionDAG &DAG) const 
   // Lower to the ISA conditional select:
   //   rd = csel pred, true, false
   // with pred as a 0/1 integer value.
+  const EVT PredVT = (VT.getScalarSizeInBits() == 32) ? MVT::i32 : MVT::i64;
   SDValue Pred = Cond;
-  if (Pred.getValueType() != VT) {
+  if (Pred.getValueType() != PredVT) {
     unsigned PredBits = Pred.getValueType().getScalarSizeInBits();
-    unsigned VBits = VT.getScalarSizeInBits();
-    if (PredBits < VBits)
-      Pred = DAG.getNode(ISD::ZERO_EXTEND, DL, VT, Pred);
+    unsigned WantBits = PredVT.getScalarSizeInBits();
+    if (PredBits < WantBits)
+      Pred = DAG.getNode(ISD::ZERO_EXTEND, DL, PredVT, Pred);
     else
-      Pred = DAG.getNode(ISD::TRUNCATE, DL, VT, Pred);
+      Pred = DAG.getNode(ISD::TRUNCATE, DL, PredVT, Pred);
   }
 
   return SDValue(
@@ -470,6 +722,130 @@ SDValue LinxISATargetLowering::LowerSETCC(SDValue Op,
   SDValue LHS = Op.getOperand(0);
   SDValue RHS = Op.getOperand(1);
   ISD::CondCode CC = cast<CondCodeSDNode>(Op.getOperand(2))->get();
+
+  // Hard-float compares: lower scalar f32/f64 SETCC to FEQ/FLT/FGE.
+  EVT CmpVT = LHS.getValueType();
+  if (CmpVT == MVT::f32 || CmpVT == MVT::f64) {
+    const int64_t SrcType = linxEncodeFpSrcType(CmpVT);
+    SDValue SrcTypeImm = DAG.getTargetConstant(SrcType, DL, MVT::i64);
+    const EVT ResVT = Op.getValueType();
+
+    auto emitCmp = [&](unsigned Opc, SDValue A, SDValue B) -> SDValue {
+      return SDValue(
+          DAG.getMachineNode(Opc, DL, ResVT, A, B, SrcTypeImm), 0);
+    };
+
+    auto invertBool = [&](SDValue V) -> SDValue {
+      const unsigned XorOpc =
+          (ResVT == MVT::i32) ? LinxISA::XORIWri : LinxISA::XORIri;
+      SDValue One =
+          DAG.getTargetConstant(1, DL, (ResVT == MVT::i32) ? MVT::i32 : MVT::i64);
+      return SDValue(DAG.getMachineNode(XorOpc, DL, ResVT, V, One), 0);
+    };
+
+    bool SwapOps = false;
+    bool Invert = false;
+    unsigned CmpOpc = 0;
+
+    switch (CC) {
+    case ISD::SETFALSE:
+    case ISD::SETFALSE2:
+      return DAG.getConstant(0, DL, ResVT);
+    case ISD::SETTRUE:
+    case ISD::SETTRUE2:
+      return DAG.getConstant(1, DL, ResVT);
+    case ISD::SETEQ:
+    case ISD::SETOEQ:
+      CmpOpc = LinxISA::FEQrr;
+      break;
+    case ISD::SETLT:
+    case ISD::SETOLT:
+      CmpOpc = LinxISA::FLTrr;
+      break;
+    case ISD::SETGE:
+    case ISD::SETOGE:
+      CmpOpc = LinxISA::FGErr;
+      break;
+    case ISD::SETLE:
+    case ISD::SETOLE:
+      SwapOps = true; // a <= b  <=>  b >= a
+      CmpOpc = LinxISA::FGErr;
+      break;
+    case ISD::SETGT:
+    case ISD::SETOGT:
+      SwapOps = true; // a > b  <=>  b < a
+      CmpOpc = LinxISA::FLTrr;
+      break;
+    case ISD::SETULE:
+      // unordered-or-(a <= b)  <=>  !(ordered(a > b))
+      // ordered(a > b) <=> ordered(b < a)
+      SwapOps = true;
+      CmpOpc = LinxISA::FLTrr;
+      Invert = true;
+      break;
+    case ISD::SETULT:
+      // unordered-or-(a < b)  <=>  !(ordered(a >= b))
+      CmpOpc = LinxISA::FGErr;
+      Invert = true;
+      break;
+    case ISD::SETUGT:
+      // unordered-or-(a > b)  <=>  !(ordered(a <= b))
+      // ordered(a <= b) <=> ordered(b >= a)
+      SwapOps = true;
+      CmpOpc = LinxISA::FGErr;
+      Invert = true;
+      break;
+    case ISD::SETUGE:
+      // unordered-or-(a >= b)  <=>  !(ordered(a < b))
+      CmpOpc = LinxISA::FLTrr;
+      Invert = true;
+      break;
+    case ISD::SETONE: {
+      // Ordered and not equal: (a < b) || (a > b).
+      SDValue LT = emitCmp(LinxISA::FLTrr, LHS, RHS);
+      SDValue GT = emitCmp(LinxISA::FLTrr, RHS, LHS);
+      return DAG.getNode(ISD::OR, DL, ResVT, LT, GT);
+    }
+    case ISD::SETUEQ: {
+      // Unordered or equal: !(ordered and not equal).
+      SDValue LT = emitCmp(LinxISA::FLTrr, LHS, RHS);
+      SDValue GT = emitCmp(LinxISA::FLTrr, RHS, LHS);
+      SDValue ONE = DAG.getNode(ISD::OR, DL, ResVT, LT, GT);
+      return invertBool(ONE);
+    }
+    case ISD::SETO: {
+      // Ordered: true iff neither operand is NaN.
+      SDValue AOrd = emitCmp(LinxISA::FEQrr, LHS, LHS);
+      SDValue BOrd = emitCmp(LinxISA::FEQrr, RHS, RHS);
+      return DAG.getNode(ISD::AND, DL, ResVT, AOrd, BOrd);
+    }
+    case ISD::SETUO: {
+      // Unordered: true iff either operand is NaN.
+      SDValue AOrd = emitCmp(LinxISA::FEQrr, LHS, LHS);
+      SDValue BOrd = emitCmp(LinxISA::FEQrr, RHS, RHS);
+      SDValue Ord = DAG.getNode(ISD::AND, DL, ResVT, AOrd, BOrd);
+      return invertBool(Ord);
+    }
+    case ISD::SETNE:
+    case ISD::SETUNE:
+      // C `!=` is unordered-or-not-equal; implement as !(a == b).
+      CmpOpc = LinxISA::FEQrr;
+      Invert = true;
+      break;
+    default:
+      report_fatal_error("Linx: unsupported floating-point SETCC condition");
+    }
+
+    if (SwapOps)
+      std::swap(LHS, RHS);
+
+    SDValue Cmp = emitCmp(CmpOpc, LHS, RHS);
+
+    if (!Invert)
+      return Cmp;
+
+    return invertBool(Cmp);
+  }
 
   auto ExtendToI64 = [&](SDValue V) -> SDValue {
     EVT VT = V.getValueType();
@@ -494,52 +870,343 @@ SDValue LinxISATargetLowering::LowerSETCC(SDValue Op,
   LHS = ExtendToI64(LHS);
   RHS = ExtendToI64(RHS);
 
-  bool SwapOps = false;
-  unsigned CmpOpc = 0;
+  const EVT ResVT = Op.getValueType();
+
+  auto getImmS = [&](SDValue V) -> std::optional<int64_t> {
+    if (auto *C = dyn_cast<ConstantSDNode>(V))
+      return C->getSExtValue();
+    return std::nullopt;
+  };
+  auto getImmU = [&](SDValue V) -> std::optional<uint64_t> {
+    if (auto *C = dyn_cast<ConstantSDNode>(V))
+      return C->getZExtValue();
+    return std::nullopt;
+  };
+
+  auto emitRR = [&](unsigned Opc, SDValue A, SDValue B) -> SDValue {
+    return SDValue(DAG.getMachineNode(Opc, DL, ResVT, A, B), 0);
+  };
+  auto emitRI = [&](unsigned Opc, SDValue A, int64_t Imm) -> SDValue {
+    SDValue ImmOp = DAG.getTargetConstant(Imm, DL, MVT::i64);
+    return SDValue(DAG.getMachineNode(Opc, DL, ResVT, A, ImmOp), 0);
+  };
+  auto emitRUI = [&](unsigned Opc, SDValue A, uint64_t Imm) -> SDValue {
+    SDValue ImmOp = DAG.getTargetConstant(static_cast<int64_t>(Imm), DL, MVT::i64);
+    return SDValue(DAG.getMachineNode(Opc, DL, ResVT, A, ImmOp), 0);
+  };
+
   switch (CC) {
-  case ISD::SETEQ:
-    CmpOpc = LinxISA::CMPEQ;
-    break;
-  case ISD::SETNE:
-    CmpOpc = LinxISA::CMPNE;
-    break;
-  case ISD::SETLT:
-    CmpOpc = LinxISA::CMPLT;
-    break;
-  case ISD::SETLE:
-    SwapOps = true;
-    CmpOpc = LinxISA::CMPGE;
-    break;
-  case ISD::SETGT:
-    SwapOps = true;
-    CmpOpc = LinxISA::CMPLT;
-    break;
-  case ISD::SETGE:
-    CmpOpc = LinxISA::CMPGE;
-    break;
-  case ISD::SETULT:
-    CmpOpc = LinxISA::CMPLTU;
-    break;
-  case ISD::SETULE:
-    SwapOps = true;
-    CmpOpc = LinxISA::CMPGEU;
-    break;
-  case ISD::SETUGT:
-    SwapOps = true;
-    CmpOpc = LinxISA::CMPLTU;
-    break;
-  case ISD::SETUGE:
-    CmpOpc = LinxISA::CMPGEU;
-    break;
+  case ISD::SETEQ: {
+    if (auto Imm = getImmS(RHS); Imm && isInt<12>(*Imm))
+      return emitRI(LinxISA::CMPEQI, LHS, *Imm);
+    if (auto Imm = getImmS(LHS); Imm && isInt<12>(*Imm))
+      return emitRI(LinxISA::CMPEQI, RHS, *Imm);
+    return emitRR(LinxISA::CMPEQ, LHS, RHS);
+  }
+  case ISD::SETNE: {
+    // Peephole: icmp ne (and/or x, y), 0  ==>  cmp.{and,or} x, y
+    //           icmp ne (and/or x, C), 0  ==>  cmp.{and,or}i x, C
+    //
+    // These avoid materializing the intermediate AND/OR result just to compare
+    // against zero, and match the ISA `CMP.AND*`/`CMP.OR*` helpers.
+    auto tryEmitLogicCmp = [&]() -> SDValue {
+      auto stripExt = [&](SDValue V) -> SDValue {
+        while (true) {
+          unsigned Op = V.getOpcode();
+          if (Op == ISD::SIGN_EXTEND || Op == ISD::ZERO_EXTEND ||
+              Op == ISD::ANY_EXTEND) {
+            V = V.getOperand(0);
+            continue;
+          }
+          break;
+        }
+        return V;
+      };
+      auto isZero = [&](SDValue V) -> bool {
+        V = stripExt(V);
+        if (auto *C = dyn_cast<ConstantSDNode>(V))
+          return C->isZero();
+        return false;
+      };
+      auto matchLogic = [&](SDValue V, unsigned &OutOpcRR,
+                            unsigned &OutOpcRI32, unsigned &OutOpcRI48,
+                            SDValue &A, SDValue &BOrImm, bool &IsImm) -> bool {
+        if (V.getOpcode() != ISD::AND && V.getOpcode() != ISD::OR)
+          return false;
+
+        const bool IsAnd = (V.getOpcode() == ISD::AND);
+        OutOpcRR = IsAnd ? LinxISA::CMPAND : LinxISA::CMPOR;
+        OutOpcRI32 = IsAnd ? LinxISA::CMPANDI : LinxISA::CMPORI;
+        OutOpcRI48 = IsAnd ? LinxISA::HLCMPANDI : LinxISA::HLCMPORI;
+
+        SDValue X = V.getOperand(0);
+        SDValue Y = V.getOperand(1);
+
+        // Prefer immediate forms when possible.
+        if (auto *C = dyn_cast<ConstantSDNode>(Y)) {
+          int64_t Imm = C->getSExtValue();
+          IsImm = true;
+          A = X;
+          BOrImm = DAG.getTargetConstant(Imm, DL, MVT::i64);
+          return true;
+        }
+        if (auto *C = dyn_cast<ConstantSDNode>(X)) {
+          int64_t Imm = C->getSExtValue();
+          IsImm = true;
+          A = Y;
+          BOrImm = DAG.getTargetConstant(Imm, DL, MVT::i64);
+          return true;
+        }
+
+        IsImm = false;
+        A = X;
+        BOrImm = Y;
+        return true;
+      };
+
+      SDValue Logic = SDValue();
+      if (isZero(RHS))
+        Logic = LHS;
+      else if (isZero(LHS))
+        Logic = RHS;
+      else
+        return SDValue();
+
+      // Nonzero tests are invariant under extension that preserves the low
+      // bits of the boolean source expression. Look through extends so we can
+      // still match (sext (and ...)) patterns after type legalization.
+      Logic = stripExt(Logic);
+
+      unsigned OpcRR = 0, OpcRI32 = 0, OpcRI48 = 0;
+      SDValue A, BOrImm;
+      bool IsImm = false;
+      if (!matchLogic(Logic, OpcRR, OpcRI32, OpcRI48, A, BOrImm, IsImm))
+        return SDValue();
+
+      if (!IsImm)
+        return emitRR(OpcRR, A, BOrImm);
+
+      // For immediate forms, choose 32-bit or 48-bit encoding based on range.
+      int64_t Imm = cast<ConstantSDNode>(BOrImm)->getSExtValue();
+      if (isInt<12>(Imm))
+        return emitRI(OpcRI32, A, Imm);
+      if (isInt<24>(Imm))
+        return SDValue(DAG.getMachineNode(OpcRI48, DL, ResVT, A,
+                                         DAG.getTargetConstant(Imm, DL, MVT::i64)),
+                       0);
+      return SDValue();
+    };
+
+    if (SDValue V = tryEmitLogicCmp())
+      return V;
+
+    if (auto Imm = getImmS(RHS); Imm && isInt<12>(*Imm))
+      return emitRI(LinxISA::CMPNEI, LHS, *Imm);
+    if (auto Imm = getImmS(LHS); Imm && isInt<12>(*Imm))
+      return emitRI(LinxISA::CMPNEI, RHS, *Imm);
+    return emitRR(LinxISA::CMPNE, LHS, RHS);
+  }
+  case ISD::SETLT: {
+    if (auto Imm = getImmS(RHS); Imm && isInt<12>(*Imm))
+      return emitRI(LinxISA::CMPLTI, LHS, *Imm);
+    if (auto Imm = getImmS(LHS);
+        Imm && *Imm != std::numeric_limits<int64_t>::max() &&
+        isInt<12>(*Imm + 1))
+      return emitRI(LinxISA::CMPGEI, RHS, *Imm + 1); // C < x  <=>  x >= C+1
+    return emitRR(LinxISA::CMPLT, LHS, RHS);
+  }
+  case ISD::SETLE: {
+    if (auto Imm = getImmS(RHS);
+        Imm && *Imm != std::numeric_limits<int64_t>::max() &&
+        isInt<12>(*Imm + 1))
+      return emitRI(LinxISA::CMPLTI, LHS, *Imm + 1); // x <= C  <=>  x < C+1
+    if (auto Imm = getImmS(LHS); Imm && isInt<12>(*Imm))
+      return emitRI(LinxISA::CMPGEI, RHS, *Imm); // C <= x  <=>  x >= C
+    return emitRR(LinxISA::CMPGE, RHS, LHS);     // x <= y  <=>  y >= x
+  }
+  case ISD::SETGT: {
+    if (auto Imm = getImmS(RHS);
+        Imm && *Imm != std::numeric_limits<int64_t>::max() &&
+        isInt<12>(*Imm + 1))
+      return emitRI(LinxISA::CMPGEI, LHS, *Imm + 1); // x > C  <=>  x >= C+1
+    if (auto Imm = getImmS(LHS); Imm && isInt<12>(*Imm))
+      return emitRI(LinxISA::CMPLTI, RHS, *Imm); // C > x  <=>  x < C
+    return emitRR(LinxISA::CMPLT, RHS, LHS);     // x > y  <=>  y < x
+  }
+  case ISD::SETGE: {
+    if (auto Imm = getImmS(RHS); Imm && isInt<12>(*Imm))
+      return emitRI(LinxISA::CMPGEI, LHS, *Imm);
+    if (auto Imm = getImmS(LHS);
+        Imm && *Imm != std::numeric_limits<int64_t>::max() &&
+        isInt<12>(*Imm + 1))
+      return emitRI(LinxISA::CMPLTI, RHS, *Imm + 1); // C >= x  <=>  x < C+1
+    return emitRR(LinxISA::CMPGE, LHS, RHS);
+  }
+  case ISD::SETULT: {
+    if (auto Imm = getImmU(RHS); Imm && isUInt<12>(*Imm))
+      return emitRUI(LinxISA::CMPLTUI, LHS, *Imm);
+    if (auto Imm = getImmU(LHS);
+        Imm && *Imm != std::numeric_limits<uint64_t>::max() &&
+        isUInt<12>(*Imm + 1))
+      return emitRUI(LinxISA::CMPGEUI, RHS, *Imm + 1); // C <u x  <=>  x >=u C+1
+    return emitRR(LinxISA::CMPLTU, LHS, RHS);
+  }
+  case ISD::SETULE: {
+    if (auto Imm = getImmU(RHS);
+        Imm && *Imm != std::numeric_limits<uint64_t>::max() &&
+        isUInt<12>(*Imm + 1))
+      return emitRUI(LinxISA::CMPLTUI, LHS, *Imm + 1); // x <=u C  <=>  x <u C+1
+    if (auto Imm = getImmU(LHS); Imm && isUInt<12>(*Imm))
+      return emitRUI(LinxISA::CMPGEUI, RHS, *Imm); // C <=u x  <=>  x >=u C
+    return emitRR(LinxISA::CMPGEU, RHS, LHS);      // x <=u y  <=>  y >=u x
+  }
+  case ISD::SETUGT: {
+    if (auto Imm = getImmU(RHS);
+        Imm && *Imm != std::numeric_limits<uint64_t>::max() &&
+        isUInt<12>(*Imm + 1))
+      return emitRUI(LinxISA::CMPGEUI, LHS, *Imm + 1); // x >u C  <=>  x >=u C+1
+    if (auto Imm = getImmU(LHS); Imm && isUInt<12>(*Imm))
+      return emitRUI(LinxISA::CMPLTUI, RHS, *Imm); // C >u x  <=>  x <u C
+    return emitRR(LinxISA::CMPLTU, RHS, LHS);      // x >u y  <=>  y <u x
+  }
+  case ISD::SETUGE: {
+    if (auto Imm = getImmU(RHS); Imm && isUInt<12>(*Imm))
+      return emitRUI(LinxISA::CMPGEUI, LHS, *Imm);
+    if (auto Imm = getImmU(LHS);
+        Imm && *Imm != std::numeric_limits<uint64_t>::max() &&
+        isUInt<12>(*Imm + 1))
+      return emitRUI(LinxISA::CMPLTUI, RHS, *Imm + 1); // C >=u x  <=>  x <u C+1
+    return emitRR(LinxISA::CMPGEU, LHS, RHS);
+  }
   default:
     report_fatal_error("Linx: unsupported SETCC condition");
   }
+}
 
-  if (SwapOps)
-    std::swap(LHS, RHS);
-
+SDValue LinxISATargetLowering::LowerFPBinOp(SDValue Op, SelectionDAG &DAG,
+                                           unsigned Opc) const {
+  SDLoc DL(Op);
+  EVT VT = Op.getValueType();
+  const int64_t SrcType = linxEncodeFpSrcType(VT);
+  SDValue SrcTypeImm = DAG.getTargetConstant(SrcType, DL, MVT::i64);
   return SDValue(
-      DAG.getMachineNode(CmpOpc, DL, Op.getValueType(), LHS, RHS), 0);
+      DAG.getMachineNode(Opc, DL, VT, Op.getOperand(0), Op.getOperand(1),
+                         SrcTypeImm),
+      0);
+}
+
+SDValue LinxISATargetLowering::LowerFPUnOp(SDValue Op, SelectionDAG &DAG,
+                                          unsigned Opc) const {
+  SDLoc DL(Op);
+  EVT VT = Op.getValueType();
+  const int64_t SrcType = linxEncodeFpSrcType(VT);
+  SDValue SrcTypeImm = DAG.getTargetConstant(SrcType, DL, MVT::i64);
+  return SDValue(
+      DAG.getMachineNode(Opc, DL, VT, Op.getOperand(0), SrcTypeImm), 0);
+}
+
+SDValue LinxISATargetLowering::LowerFP_TO_SINT(SDValue Op,
+                                              SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT DstVT = Op.getValueType();
+  SDValue Src = Op.getOperand(0);
+  EVT SrcVT = Src.getValueType();
+
+  const int64_t DstType = linxEncodeCvtDstTypeSInt(DstVT);
+  const int64_t SrcType = linxEncodeFpSrcType(SrcVT);
+
+  SDValue DstTypeImm = DAG.getTargetConstant(DstType, DL, MVT::i64);
+  SDValue SrcTypeImm = DAG.getTargetConstant(SrcType, DL, MVT::i64);
+  return SDValue(
+      DAG.getMachineNode(LinxISA::FCVTZ, DL, DstVT, Src, DstTypeImm,
+                         SrcTypeImm),
+      0);
+}
+
+SDValue LinxISATargetLowering::LowerFP_TO_UINT(SDValue Op,
+                                              SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT DstVT = Op.getValueType();
+  SDValue Src = Op.getOperand(0);
+  EVT SrcVT = Src.getValueType();
+
+  const int64_t DstType = linxEncodeCvtDstTypeUInt(DstVT);
+  const int64_t SrcType = linxEncodeFpSrcType(SrcVT);
+
+  SDValue DstTypeImm = DAG.getTargetConstant(DstType, DL, MVT::i64);
+  SDValue SrcTypeImm = DAG.getTargetConstant(SrcType, DL, MVT::i64);
+  return SDValue(
+      DAG.getMachineNode(LinxISA::FCVTZ, DL, DstVT, Src, DstTypeImm,
+                         SrcTypeImm),
+      0);
+}
+
+SDValue LinxISATargetLowering::LowerSINT_TO_FP(SDValue Op,
+                                              SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT DstVT = Op.getValueType();
+  SDValue Src = Op.getOperand(0);
+  EVT SrcVT = Src.getValueType();
+
+  const int64_t DstType = linxEncodeCvtDstTypeFP(DstVT);
+  const int64_t SrcType = linxEncodeCvtSrcTypeInt(SrcVT);
+
+  SDValue DstTypeImm = DAG.getTargetConstant(DstType, DL, MVT::i64);
+  SDValue SrcTypeImm = DAG.getTargetConstant(SrcType, DL, MVT::i64);
+  return SDValue(
+      DAG.getMachineNode(LinxISA::SCVTF, DL, DstVT, Src, DstTypeImm, SrcTypeImm),
+      0);
+}
+
+SDValue LinxISATargetLowering::LowerUINT_TO_FP(SDValue Op,
+                                              SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT DstVT = Op.getValueType();
+  SDValue Src = Op.getOperand(0);
+  EVT SrcVT = Src.getValueType();
+
+  const int64_t DstType = linxEncodeCvtDstTypeFP(DstVT);
+  const int64_t SrcType = linxEncodeCvtSrcTypeInt(SrcVT);
+
+  SDValue DstTypeImm = DAG.getTargetConstant(DstType, DL, MVT::i64);
+  SDValue SrcTypeImm = DAG.getTargetConstant(SrcType, DL, MVT::i64);
+  return SDValue(
+      DAG.getMachineNode(LinxISA::UCVTF, DL, DstVT, Src, DstTypeImm, SrcTypeImm),
+      0);
+}
+
+SDValue LinxISATargetLowering::LowerFP_ROUND(SDValue Op,
+                                            SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT DstVT = Op.getValueType();
+  SDValue Src = Op.getOperand(0);
+  EVT SrcVT = Src.getValueType();
+
+  const int64_t DstType = linxEncodeCvtDstTypeFP(DstVT);
+  const int64_t SrcType = linxEncodeFpSrcType(SrcVT);
+
+  SDValue DstTypeImm = DAG.getTargetConstant(DstType, DL, MVT::i64);
+  SDValue SrcTypeImm = DAG.getTargetConstant(SrcType, DL, MVT::i64);
+  return SDValue(
+      DAG.getMachineNode(LinxISA::FCVT, DL, DstVT, Src, DstTypeImm, SrcTypeImm),
+      0);
+}
+
+SDValue LinxISATargetLowering::LowerFP_EXTEND(SDValue Op,
+                                             SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT DstVT = Op.getValueType();
+  SDValue Src = Op.getOperand(0);
+  EVT SrcVT = Src.getValueType();
+
+  const int64_t DstType = linxEncodeCvtDstTypeFP(DstVT);
+  const int64_t SrcType = linxEncodeFpSrcType(SrcVT);
+
+  SDValue DstTypeImm = DAG.getTargetConstant(DstType, DL, MVT::i64);
+  SDValue SrcTypeImm = DAG.getTargetConstant(SrcType, DL, MVT::i64);
+  return SDValue(
+      DAG.getMachineNode(LinxISA::FCVT, DL, DstVT, Src, DstTypeImm, SrcTypeImm),
+      0);
 }
 
 SDValue LinxISATargetLowering::LowerGlobalAddress(SDValue Op,
@@ -561,6 +1228,42 @@ SDValue LinxISATargetLowering::LowerGlobalAddress(SDValue Op,
   const unsigned AddOpc =
       (Ty == MVT::i32) ? LinxISA::ADDIWri : LinxISA::ADDIri;
   return SDValue(DAG.getMachineNode(AddOpc, DL, Ty, Page, GA), 0);
+}
+
+SDValue LinxISATargetLowering::LowerGlobalTLSAddress(
+    SDValue Op, SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT Ty = Op.getValueType();
+  // SelectionDAG uses GlobalAddressSDNode for both GlobalAddress and
+  // GlobalTLSAddress opcodes.
+  auto *N = cast<GlobalAddressSDNode>(Op);
+  const GlobalValue *GV = N->getGlobal();
+  int64_t Offset = N->getOffset();
+
+  // Bring-up: treat TLS variables as normal global symbols. This is sufficient
+  // for single-threaded environments and allows building glibc objects before
+  // the TLS ABI is finalized.
+  SDValue GA = DAG.getTargetGlobalAddress(GV, DL, Ty, Offset);
+  SDValue Page = SDValue(DAG.getMachineNode(LinxISA::ADDTPC, DL, Ty, GA), 0);
+  const unsigned AddOpc =
+      (Ty == MVT::i32) ? LinxISA::ADDIWri : LinxISA::ADDIri;
+  return SDValue(DAG.getMachineNode(AddOpc, DL, Ty, Page, GA), 0);
+}
+
+SDValue LinxISATargetLowering::LowerConstantPool(SDValue Op,
+                                                 SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT Ty = Op.getValueType();
+  auto *CP = cast<ConstantPoolSDNode>(Op);
+
+  // PC-relative constant pool address materialization:
+  //   ADDTPC (page of CPI) + ADDI/ADDIW (low 12 bits).
+  SDValue CPI = DAG.getTargetConstantPool(CP->getConstVal(), Ty, CP->getAlign(),
+                                         CP->getOffset());
+  SDValue Page = SDValue(DAG.getMachineNode(LinxISA::ADDTPC, DL, Ty, CPI), 0);
+  const unsigned AddOpc =
+      (Ty == MVT::i32) ? LinxISA::ADDIWri : LinxISA::ADDIri;
+  return SDValue(DAG.getMachineNode(AddOpc, DL, Ty, Page, CPI), 0);
 }
 
 SDValue LinxISATargetLowering::LowerVASTART(SDValue Op,
@@ -874,4 +1577,105 @@ const char *LinxISATargetLowering::getTargetNodeName(unsigned Opcode) const {
   default:
     return nullptr;
   }
+}
+
+std::pair<unsigned, const TargetRegisterClass *>
+LinxISATargetLowering::getRegForInlineAsmConstraint(
+    const TargetRegisterInfo *TRI, StringRef Constraint, MVT VT) const {
+  if (Constraint.size() == 1) {
+    switch (Constraint[0]) {
+    case 'r':
+      if (!VT.isVector())
+        return std::make_pair(0u, &LinxISA::GPRRegClass);
+      break;
+    default:
+      break;
+    }
+  }
+
+  // Explicit register constraints: "{a0}", "{a1}", ...
+  if (Constraint.size() > 2 && Constraint.front() == '{' &&
+      Constraint.back() == '}') {
+    StringRef Name = Constraint.drop_front().drop_back();
+    std::string Lower = Name.trim().lower();
+    StringRef Up(Lower);
+    unsigned Phys = 0;
+    bool Found = true;
+    if (Up == "zero")
+      Phys = LinxISA::R0;
+    else if (Up == "sp")
+      Phys = LinxISA::R1;
+    else if (Up == "a0")
+      Phys = LinxISA::R2;
+    else if (Up == "a1")
+      Phys = LinxISA::R3;
+    else if (Up == "a2")
+      Phys = LinxISA::R4;
+    else if (Up == "a3")
+      Phys = LinxISA::R5;
+    else if (Up == "a4")
+      Phys = LinxISA::R6;
+    else if (Up == "a5")
+      Phys = LinxISA::R7;
+    else if (Up == "a6")
+      Phys = LinxISA::R8;
+    else if (Up == "a7")
+      Phys = LinxISA::R9;
+    else if (Up == "ra")
+      Phys = LinxISA::R10;
+    else if (Up == "s0")
+      Phys = LinxISA::R11;
+    else if (Up == "s1")
+      Phys = LinxISA::R12;
+    else if (Up == "s2")
+      Phys = LinxISA::R13;
+    else if (Up == "s3")
+      Phys = LinxISA::R14;
+    else if (Up == "s4")
+      Phys = LinxISA::R15;
+    else if (Up == "s5")
+      Phys = LinxISA::R16;
+    else if (Up == "s6")
+      Phys = LinxISA::R17;
+    else if (Up == "s7")
+      Phys = LinxISA::R18;
+    else if (Up == "s8")
+      Phys = LinxISA::R19;
+    else if (Up == "x0")
+      Phys = LinxISA::R20;
+    else if (Up == "x1")
+      Phys = LinxISA::R21;
+    else if (Up == "x2")
+      Phys = LinxISA::R22;
+    else if (Up == "x3")
+      Phys = LinxISA::R23;
+    else
+      Found = false;
+
+    if (Found)
+      return std::make_pair(Phys, &LinxISA::GPRRegClass);
+  }
+
+  return TargetLowering::getRegForInlineAsmConstraint(TRI, Constraint, VT);
+}
+
+void LinxISATargetLowering::LowerAsmOperandForConstraint(
+    SDValue Op, StringRef Constraint, std::vector<SDValue> &Ops,
+    SelectionDAG &DAG) const {
+  if (Constraint.size() == 1) {
+    switch (Constraint[0]) {
+    case 'i':
+    case 'n': {
+      if (const auto *C = dyn_cast<ConstantSDNode>(Op)) {
+        Ops.push_back(DAG.getTargetConstant(C->getSExtValue(), SDLoc(Op),
+                                            Op.getValueType()));
+        return;
+      }
+      break;
+    }
+    default:
+      break;
+    }
+  }
+  TargetLowering::LowerAsmOperandForConstraint(Op, Constraint, Ops, DAG);
 }

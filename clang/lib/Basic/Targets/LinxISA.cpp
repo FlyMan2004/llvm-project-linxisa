@@ -11,10 +11,31 @@
 //===----------------------------------------------------------------------===//
 
 #include "LinxISA.h"
+#include "clang/Basic/Builtins.h"
 #include "clang/Basic/MacroBuilder.h"
+#include "clang/Basic/TargetBuiltins.h"
 
 using namespace clang;
 using namespace clang::targets;
+
+static constexpr int NumBuiltins =
+    clang::LinxISA::LastTSBuiltin - Builtin::FirstTSBuiltin;
+
+#define GET_BUILTIN_STR_TABLE
+#include "clang/Basic/BuiltinsLinxISA.inc"
+#undef GET_BUILTIN_STR_TABLE
+
+static constexpr Builtin::Info BuiltinInfos[] = {
+#define GET_BUILTIN_INFOS
+#include "clang/Basic/BuiltinsLinxISA.inc"
+#undef GET_BUILTIN_INFOS
+};
+static_assert(std::size(BuiltinInfos) == NumBuiltins);
+
+llvm::SmallVector<Builtin::InfosShard>
+LinxISATargetInfo::getTargetBuiltins() const {
+  return {{&BuiltinStrings, BuiltinInfos}};
+}
 
 ArrayRef<const char *> LinxISATargetInfo::getGCCRegNames() const {
   static const char *const GCCRegNames[] = {

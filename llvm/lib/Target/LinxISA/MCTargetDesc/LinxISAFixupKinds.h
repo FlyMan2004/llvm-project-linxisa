@@ -54,6 +54,20 @@ enum Fixups {
   // Absolute low 12 bits for ADDI/ADDIW uimm12 (used with ADDTPC).
   FIXUP_LINX_LO12,
 
+  // PC-relative loads/stores using *.PCR / HL.*.PCR encodings.
+  //
+  // The 32-bit forms use a signed 17-bit byte offset:
+  //   - Loads: simm17 in bits [31:15]
+  //   - Stores: simm split across bits [31:20] and [11:7]
+  FIXUP_LINX_PCR17_LOAD,
+  FIXUP_LINX_PCR17_STORE,
+
+  // The 48-bit HL.*.PCR forms use a signed 29-bit byte offset (simm):
+  //   - Loads: simm split across bits [47:31] and [15:4]
+  //   - Stores: simm split across bits [47:36], [27:23], and [15:4]
+  FIXUP_LINX_HL_PCR29_LOAD,
+  FIXUP_LINX_HL_PCR29_STORE,
+
   // Marker.
   LastTargetFixupKind,
   NumTargetFixupKinds = LastTargetFixupKind - FirstTargetFixupKind

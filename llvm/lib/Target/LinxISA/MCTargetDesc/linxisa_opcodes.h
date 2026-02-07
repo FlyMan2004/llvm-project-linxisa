@@ -1,4 +1,4 @@
-/* Auto-generated from isa/spec/linxisa-v0.1.json on 2026-01-30. */
+/* Auto-generated from isa/spec/current/linxisa-v0.1.json. */
 /* DO NOT EDIT: run `python3 tools/isa/gen_c_codec.py` to regenerate. */
 
 #pragma once
@@ -10,7 +10,7 @@
 typedef struct {
   const char *id;          /* stable identifier */
   const char *mnemonic;    /* draft mnemonic (e.g. 'ADD', 'C.ADD', 'HL.ADDI') */
-  const char *asm_fmt;     /* assembly template from isa.txt (may be empty) */
+  const char *asm_fmt;     /* assembly template from the ISA catalog (may be empty) */
   uint16_t length_bits;    /* 16/32/48/64 */
   uint64_t mask;           /* fixed-bit mask over the packed instruction bitvector */
   uint64_t match;          /* fixed-bit value over the packed instruction bitvector */
@@ -40,3 +40,4 @@ extern const linxisa_field linxisa_fields[];
 extern const size_t linxisa_fields_count;
 extern const linxisa_field_piece linxisa_field_pieces[];
 extern const size_t linxisa_field_pieces_count;
+

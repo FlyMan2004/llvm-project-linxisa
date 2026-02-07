@@ -131,6 +131,17 @@ namespace clang {
   };
   }
 
+  /// LinxISA builtins
+  namespace LinxISA {
+  enum {
+    LastTIBuiltin = clang::Builtin::FirstTSBuiltin - 1,
+#define GET_BUILTIN_ENUMERATORS
+#include "clang/Basic/BuiltinsLinxISA.inc"
+#undef GET_BUILTIN_ENUMERATORS
+    LastTSBuiltin
+  };
+  }
+
   /// AMDGPU builtins
   namespace AMDGPU {
   enum {

@@ -116,6 +116,40 @@ static const MCExpr *withOffset(const MCExpr *Expr, int64_t Offset,
                                  Ctx);
 }
 
+static bool splitShiftedSignedImm(int64_t Imm, unsigned BaseBits,
+                                  unsigned &ShamtOut,
+                                  int64_t &BaseImmOut) {
+  for (unsigned Sh = 0; Sh < 32; ++Sh) {
+    int64_t Pow = (1LL << Sh);
+    if (Imm % Pow != 0)
+      continue;
+    int64_t Base = Imm / Pow;
+    if (isIntN(BaseBits, Base)) {
+      ShamtOut = Sh;
+      BaseImmOut = Base;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool splitShiftedUnsignedImm(uint64_t Imm, unsigned BaseBits,
+                                    unsigned &ShamtOut,
+                                    uint64_t &BaseImmOut) {
+  for (unsigned Sh = 0; Sh < 32; ++Sh) {
+    uint64_t Pow = (1ULL << Sh);
+    if (Imm % Pow != 0)
+      continue;
+    uint64_t Base = Imm / Pow;
+    if (isUIntN(BaseBits, Base)) {
+      ShamtOut = Sh;
+      BaseImmOut = Base;
+      return true;
+    }
+  }
+  return false;
+}
+
 bool LinxISAMCInstLower::lowerOperand(const MachineOperand &MO,
                                       MCOperand &OutOp) const {
   switch (MO.getType()) {
@@ -152,9 +186,22 @@ bool LinxISAMCInstLower::lowerOperand(const MachineOperand &MO,
     OutOp = MCOperand::createExpr(Expr);
     return true;
   }
+  case MachineOperand::MO_ConstantPoolIndex: {
+    const MCExpr *Expr =
+        MCSymbolRefExpr::create(Printer.GetCPISymbol(MO.getIndex()), Ctx);
+    Expr = withOffset(Expr, MO.getOffset(), Ctx);
+    OutOp = MCOperand::createExpr(Expr);
+    return true;
+  }
   case MachineOperand::MO_JumpTableIndex: {
     const MCExpr *Expr =
         MCSymbolRefExpr::create(Printer.GetJTISymbol(MO.getIndex()), Ctx);
+    OutOp = MCOperand::createExpr(Expr);
+    return true;
+  }
+  case MachineOperand::MO_BlockAddress: {
+    const MCExpr *Expr = MCSymbolRefExpr::create(
+        Printer.GetBlockAddressSymbol(MO.getBlockAddress()), Ctx);
     Expr = withOffset(Expr, MO.getOffset(), Ctx);
     OutOp = MCOperand::createExpr(Expr);
     return true;
@@ -260,6 +307,78 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     return;
   }
 
+  case LinxISA::BSTART_TMA: {
+    OutMI.setOpcode(getSpecOpcode("BSTART.TMA", /*LengthBits=*/32, /*Fields=*/2));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // DataType
+    OutMI.addOperand(MCOperand::createImm(I(1))); // Function
+    return;
+  }
+  case LinxISA::BSTART_CUBE: {
+    OutMI.setOpcode(getSpecOpcode("BSTART.CUBE", /*LengthBits=*/32, /*Fields=*/2));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // DataType
+    OutMI.addOperand(MCOperand::createImm(I(1))); // Function
+    return;
+  }
+
+  case LinxISA::B_DIM_LB0:
+  case LinxISA::B_DIM_LB1:
+  case LinxISA::B_DIM_LB2: {
+    StringRef AsmFmt;
+    switch (Opc) {
+    case LinxISA::B_DIM_LB0:
+      AsmFmt = "B.DIM RegSrc, uimm, ->LB0";
+      break;
+    case LinxISA::B_DIM_LB1:
+      AsmFmt = "B.DIM RegSrc, uimm, ->LB1";
+      break;
+    case LinxISA::B_DIM_LB2:
+      AsmFmt = "B.DIM RegSrc, uimm, ->LB2";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+    OutMI.setOpcode(getSpecOpcodeByAsmFmt(AsmFmt, /*LengthBits=*/32));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegSrc
+    OutMI.addOperand(MCOperand::createImm(I(1))); // uimm17
+    return;
+  }
+
+  case LinxISA::B_IOT_G0:
+  case LinxISA::B_IOT_G1: {
+    StringRef AsmFmt =
+        (Opc == LinxISA::B_IOT_G0)
+            ? "B.IOT [SrcTile0<.reuse>, SrcTile1<.reuse>],  group=0, ->DstTile<RegSrc>"
+            : "B.IOT [SrcTile0<.reuse>, SrcTile1<.reuse>],  group=1, ->DstTile<RegSrc>";
+    OutMI.setOpcode(getSpecOpcodeByAsmFmt(AsmFmt, /*LengthBits=*/32));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // DstTile
+    OutMI.addOperand(MCOperand::createImm(R(1))); // RegSrc
+    OutMI.addOperand(MCOperand::createImm(I(2))); // S0R
+    OutMI.addOperand(MCOperand::createImm(I(3))); // S0V
+    OutMI.addOperand(MCOperand::createImm(I(4))); // S1R
+    OutMI.addOperand(MCOperand::createImm(I(5))); // S1V
+    OutMI.addOperand(MCOperand::createImm(I(6))); // SrcTile0
+    OutMI.addOperand(MCOperand::createImm(I(7))); // SrcTile1
+    return;
+  }
+
+  case LinxISA::B_IOTI_G0:
+  case LinxISA::B_IOTI_G1: {
+    StringRef AsmFmt =
+        (Opc == LinxISA::B_IOTI_G0)
+            ? "B.IOTI [SrcTile0<.reuse>, SrcTile1<.reuse>],  group=0, ->DstTile<Size>"
+            : "B.IOTI [SrcTile0<.reuse>, SrcTile1<.reuse>],  group=1, ->DstTile<Size>";
+    OutMI.setOpcode(getSpecOpcodeByAsmFmt(AsmFmt, /*LengthBits=*/32));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // DstTile
+    OutMI.addOperand(MCOperand::createImm(I(1))); // S0R
+    OutMI.addOperand(MCOperand::createImm(I(2))); // S0V
+    OutMI.addOperand(MCOperand::createImm(I(3))); // S1R
+    OutMI.addOperand(MCOperand::createImm(I(4))); // S1V
+    OutMI.addOperand(MCOperand::createImm(I(5))); // SrcTile0
+    OutMI.addOperand(MCOperand::createImm(I(6))); // SrcTile1
+    OutMI.addOperand(MCOperand::createImm(I(7))); // imm5 (Size)
+    return;
+  }
+
   case LinxISA::CSETC_EQ:
   case LinxISA::CSETC_NE: {
     StringRef Mnem;
@@ -283,6 +402,29 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   case LinxISA::CSETC_TGT: {
     OutMI.setOpcode(getSpecOpcode("C.SETC.TGT", /*LengthBits=*/16, /*Fields=*/1));
     OutMI.addOperand(MCOperand::createImm(R(0))); // SrcL
+    return;
+  }
+
+  case LinxISA::C_ZEXT_B:
+  case LinxISA::C_ZEXT_H:
+  case LinxISA::C_ZEXT_W: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::C_ZEXT_B:
+      Mnem = "C.ZEXT.B";
+      break;
+    case LinxISA::C_ZEXT_H:
+      Mnem = "C.ZEXT.H";
+      break;
+    case LinxISA::C_ZEXT_W:
+      Mnem = "C.ZEXT.W";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/16, /*Fields=*/1));
+    // Encoding only needs SrcL; destination is implicit in the compressed form.
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
     return;
   }
 
@@ -319,7 +461,119 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/3));
     OutMI.addOperand(MCOperand::createImm(R(0))); // SrcL
     OutMI.addOperand(MCOperand::createImm(R(1))); // SrcR
-    OutMI.addOperand(MCOperand::createImm(3));    // SrcRType (default: no modifier)
+    int64_t SrcRType = 3; // default: no modifier
+    if (MI->getNumOperands() > 1) {
+      const MachineOperand &SrcRMO = MI->getOperand(1);
+      if (SrcRMO.isReg()) {
+        if ((SrcRMO.getTargetFlags() & LinxII::MO_SRCR_SW) != 0)
+          SrcRType = 0; // .sw
+        else if ((SrcRMO.getTargetFlags() & LinxII::MO_SRCR_UW) != 0)
+          SrcRType = 1; // .uw
+      }
+    }
+    OutMI.addOperand(MCOperand::createImm(SrcRType));
+    return;
+  }
+
+  case LinxISA::SETC_AND:
+  case LinxISA::SETC_OR: {
+    StringRef Mnem = (Opc == LinxISA::SETC_AND) ? "SETC.AND" : "SETC.OR";
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcR
+    int64_t SrcRType = 3; // default: no modifier
+    if (MI->getNumOperands() > 1) {
+      const MachineOperand &SrcRMO = MI->getOperand(1);
+      if (SrcRMO.isReg()) {
+        if ((SrcRMO.getTargetFlags() & LinxII::MO_SRCR_SW) != 0)
+          SrcRType = 0; // .sw
+        else if ((SrcRMO.getTargetFlags() & LinxII::MO_SRCR_UW) != 0)
+          SrcRType = 1; // .uw
+      }
+    }
+    OutMI.addOperand(MCOperand::createImm(SrcRType));
+    return;
+  }
+
+  case LinxISA::SETC_EQI:
+  case LinxISA::SETC_NEI:
+  case LinxISA::SETC_LTI:
+  case LinxISA::SETC_GEI:
+  case LinxISA::SETC_LTUI:
+  case LinxISA::SETC_GEUI: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::SETC_EQI:
+      Mnem = "SETC.EQI";
+      break;
+    case LinxISA::SETC_NEI:
+      Mnem = "SETC.NEI";
+      break;
+    case LinxISA::SETC_LTI:
+      Mnem = "SETC.LTI";
+      break;
+    case LinxISA::SETC_GEI:
+      Mnem = "SETC.GEI";
+      break;
+    case LinxISA::SETC_LTUI:
+      Mnem = "SETC.LTUI";
+      break;
+    case LinxISA::SETC_GEUI:
+      Mnem = "SETC.GEUI";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // SrcL
+    unsigned Shamt = 0;
+    int64_t BaseImmS = 0;
+    uint64_t BaseImmU = 0;
+    if (Opc == LinxISA::SETC_LTUI || Opc == LinxISA::SETC_GEUI) {
+      if (I(1) < 0)
+        report_fatal_error("Linx: SETC.*UI immediate must be non-negative");
+      uint64_t Imm = static_cast<uint64_t>(I(1));
+      if (!splitShiftedUnsignedImm(Imm, /*BaseBits=*/12, Shamt, BaseImmU))
+        report_fatal_error("Linx: SETC.*UI immediate not encodable");
+      OutMI.addOperand(MCOperand::createImm(Shamt));
+      OutMI.addOperand(MCOperand::createImm(static_cast<int64_t>(BaseImmU)));
+      return;
+    }
+
+    if (!splitShiftedSignedImm(I(1), /*BaseBits=*/12, Shamt, BaseImmS))
+      report_fatal_error("Linx: SETC.*I immediate not encodable");
+    OutMI.addOperand(MCOperand::createImm(Shamt));
+    OutMI.addOperand(MCOperand::createImm(BaseImmS));
+    return;
+  }
+
+  case LinxISA::SETC_ANDI:
+  case LinxISA::SETC_ORI: {
+    StringRef Mnem = (Opc == LinxISA::SETC_ANDI) ? "SETC.ANDI" : "SETC.ORI";
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // SrcL
+    unsigned Shamt = 0;
+    int64_t BaseImm = 0;
+    if (!splitShiftedSignedImm(I(1), /*BaseBits=*/12, Shamt, BaseImm))
+      report_fatal_error("Linx: SETC.ANDI/ORI immediate not encodable");
+    OutMI.addOperand(MCOperand::createImm(Shamt));
+    OutMI.addOperand(MCOperand::createImm(BaseImm));
+    return;
+  }
+
+  case LinxISA::HLSETC_ANDI:
+  case LinxISA::HLSETC_ORI: {
+    StringRef Mnem = (Opc == LinxISA::HLSETC_ANDI) ? "HL.SETC.ANDI" : "HL.SETC.ORI";
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/48, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // SrcL
+    // Keep the same operand order as the 32-bit SETC.*I forms: SrcL, shamt, simm.
+    unsigned Shamt = 0;
+    int64_t BaseImm = 0;
+    if (!splitShiftedSignedImm(I(1), /*BaseBits=*/24, Shamt, BaseImm))
+      report_fatal_error("Linx: HL.SETC.ANDI/ORI immediate not encodable");
+    OutMI.addOperand(MCOperand::createImm(Shamt));
+    OutMI.addOperand(MCOperand::createImm(BaseImm));
     return;
   }
 
@@ -337,6 +591,41 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     return;
   }
 
+  case LinxISA::C_SEXT_B:
+  case LinxISA::C_SEXT_H:
+  case LinxISA::C_SEXT_W: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::C_SEXT_B:
+      Mnem = "C.SEXT.B";
+      break;
+    case LinxISA::C_SEXT_H:
+      Mnem = "C.SEXT.H";
+      break;
+    case LinxISA::C_SEXT_W:
+      Mnem = "C.SEXT.W";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/16, /*Fields=*/1));
+    // Encoding only needs SrcL; destination is implicit in the compressed form.
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
+    return;
+  }
+
+  case LinxISA::MADD:
+  case LinxISA::MADDW: {
+    StringRef Mnem = (Opc == LinxISA::MADD) ? "MADD" : "MADDW";
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/4));
+    // Field order for the spec form is: RegDst, SrcD, SrcL, SrcR.
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+    OutMI.addOperand(MCOperand::createImm(R(3))); // SrcD (addend)
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR
+    return;
+  }
+
   case TargetOpcode::COPY: {
     // Prefer the compressed form.
     OutMI.setOpcode(getSpecOpcode("C.MOVR", /*LengthBits=*/16, /*Fields=*/2));
@@ -346,8 +635,51 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   }
 
   case LinxISA::ADDrr_SH:
-  case LinxISA::ADDWrr_SH: {
-    const StringRef Mnem = (Opc == LinxISA::ADDrr_SH) ? "ADD" : "ADDW";
+  case LinxISA::SUBrr_SH:
+  case LinxISA::ANDrr_SH:
+  case LinxISA::ORrr_SH:
+  case LinxISA::XORrr_SH:
+  case LinxISA::ADDWrr_SH:
+  case LinxISA::SUBWrr_SH:
+  case LinxISA::ANDWrr_SH:
+  case LinxISA::ORWrr_SH:
+  case LinxISA::XORWrr_SH: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::ADDrr_SH:
+      Mnem = "ADD";
+      break;
+    case LinxISA::SUBrr_SH:
+      Mnem = "SUB";
+      break;
+    case LinxISA::ANDrr_SH:
+      Mnem = "AND";
+      break;
+    case LinxISA::ORrr_SH:
+      Mnem = "OR";
+      break;
+    case LinxISA::XORrr_SH:
+      Mnem = "XOR";
+      break;
+    case LinxISA::ADDWrr_SH:
+      Mnem = "ADDW";
+      break;
+    case LinxISA::SUBWrr_SH:
+      Mnem = "SUBW";
+      break;
+    case LinxISA::ANDWrr_SH:
+      Mnem = "ANDW";
+      break;
+    case LinxISA::ORWrr_SH:
+      Mnem = "ORW";
+      break;
+    case LinxISA::XORWrr_SH:
+      Mnem = "XORW";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+
     OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/5));
     OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
     OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
@@ -682,6 +1014,100 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     return;
   }
 
+  case LinxISA::FADDrr:
+  case LinxISA::FSUBrr:
+  case LinxISA::FMULrr:
+  case LinxISA::FDIVrr: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::FADDrr:
+      Mnem = "FADD";
+      break;
+    case LinxISA::FSUBrr:
+      Mnem = "FSUB";
+      break;
+    case LinxISA::FMULrr:
+      Mnem = "FMUL";
+      break;
+    case LinxISA::FDIVrr:
+      Mnem = "FDIV";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/4));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR
+    OutMI.addOperand(MCOperand::createImm(I(3))); // SrcType
+    return;
+  }
+
+  case LinxISA::FABSrr: {
+    OutMI.setOpcode(getSpecOpcode("FABS", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(I(2))); // SrcType
+    return;
+  }
+
+  case LinxISA::FEQrr:
+  case LinxISA::FLTrr:
+  case LinxISA::FGErr: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::FEQrr:
+      Mnem = "FEQ";
+      break;
+    case LinxISA::FLTrr:
+      Mnem = "FLT";
+      break;
+    case LinxISA::FGErr:
+      Mnem = "FGE";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/4));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR
+    OutMI.addOperand(MCOperand::createImm(I(3))); // SrcType
+    return;
+  }
+
+  case LinxISA::FCVT:
+  case LinxISA::FCVTZ:
+  case LinxISA::SCVTF:
+  case LinxISA::UCVTF: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::FCVT:
+      Mnem = "FCVT";
+      break;
+    case LinxISA::FCVTZ:
+      Mnem = "FCVTZ";
+      break;
+    case LinxISA::SCVTF:
+      Mnem = "SCVTF";
+      break;
+    case LinxISA::UCVTF:
+      Mnem = "UCVTF";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/4));
+    OutMI.addOperand(MCOperand::createImm(I(2))); // DstType
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(I(3))); // SrcType
+    return;
+  }
+
   case LinxISA::SLLIri:
   case LinxISA::SRLIri:
   case LinxISA::SRAIri:
@@ -756,6 +1182,150 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
     OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
     OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR
+    return;
+  }
+
+  case LinxISA::HLADDIri:
+  case LinxISA::HLSUBIri:
+  case LinxISA::HLANDIri:
+  case LinxISA::HLORIri:
+  case LinxISA::HLXORIri:
+  case LinxISA::HLADDIWri:
+  case LinxISA::HLSUBIWri:
+  case LinxISA::HLANDIWri:
+  case LinxISA::HLORIWri:
+  case LinxISA::HLXORIWri: {
+    const MachineOperand &Op2 = MI->getOperand(2);
+    if (!Op2.isImm()) {
+      if (!Op2.isReg()) {
+        MI->print(errs());
+        report_fatal_error("Linx: expected imm/reg operand for HL.*I instruction");
+      }
+
+      // If the immediate got materialized into a register, fall back to the
+      // corresponding reg-reg instruction.
+      StringRef RegMnem;
+      switch (Opc) {
+      case LinxISA::HLADDIri:
+        RegMnem = "ADD";
+        break;
+      case LinxISA::HLSUBIri:
+        RegMnem = "SUB";
+        break;
+      case LinxISA::HLANDIri:
+        RegMnem = "AND";
+        break;
+      case LinxISA::HLORIri:
+        RegMnem = "OR";
+        break;
+      case LinxISA::HLXORIri:
+        RegMnem = "XOR";
+        break;
+      case LinxISA::HLADDIWri:
+        RegMnem = "ADDW";
+        break;
+      case LinxISA::HLSUBIWri:
+        RegMnem = "SUBW";
+        break;
+      case LinxISA::HLANDIWri:
+        RegMnem = "ANDW";
+        break;
+      case LinxISA::HLORIWri:
+        RegMnem = "ORW";
+        break;
+      case LinxISA::HLXORIWri:
+        RegMnem = "XORW";
+        break;
+      default:
+        llvm_unreachable("Unexpected opcode");
+      }
+
+      OutMI.setOpcode(getSpecOpcode(RegMnem, /*LengthBits=*/32, /*Fields=*/5));
+      OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+      OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
+      OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR
+      OutMI.addOperand(MCOperand::createImm(3));    // SrcRType (default: no modifier)
+      OutMI.addOperand(MCOperand::createImm(0));    // shamt
+      return;
+    }
+
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::HLADDIri:
+      Mnem = "HL.ADDI";
+      break;
+    case LinxISA::HLSUBIri:
+      Mnem = "HL.SUBI";
+      break;
+    case LinxISA::HLANDIri:
+      Mnem = "HL.ANDI";
+      break;
+    case LinxISA::HLORIri:
+      Mnem = "HL.ORI";
+      break;
+    case LinxISA::HLXORIri:
+      Mnem = "HL.XORI";
+      break;
+    case LinxISA::HLADDIWri:
+      Mnem = "HL.ADDIW";
+      break;
+    case LinxISA::HLSUBIWri:
+      Mnem = "HL.SUBIW";
+      break;
+    case LinxISA::HLANDIWri:
+      Mnem = "HL.ANDIW";
+      break;
+    case LinxISA::HLORIWri:
+      Mnem = "HL.ORIW";
+      break;
+    case LinxISA::HLXORIWri:
+      Mnem = "HL.XORIW";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/48, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(I(2))); // uimm24/simm24
+    return;
+  }
+
+  case LinxISA::CLZ:
+  case LinxISA::CTZ:
+  case LinxISA::BCNT: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::CLZ:
+      Mnem = "CLZ";
+      break;
+    case LinxISA::CTZ:
+      Mnem = "CTZ";
+      break;
+    case LinxISA::BCNT:
+      Mnem = "BCNT";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/4));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(I(2))); // imml
+    OutMI.addOperand(MCOperand::createImm(I(3))); // imms
+    return;
+  }
+
+  case LinxISA::BXS:
+  case LinxISA::BXU: {
+    const StringRef Mnem = (Opc == LinxISA::BXS) ? "BXS" : "BXU";
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/4));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(I(2))); // imml
+    OutMI.addOperand(MCOperand::createImm(I(3))); // imms
     return;
   }
 
@@ -890,6 +1460,96 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     return;
   }
 
+  case LinxISA::LB_PCR:
+  case LinxISA::LBU_PCR:
+  case LinxISA::LH_PCR:
+  case LinxISA::LHU_PCR:
+  case LinxISA::LW_PCR:
+  case LinxISA::LWU_PCR:
+  case LinxISA::LD_PCR: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::LB_PCR:
+      Mnem = "LB.PCR";
+      break;
+    case LinxISA::LBU_PCR:
+      Mnem = "LBU.PCR";
+      break;
+    case LinxISA::LH_PCR:
+      Mnem = "LH.PCR";
+      break;
+    case LinxISA::LHU_PCR:
+      Mnem = "LHU.PCR";
+      break;
+    case LinxISA::LW_PCR:
+      Mnem = "LW.PCR";
+      break;
+    case LinxISA::LWU_PCR:
+      Mnem = "LWU.PCR";
+      break;
+    case LinxISA::LD_PCR:
+      Mnem = "LD.PCR";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/2));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+    MCOperand Op;
+    if (lowerOperand(MI->getOperand(1), Op)) {
+      OutMI.addOperand(Op);
+    } else {
+      report_fatal_error("Linx *.PCR load: failed to lower symbol operand");
+    }
+    return;
+  }
+
+  case LinxISA::HL_LB_PCR:
+  case LinxISA::HL_LBU_PCR:
+  case LinxISA::HL_LH_PCR:
+  case LinxISA::HL_LHU_PCR:
+  case LinxISA::HL_LW_PCR:
+  case LinxISA::HL_LWU_PCR:
+  case LinxISA::HL_LD_PCR: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::HL_LB_PCR:
+      Mnem = "HL.LB.PCR";
+      break;
+    case LinxISA::HL_LBU_PCR:
+      Mnem = "HL.LBU.PCR";
+      break;
+    case LinxISA::HL_LH_PCR:
+      Mnem = "HL.LH.PCR";
+      break;
+    case LinxISA::HL_LHU_PCR:
+      Mnem = "HL.LHU.PCR";
+      break;
+    case LinxISA::HL_LW_PCR:
+      Mnem = "HL.LW.PCR";
+      break;
+    case LinxISA::HL_LWU_PCR:
+      Mnem = "HL.LWU.PCR";
+      break;
+    case LinxISA::HL_LD_PCR:
+      Mnem = "HL.LD.PCR";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/48, /*Fields=*/2));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+    MCOperand Op;
+    if (lowerOperand(MI->getOperand(1), Op)) {
+      OutMI.addOperand(Op);
+    } else {
+      report_fatal_error("Linx HL.*.PCR load: failed to lower symbol operand");
+    }
+    return;
+  }
+
   case LinxISA::SBI:
   case LinxISA::SHI:
   case LinxISA::SWI:
@@ -931,6 +1591,72 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     return;
   }
 
+  case LinxISA::SB_PCR:
+  case LinxISA::SH_PCR:
+  case LinxISA::SW_PCR:
+  case LinxISA::SD_PCR: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::SB_PCR:
+      Mnem = "SB.PCR";
+      break;
+    case LinxISA::SH_PCR:
+      Mnem = "SH.PCR";
+      break;
+    case LinxISA::SW_PCR:
+      Mnem = "SW.PCR";
+      break;
+    case LinxISA::SD_PCR:
+      Mnem = "SD.PCR";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/2));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // SrcL
+    MCOperand Op;
+    if (lowerOperand(MI->getOperand(1), Op)) {
+      OutMI.addOperand(Op);
+    } else {
+      report_fatal_error("Linx *.PCR store: failed to lower symbol operand");
+    }
+    return;
+  }
+
+  case LinxISA::HL_SB_PCR:
+  case LinxISA::HL_SH_PCR:
+  case LinxISA::HL_SW_PCR:
+  case LinxISA::HL_SD_PCR: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::HL_SB_PCR:
+      Mnem = "HL.SB.PCR";
+      break;
+    case LinxISA::HL_SH_PCR:
+      Mnem = "HL.SH.PCR";
+      break;
+    case LinxISA::HL_SW_PCR:
+      Mnem = "HL.SW.PCR";
+      break;
+    case LinxISA::HL_SD_PCR:
+      Mnem = "HL.SD.PCR";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/48, /*Fields=*/2));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // SrcL
+    MCOperand Op;
+    if (lowerOperand(MI->getOperand(1), Op)) {
+      OutMI.addOperand(Op);
+    } else {
+      report_fatal_error("Linx HL.*.PCR store: failed to lower symbol operand");
+    }
+    return;
+  }
+
   case LinxISA::SB:
   case LinxISA::SH:
   case LinxISA::SW:
@@ -966,7 +1692,9 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   case LinxISA::CMPLT:
   case LinxISA::CMPGE:
   case LinxISA::CMPLTU:
-  case LinxISA::CMPGEU: {
+  case LinxISA::CMPGEU:
+  case LinxISA::CMPAND:
+  case LinxISA::CMPOR: {
     StringRef Mnem;
     switch (Opc) {
     case LinxISA::CMPEQ:
@@ -987,6 +1715,12 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     case LinxISA::CMPGEU:
       Mnem = "CMP.GEU";
       break;
+    case LinxISA::CMPAND:
+      Mnem = "CMP.AND";
+      break;
+    case LinxISA::CMPOR:
+      Mnem = "CMP.OR";
+      break;
     default:
       llvm_unreachable("Unexpected opcode");
     }
@@ -995,7 +1729,88 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
     OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
     OutMI.addOperand(MCOperand::createImm(R(2))); // SrcR
-    OutMI.addOperand(MCOperand::createImm(3));    // SrcRType (default: no modifier)
+    int64_t SrcRType = 3; // default: no modifier
+    if (MI->getNumOperands() > 2) {
+      const MachineOperand &SrcRMO = MI->getOperand(2);
+      if (SrcRMO.isReg()) {
+        if ((SrcRMO.getTargetFlags() & LinxII::MO_SRCR_SW) != 0)
+          SrcRType = 0; // .sw
+        else if ((SrcRMO.getTargetFlags() & LinxII::MO_SRCR_UW) != 0)
+          SrcRType = 1; // .uw
+      }
+    }
+    OutMI.addOperand(MCOperand::createImm(SrcRType));
+    return;
+  }
+
+  case LinxISA::CMPEQI:
+  case LinxISA::CMPNEI:
+  case LinxISA::CMPLTI:
+  case LinxISA::CMPGEI:
+  case LinxISA::CMPLTUI:
+  case LinxISA::CMPGEUI:
+  case LinxISA::CMPANDI:
+  case LinxISA::CMPORI:
+  case LinxISA::HLCMPANDI:
+  case LinxISA::HLCMPORI: {
+    StringRef Mnem;
+    switch (Opc) {
+    case LinxISA::CMPEQI:
+      Mnem = "CMP.EQI";
+      break;
+    case LinxISA::CMPNEI:
+      Mnem = "CMP.NEI";
+      break;
+    case LinxISA::CMPLTI:
+      Mnem = "CMP.LTI";
+      break;
+    case LinxISA::CMPGEI:
+      Mnem = "CMP.GEI";
+      break;
+    case LinxISA::CMPLTUI:
+      Mnem = "CMP.LTUI";
+      break;
+    case LinxISA::CMPGEUI:
+      Mnem = "CMP.GEUI";
+      break;
+    case LinxISA::CMPANDI:
+      Mnem = "CMP.ANDI";
+      break;
+    case LinxISA::CMPORI:
+      Mnem = "CMP.ORI";
+      break;
+    case LinxISA::HLCMPANDI:
+      Mnem = "HL.CMP.ANDI";
+      break;
+    case LinxISA::HLCMPORI:
+      Mnem = "HL.CMP.ORI";
+      break;
+    default:
+      llvm_unreachable("Unexpected opcode");
+    }
+
+    // HL compare forms are always 48-bit.
+    const unsigned LenBits = (Mnem.starts_with("HL.")) ? 48u : 32u;
+
+    // Try the 16-bit compare-immediate forms when the operand constraints match:
+    //   C.CMP.{EQI,NEI}  t#1, simm5, ->t
+    if (LenBits == 32 && (Opc == LinxISA::CMPEQI || Opc == LinxISA::CMPNEI) &&
+        MI->getNumOperands() >= 3) {
+      const Register Dst = MI->getOperand(0).getReg();
+      const Register SrcL = MI->getOperand(1).getReg();
+      const int64_t Imm = I(2);
+      if (Dst == LinxISA::U4 && SrcL == LinxISA::T1 && isInt<5>(Imm)) {
+        const StringRef Cmnem = (Opc == LinxISA::CMPEQI) ? "C.CMP.EQI" : "C.CMP.NEI";
+        OutMI.setOpcode(getSpecOpcode(Cmnem, /*LengthBits=*/16, /*Fields=*/1));
+        OutMI.addOperand(MCOperand::createImm(Imm)); // simm5
+        return;
+      }
+    }
+
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/LenBits, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+    OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(I(2))); // simm12/uimm12
     return;
   }
 

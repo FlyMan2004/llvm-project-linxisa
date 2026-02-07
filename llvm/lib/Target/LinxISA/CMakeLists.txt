@@ -21,6 +21,7 @@ add_llvm_target(LinxISACodeGen
   LinxISAMCInstLower.cpp
   LinxISARegisterInfo.cpp
   LinxISASubtarget.cpp
+  LinxISATargetTransformInfo.cpp
   LinxISATargetMachine.cpp
 
   LINK_COMPONENTS

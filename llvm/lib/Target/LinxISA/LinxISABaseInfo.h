@@ -19,7 +19,13 @@ enum MOFlags : unsigned {
 
   // Use a PLT relocation when referencing a function symbol (e.g. for PIC
   // calls into shared libraries).
-  MO_PLT = 1,
+  MO_PLT = 1u << 0,
+
+  // Apply a SrcR conversion modifier for instructions that support it.
+  // Today this is used for SETC.* and CMP.* forms where only the right operand
+  // can be tagged with a width/sign conversion (e.g. `.sw` / `.uw`).
+  MO_SRCR_UW = 1u << 1,
+  MO_SRCR_SW = 1u << 2,
 };
 
 } // namespace LinxII
@@ -27,4 +33,3 @@ enum MOFlags : unsigned {
 } // namespace llvm
 
 #endif // LLVM_LIB_TARGET_LINXISA_LINXISABASEINFO_H
-

@@ -94,6 +94,82 @@ static std::optional<unsigned> parseRegCode(StringRef Name) {
       .Default(std::nullopt);
 }
 
+static std::optional<uint32_t> parseSSRIdName(StringRef Name) {
+  std::string Up = toUpperStr(Name.trim());
+  return StringSwitch<std::optional<uint32_t>>(Up)
+      .Case("TP", 0x0000u)
+      .Case("GP", 0x0001u)
+      .Case("TIME", 0x0010u)
+      .Case("CYCLE", 0x0c00u)
+      .Case("CSTATE", 0x0020u)
+      .Case("LXLCID", 0x0021u)
+      .Case("VENDOR", 0x0022u)
+      .Case("VERSION", 0x0023u)
+      .Case("LCFR", 0x0024u)
+      .Case("LCFR_EN", 0x0025u)
+      .Case("TR1", 0x0800u)
+      .Case("TR2", 0x0801u)
+      .Case("SYSCNT", 0x0810u)
+      .Case("CW", 0x0820u)
+      .Case("MSGBCR", 0x0830u)
+      .Case("MSGBD1", 0x0831u)
+      .Case("MSGBD2", 0x0832u)
+      .Case("MSGBD3", 0x0833u)
+      .Case("MSGBD4", 0x0834u)
+      .Case("MSGBD5", 0x0835u)
+      .Case("MSGBD6", 0x0836u)
+      .Case("MSGBD7", 0x0837u)
+      .Case("MSGBD8", 0x0838u)
+      .Case("MSGBD9", 0x0839u)
+      .Case("MSGBD10", 0x083au)
+      // ACR-scoped (privileged) SSR families from isa.txt.
+      //
+      // NOTE: Base SSR access instructions encode only SSR_ID[11:0]. These
+      // names map to the low-12-bit IDs (0xFxx) and may be interpreted within a
+      // privileged ACR namespace.
+      .Case("ECSTATE", 0x0f00u)
+      .Case("ECSTATE_ACRN", 0x0f00u)
+      .Case("EVBASE", 0x0f01u)
+      .Case("EVBASE_ACRN", 0x0f01u)
+      .Case("TRAPNO", 0x0f02u)
+      .Case("TRAPNO_ACRN", 0x0f02u)
+      .Case("TRAPARG0", 0x0f03u)
+      .Case("TRAPARG0_ACRN", 0x0f03u)
+      .Case("ETEMP", 0x0f05u)
+      .Case("ETEMP_ACRN", 0x0f05u)
+      .Case("FUTO", 0x0f06u)
+      .Case("FUTO_ACRN", 0x0f06u)
+      .Case("ECONFIG", 0x0f07u)
+      .Case("ECONFIG_ACRN", 0x0f07u)
+      .Case("IPENDING", 0x0f08u)
+      .Case("IPENDING_ACRN", 0x0f08u)
+      .Case("TOPEI", 0x0f09u)
+      .Case("TOPEI_ACRN", 0x0f09u)
+      .Case("EOIEI", 0x0f0au)
+      .Case("EOIEI_ACRN", 0x0f0au)
+      .Case("EBPC", 0x0f0bu)
+      .Case("EBPC_ACRN", 0x0f0bu)
+      .Case("EBARG", 0x0f0cu)
+      .Case("EBARG_ACRN", 0x0f0cu)
+      .Case("ETPC", 0x0f0du)
+      .Case("ETPC_ACRN", 0x0f0du)
+      .Case("EBPCN", 0x0f0eu)
+      .Case("EBPCN_ACRN", 0x0f0eu)
+      .Case("MMTBASE", 0x0f10u)
+      .Case("MMTBASE_ACRN", 0x0f10u)
+      .Case("MMCONFIG", 0x0f11u)
+      .Case("MMCONFIG_ACRN", 0x0f11u)
+      .Case("TIMER_TIME", 0x0f20u)
+      .Case("TIMER_TIME_ACRN", 0x0f20u)
+      .Case("TIMER_TIMECMP", 0x0f21u)
+      .Case("TIMER_TIMECMP_ACRN", 0x0f21u)
+      .Case("XBINFO", 0x0f30u)
+      .Case("XBINFO_ACRN", 0x0f30u)
+      .Case("ACR_PARAM", 0x0f31u)
+      .Case("ACR_PARAM_ACRN", 0x0f31u)
+      .Default(std::nullopt);
+}
+
 static MCRegister regCodeToMCReg(unsigned Code) {
   static const MCRegister Regs[32] = {
       LinxISA::R0,  LinxISA::R1,  LinxISA::R2,  LinxISA::R3,
@@ -675,6 +751,16 @@ bool LinxISAAsmParser::parseInstruction(ParseInstructionInfo &Info,
         continue;
       }
 
+      // System Status Register (SSR) names (e.g. TP/GP/CYCLE).
+      if (auto SSR = parseSSRIdName(getTok().getString())) {
+        SMLoc Start = getTok().getLoc();
+        SMLoc End = getTok().getEndLoc();
+        Lex(); // consume name
+        Operands.push_back(LinxOperand::createImm(
+            MCConstantExpr::create(*SSR, getContext()), Start, End));
+        continue;
+      }
+
       // Otherwise treat as expression.
       const MCExpr *Expr = nullptr;
       SMLoc Start, End;
@@ -1126,6 +1212,28 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
         return false;
       int64_t V = 0;
       if (!require(isConstExpr(E, V), "shamt must be a constant"))
+        return false;
+      emitFieldImm(V);
+      continue;
+    }
+
+    if (FN == "SSR_ID" || FN == "SSRID") {
+      const MCExpr *E = takeImmExpr();
+      if (!require(E != nullptr, "missing SSR ID immediate"))
+        return false;
+      int64_t V = 0;
+      if (!require(isConstExpr(E, V), "SSR ID must be a constant for now"))
+        return false;
+      emitFieldImm(V);
+      continue;
+    }
+
+    if (FN == "RST_Type" || FN == "RRA_Type") {
+      const MCExpr *E = takeImmExpr();
+      if (!require(E != nullptr, ("missing " + FN + " immediate").str()))
+        return false;
+      int64_t V = 0;
+      if (!require(isConstExpr(E, V), (FN + " must be a constant for now").str()))
         return false;
       emitFieldImm(V);
       continue;

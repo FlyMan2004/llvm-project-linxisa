@@ -28,6 +28,7 @@
 #include "llvm/ADT/SetOperations.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/BinaryFormat/Wasm.h"
 #include "llvm/DebugInfo/BTF/BTFParser.h"
 #include "llvm/DebugInfo/DWARF/DWARFContext.h"
@@ -945,6 +946,261 @@ public:
 };
 AMDGCNPrettyPrinter AMDGCNPrettyPrinterInst;
 
+// Per-section symbol map for LinxPrettyPrinter operand patching.
+thread_local const std::unordered_map<uint64_t, StringRef> *LinxPrettyAddrToSym =
+    nullptr;
+
+class LinxPrettyPrinter : public PrettyPrinter {
+public:
+  void printInst(MCInstPrinter &IP, const MCInst *MI, ArrayRef<uint8_t> Bytes,
+                 object::SectionedAddress Address, formatted_raw_ostream &OS,
+                 StringRef Annot, MCSubtargetInfo const &STI, SourcePrinter *SP,
+                 StringRef ObjectFilename, std::vector<RelocationRef> *Rels,
+                 LiveElementPrinter &LEP) override {
+    if (SP && (PrintSource || PrintLines))
+      SP->printSourceLine(OS, Address, ObjectFilename, LEP);
+    LEP.printBoundaryLine(OS, Address, false);
+    LEP.printBetweenInsts(OS, false);
+
+    printRawData(Bytes, Address.Address, OS, STI);
+
+    if (!MI) {
+      OS << "\t<unknown>";
+      return;
+    }
+
+    uint64_t Addr =
+        Address.Address + (STI.getTargetTriple().isX86() ? Bytes.size() : 0);
+
+    std::string Buf;
+    {
+      raw_string_ostream TS(Buf);
+      IP.printInst(MI, Addr, "", STI, TS);
+    }
+
+    auto patchHexOperand = [&](StringRef Sym) {
+      auto replaceToken = [&](size_t Start, size_t End) {
+        if (Start == std::string::npos || End == std::string::npos ||
+            Start >= End || End > Buf.size())
+          return;
+        Buf.replace(Start, End - Start, Sym.str());
+      };
+
+      auto patchPcr = [&]() -> bool {
+        size_t PosPcr = Buf.find(".pcr");
+        if (PosPcr == std::string::npos)
+          return false;
+        size_t Tab = Buf.find('\t', PosPcr);
+        if (Tab == std::string::npos)
+          return false;
+        // If the form contains "->", treat it as a load.
+        if (Buf.find("->", Tab) != std::string::npos) {
+          size_t Hex = Buf.find("0x", Tab);
+          if (Hex != std::string::npos) {
+            size_t End = Hex + 2;
+            while (End < Buf.size() &&
+                   isHexDigit(static_cast<unsigned char>(Buf[End])))
+              ++End;
+            replaceToken(Hex, End);
+            return true;
+          }
+          // Also accept "0" as a placeholder (e.g. "\t0,").
+          size_t Zero = Buf.find("\t0", Tab);
+          if (Zero != std::string::npos) {
+            replaceToken(Zero + 1, Zero + 2);
+            return true;
+          }
+          return false;
+        }
+
+        // Store: patch the last immediate.
+        size_t Hex = Buf.rfind("0x");
+        if (Hex == std::string::npos)
+          return false;
+        size_t End = Hex + 2;
+        while (End < Buf.size() &&
+               isHexDigit(static_cast<unsigned char>(Buf[End])))
+          ++End;
+        replaceToken(Hex, End);
+        return true;
+      };
+
+      auto patchBStartTarget = [&]() -> bool {
+        if (Buf.find("BSTART") == std::string::npos &&
+            Buf.find("C.BSTART") == std::string::npos &&
+            Buf.find("HL.BSTART") == std::string::npos)
+          return false;
+
+        static constexpr const char *Keys[] = {
+            "\tCALL, ", "\tDIRECT, ", "\tCOND, ", "\tFALL, ",
+            "\tCALL,",  "\tDIRECT,",  "\tCOND,",  "\tFALL,",
+        };
+
+        size_t KeyPos = std::string::npos;
+        size_t KeyLen = 0;
+        for (const char *K : Keys) {
+          size_t P = Buf.find(K);
+          if (P == std::string::npos)
+            continue;
+          KeyPos = P;
+          KeyLen = strlen(K);
+          break;
+        }
+        if (KeyPos == std::string::npos)
+          return false;
+
+        size_t Start = KeyPos + KeyLen;
+        while (Start < Buf.size() &&
+               isSpace(static_cast<unsigned char>(Buf[Start])))
+          ++Start;
+
+        // Target operand ends at the next comma, but avoid consuming `ra=...`.
+        size_t End = Buf.find(',', Start);
+        if (End == std::string::npos)
+          return false;
+        replaceToken(Start, End);
+        return true;
+      };
+
+      auto patchFirstHexAfterTab = [&]() -> bool {
+        size_t Tab = Buf.find('\t');
+        if (Tab == std::string::npos)
+          return false;
+        size_t Hex = Buf.find("0x", Tab);
+        if (Hex == std::string::npos)
+          return false;
+        // Avoid patching the return-target annotation.
+        if (size_t Ra = Buf.find("ra="); Ra != std::string::npos && Hex > Ra)
+          return false;
+        size_t End = Hex + 2;
+        while (End < Buf.size() &&
+               isHexDigit(static_cast<unsigned char>(Buf[End])))
+          ++End;
+        replaceToken(Hex, End);
+        return true;
+      };
+
+      // Prefer specialized patterns first.
+      if (patchPcr())
+        return;
+      if (patchBStartTarget())
+        return;
+      if (patchFirstHexAfterTab())
+        return;
+
+      // Fallback: patch the last hex literal in the line.
+      size_t Hex = Buf.rfind("0x");
+      if (Hex == std::string::npos)
+        return;
+      size_t End = Hex + 2;
+      while (End < Buf.size() &&
+             isHexDigit(static_cast<unsigned char>(Buf[End])))
+        ++End;
+      replaceToken(Hex, End);
+    };
+
+    if (Rels) {
+      // Patch the instruction itself.
+      for (const RelocationRef &Rel : *Rels) {
+        uint64_t Off = Rel.getOffset();
+        if (Off != Address.Address)
+          continue;
+
+        const uint64_t Type = Rel.getType();
+        if (Type != ELF::R_LINX_PCR17_LOAD && Type != ELF::R_LINX_PCR17_STORE &&
+            Type != ELF::R_LINX_HL_PCR29_LOAD &&
+            Type != ELF::R_LINX_HL_PCR29_STORE &&
+            Type != ELF::R_LINX_B12_PCREL && Type != ELF::R_LINX_J22_PCREL &&
+            Type != ELF::R_LINX_CBSTART12_PCREL &&
+            Type != ELF::R_LINX_B17_PCREL && Type != ELF::R_LINX_B17_PLT &&
+            Type != ELF::R_LINX_HL_BSTART30_PCREL &&
+            Type != ELF::R_LINX_CSETRET5_PCREL &&
+            Type != ELF::R_LINX_SETRET20_PCREL &&
+            Type != ELF::R_LINX_HL_SETRET32_PCREL)
+          continue;
+
+        SmallString<32> Val;
+        if (Error E = getRelocationValueString(Rel, SymbolDescription, Val)) {
+          consumeError(std::move(E));
+          continue;
+        }
+
+        if (!Val.empty())
+          patchHexOperand(Val);
+      }
+
+      // Also patch the fused `ra=...` operand for BSTART CALL if the following
+      // SETRET relocation exists. (The SETRET encoding is consumed by the
+      // disassembler and is not printed as a separate line.)
+      if (Buf.find("BSTART") != std::string::npos &&
+          Buf.find("CALL") != std::string::npos &&
+          Buf.find("ra=") != std::string::npos) {
+        const uint64_t NextOff = Address.Address + Bytes.size();
+        for (const RelocationRef &Rel : *Rels) {
+          if (Rel.getOffset() != NextOff)
+            continue;
+          const uint64_t Type = Rel.getType();
+          if (Type != ELF::R_LINX_CSETRET5_PCREL &&
+              Type != ELF::R_LINX_SETRET20_PCREL &&
+              Type != ELF::R_LINX_HL_SETRET32_PCREL)
+            continue;
+
+          SmallString<32> Val;
+          if (Error E = getRelocationValueString(Rel, SymbolDescription, Val)) {
+            consumeError(std::move(E));
+            continue;
+          }
+          if (Val.empty())
+            continue;
+
+          // Replace `ra=0x...` with `ra=<sym>`.
+          size_t RaPos = Buf.find("ra=");
+          if (RaPos == std::string::npos)
+            break;
+          size_t HexPos = Buf.find("0x", RaPos);
+          if (HexPos != std::string::npos) {
+            size_t End = HexPos + 2;
+            while (End < Buf.size() &&
+                   isHexDigit(static_cast<unsigned char>(Buf[End])))
+              ++End;
+            Buf.replace(HexPos, End - HexPos, Val.str().str());
+          }
+          break;
+        }
+      }
+    }
+
+    // If the fused return-target annotation has no relocation (common for local
+    // MBB return labels), try to patch it using an exact symbol match.
+    if (Buf.find("BSTART") != std::string::npos &&
+        Buf.find("CALL") != std::string::npos && Buf.find("ra=") != std::string::npos) {
+      extern thread_local const std::unordered_map<uint64_t, StringRef> *
+          LinxPrettyAddrToSym;
+      if (LinxPrettyAddrToSym) {
+        size_t RaPos = Buf.find("ra=");
+        size_t HexPos = RaPos == std::string::npos ? std::string::npos
+                                                   : Buf.find("0x", RaPos);
+        if (HexPos != std::string::npos) {
+          uint64_t V = 0;
+          size_t End = HexPos + 2;
+          while (End < Buf.size() &&
+                 isHexDigit(static_cast<unsigned char>(Buf[End])))
+            ++End;
+          StringRef HexStr(Buf.data() + HexPos + 2, End - (HexPos + 2));
+          if (!HexStr.getAsInteger(16, V)) {
+            auto It = LinxPrettyAddrToSym->find(V);
+            if (It != LinxPrettyAddrToSym->end())
+              Buf.replace(HexPos, End - HexPos, It->second.str());
+          }
+        }
+      }
+    }
+
+    OS << Buf;
+  }
+};
+LinxPrettyPrinter LinxPrettyPrinterInst;
+
 class BPFPrettyPrinter : public PrettyPrinter {
 public:
   void printInst(MCInstPrinter &IP, const MCInst *MI, ArrayRef<uint8_t> Bytes,
@@ -1116,6 +1372,9 @@ PrettyPrinter &selectPrettyPrinter(Triple const &Triple) {
   switch (Triple.getArch()) {
   default:
     return PrettyPrinterInst;
+  case Triple::linx32:
+  case Triple::linx64:
+    return LinxPrettyPrinterInst;
   case Triple::hexagon:
     return HexagonPrettyPrinterInst;
   case Triple::amdgcn:
@@ -1787,7 +2046,8 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
   }
 
   std::map<SectionRef, std::vector<RelocationRef>> RelocMap;
-  if (InlineRelocs || Obj.isXCOFF())
+  if (InlineRelocs || Obj.isXCOFF() || Obj.getArch() == Triple::linx32 ||
+      Obj.getArch() == Triple::linx64)
     RelocMap = getRelocsMap(Obj);
   bool Is64Bits = Obj.getBytesInAddress() > 4;
 
@@ -2012,6 +2272,19 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
 
     ArrayRef<uint8_t> Bytes = arrayRefFromStringRef(
         unwrapOrError(Section.getContents(), Obj.getFileName()));
+
+    std::unordered_map<uint64_t, StringRef> LinxSymByAddr;
+    const bool IsLinxObj =
+        Obj.getArch() == Triple::linx32 || Obj.getArch() == Triple::linx64;
+    if (IsLinxObj) {
+      // Prefer "real" symbols over mapping symbols for operand patching.
+      for (const SymbolInfoTy &Sym : Symbols) {
+        if (Sym.IsMappingSymbol)
+          continue;
+        LinxSymByAddr.try_emplace(Sym.Addr, Sym.Name);
+      }
+      LinxPrettyAddrToSym = &LinxSymByAddr;
+    }
 
     std::vector<std::unique_ptr<std::string>> SynthesizedLabelNames;
     if (Obj.isELF() && Obj.getArch() == Triple::amdgcn) {
@@ -2646,6 +2919,9 @@ disassembleObject(ObjectFile &Obj, const ObjectFile &DbgObj,
         Index += Size;
       }
     }
+
+    if (IsLinxObj)
+      LinxPrettyAddrToSym = nullptr;
   }
   StringSet<> MissingDisasmSymbolSet =
       set_difference(DisasmSymbolSet, FoundDisasmSymbolSet);
@@ -2672,6 +2948,13 @@ static void disassembleObject(ObjectFile *Obj, bool InlineRelocs,
   }
 
   const Target *TheTarget = getTarget(Obj);
+
+  // Linx disassembly is much more readable when symbol operands are used
+  // (e.g. for *.pcr and fused BSTART CALL return targets). Enable operand
+  // symbolization by default for Linx objects unless the user already opted in.
+  if (!SymbolizeOperands &&
+      (Obj->getArch() == Triple::linx32 || Obj->getArch() == Triple::linx64))
+    SymbolizeOperands = true;
 
   // Package up features to be passed to target/subtarget
   Expected<SubtargetFeatures> FeaturesValue = Obj->getFeatures();

@@ -130,6 +130,11 @@ static MCStreamer *createMCStreamer(const Triple &T, MCContext &Context,
                            std::move(Emitter));
 }
 
+static MCRelocationInfo *createLinxISAMCRelocationInfo(const Triple &TT,
+                                                       MCContext &Ctx) {
+  return llvm::createMCRelocationInfo(TT, Ctx);
+}
+
 extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void
 LLVMInitializeLinxISATargetMC() {
   RegisterMCAsmInfoFn X32(getTheLinx32Target(), createLinx32MCAsmInfo);
@@ -142,6 +147,7 @@ LLVMInitializeLinxISATargetMC() {
     TargetRegistry::RegisterMCCodeEmitter(*T, createLinxISAMCCodeEmitter);
     TargetRegistry::RegisterMCAsmBackend(*T, createLinxISAAsmBackend);
     TargetRegistry::RegisterMCInstPrinter(*T, createLinxISAMCInstPrinter);
+    TargetRegistry::RegisterMCRelocationInfo(*T, createLinxISAMCRelocationInfo);
     TargetRegistry::RegisterELFStreamer(*T, createMCStreamer);
   }
 }

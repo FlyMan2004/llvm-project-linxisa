@@ -127,7 +127,10 @@ static bool isSignedSetRet(const linxisa_inst_form &Form) {
 
 MCDisassembler::DecodeStatus LinxISADisassembler::getInstruction(
     MCInst &Instr, uint64_t &Size, ArrayRef<uint8_t> Bytes, uint64_t Address,
-    raw_ostream & /*CStream*/) const {
+    raw_ostream &CStream) const {
+  // Allow symbolic operand printing when llvm-objdump installs a symbolizer.
+  CommentStream = &CStream;
+
   // LinxISA has overlapping encodings across lengths (e.g. templates/prefixes).
   // Prefer the longest matching encoding to keep the disassembler in sync.
   static constexpr unsigned CandidateBits[] = {64, 48, 32, 16};
@@ -165,10 +168,75 @@ MCDisassembler::DecodeStatus LinxISADisassembler::getInstruction(
   Instr.clear();
   Instr.setOpcode(MatchedOpcode);
 
+  StringRef Mnem(Matched->mnemonic ? Matched->mnemonic : "");
+
+  auto trySymbolize = [&](int64_t Value, bool IsBranchLike) -> bool {
+    // For bring-up, use Offset=0/OpSize=0. This matches common target patterns
+    // and allows llvm-objdump to turn relocations into symbolic operands.
+    return tryAddingSymbolicOperand(Instr, Value, Address, IsBranchLike,
+                                    /*Offset=*/0, /*OpSize=*/0,
+                                    /*InstSize=*/Size);
+  };
+
+  auto isHalfwordPcRel = [&](StringRef FieldName) -> bool {
+    // Control-flow immediates are halfword-scaled.
+    return FieldName == "simm12" || FieldName == "simm17" ||
+           FieldName == "simm22" || FieldName == "simm25" ||
+           FieldName == "uimm5" || FieldName == "imm20" ||
+           FieldName == "imm32";
+  };
+
   SmallVector<int64_t, 16> FieldVals;
   extractFields(*Matched, Insn, FieldVals);
-  for (int64_t V : FieldVals)
+  for (unsigned i = 0; i < FieldVals.size(); ++i) {
+    const linxisa_field &F = linxisa_fields[Matched->field_start + i];
+    StringRef FieldName(F.name ? F.name : "");
+    const int64_t V = FieldVals[i];
+
+    bool WantsSym = false;
+    bool IsBranchLike = false;
+    int64_t SymValue = V;
+
+    if (Mnem.ends_with(".PCR") && (FieldName == "simm17" || FieldName == "simm")) {
+      // *.PCR/HL.*.PCR: PC-relative data access.
+      WantsSym = true;
+      IsBranchLike = false;
+      SymValue = static_cast<int64_t>(Address) + V;
+    } else if (FieldName == "simm12" && Mnem.starts_with("B.")) {
+      // Conditional branches (halfword-scaled).
+      WantsSym = true;
+      IsBranchLike = true;
+      SymValue = static_cast<int64_t>(Address) + (V << 1);
+    } else if (FieldName == "simm22" && Mnem == "J") {
+      WantsSym = true;
+      IsBranchLike = true;
+      SymValue = static_cast<int64_t>(Address) + (V << 1);
+    } else if (FieldName == "simm12" && Mnem.starts_with("C.BSTART")) {
+      WantsSym = true;
+      IsBranchLike = true;
+      SymValue = static_cast<int64_t>(Address) + (V << 1);
+    } else if ((FieldName == "simm17" || FieldName == "simm25") &&
+               Mnem.starts_with("BSTART.")) {
+      WantsSym = true;
+      IsBranchLike = true;
+      SymValue = static_cast<int64_t>(Address) + (V << 1);
+    } else if (FieldName == "simm" && Mnem.starts_with("HL.BSTART")) {
+      WantsSym = true;
+      IsBranchLike = true;
+      SymValue = static_cast<int64_t>(Address) + V;
+    } else if (isHalfwordPcRel(FieldName) &&
+               (Mnem == "C.SETRET" || Mnem == "SETRET" || Mnem == "HL.SETRET")) {
+      WantsSym = true;
+      IsBranchLike = true;
+      // SETRET immediates are halfword offsets from the SETRET instruction PC.
+      SymValue = static_cast<int64_t>(Address) + (V << 1);
+    }
+
+    if (WantsSym && trySymbolize(SymValue, IsBranchLike))
+      continue;
+
     Instr.addOperand(MCOperand::createImm(V));
+  }
 
   // Disassembler sugar: fuse `BSTART ... CALL` + `SETRET` into a single
   // printed instruction, while still consuming both encodings.
@@ -214,7 +282,19 @@ MCDisassembler::DecodeStatus LinxISADisassembler::getInstruction(
           Target = SetRetAddr + Delta;
         }
 
-        Instr.addOperand(MCOperand::createImm(static_cast<int64_t>(Target)));
+        // Prefer symbolic printing for the fused return-target annotation.
+        // Use the BSTART instruction address with an Offset pointing at the
+        // SETRET encoding, so relocations at the SETRET address can be used
+        // by the symbolizer even though the disassembler prints a fused form.
+        const uint64_t TotalSize = BStartSize + NextSize;
+        if (!tryAddingSymbolicOperand(Instr, static_cast<int64_t>(Target),
+                                      /*Address=*/Address,
+                                      /*IsBranch=*/true,
+                                      /*Offset=*/BStartSize,
+                                      /*OpSize=*/NextSize,
+                                      /*InstSize=*/TotalSize)) {
+          Instr.addOperand(MCOperand::createImm(static_cast<int64_t>(Target)));
+        }
         Size = BStartSize + NextSize;
       }
     }

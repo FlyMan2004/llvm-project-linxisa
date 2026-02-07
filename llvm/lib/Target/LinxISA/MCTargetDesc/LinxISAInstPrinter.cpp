@@ -57,6 +57,108 @@ static StringRef blockTypeSuffix(unsigned BlockType) {
   }
 }
 
+static const char *ssrIdSymbol(uint64_t Id) {
+  // SSR_ID is encoded as a 12-bit field in the base forms (SSRGET/SSRSET/SSRSWAP).
+  // Keep this mapping aligned with isa.txt (and the ISA manual SSR table).
+  unsigned V = static_cast<unsigned>(Id) & 0xfffu;
+  switch (V) {
+  case 0x000:
+    return "TP";
+  case 0x001:
+    return "GP";
+  case 0x010:
+    return "TIME";
+  case 0xc00:
+    return "CYCLE";
+  case 0x020:
+    return "CSTATE";
+  case 0x021:
+    return "LXLCID";
+  case 0x022:
+    return "VENDOR";
+  case 0x023:
+    return "VERSION";
+  case 0x024:
+    return "LCFR";
+  case 0x025:
+    return "LCFR_EN";
+  case 0x800:
+    return "TR1";
+  case 0x801:
+    return "TR2";
+  case 0x810:
+    return "SYSCNT";
+  case 0x820:
+    return "CW";
+  case 0x830:
+    return "MSGBCR";
+  case 0x831:
+    return "MSGBD1";
+  case 0x832:
+    return "MSGBD2";
+  case 0x833:
+    return "MSGBD3";
+  case 0x834:
+    return "MSGBD4";
+  case 0x835:
+    return "MSGBD5";
+  case 0x836:
+    return "MSGBD6";
+  case 0x837:
+    return "MSGBD7";
+  case 0x838:
+    return "MSGBD8";
+  case 0x839:
+    return "MSGBD9";
+  case 0x83a:
+    return "MSGBD10";
+
+  // Privileged/ACR-scoped families (encoded low 12 bits).
+  case 0xf00:
+    return "ECSTATE_ACRn";
+  case 0xf01:
+    return "EVBASE_ACRn";
+  case 0xf02:
+    return "TRAPNO_ACRn";
+  case 0xf03:
+    return "TRAPARG0_ACRn";
+  case 0xf05:
+    return "ETEMP_ACRn";
+  case 0xf06:
+    return "FUTO_ACRn";
+  case 0xf07:
+    return "ECONFIG_ACRn";
+  case 0xf08:
+    return "IPENDING_ACRn";
+  case 0xf09:
+    return "TOPEI_ACRn";
+  case 0xf0a:
+    return "EOIEI_ACRn";
+  case 0xf0b:
+    return "EBPC_ACRn";
+  case 0xf0c:
+    return "EBARG_ACRn";
+  case 0xf0d:
+    return "ETPC_ACRn";
+  case 0xf0e:
+    return "EBPCN_ACRn";
+  case 0xf10:
+    return "MMTBASE_ACRn";
+  case 0xf11:
+    return "MMCONFIG_ACRn";
+  case 0xf20:
+    return "TIMER_TIME_ACRn";
+  case 0xf21:
+    return "TIMER_TIMECMP_ACRn";
+  case 0xf30:
+    return "XBINFO_ACRn";
+  case 0xf31:
+    return "ACR_PARAM_ACRn";
+  default:
+    return nullptr;
+  }
+}
+
 static int64_t shlSigned64(int64_t V, unsigned Shift) {
   APInt A(64, static_cast<uint64_t>(V), /*isSigned=*/true);
   A <<= Shift;
@@ -121,21 +223,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
   auto stripAngleSuffix = [&](StringRef Tok) -> StringRef {
     if (size_t Pos = Tok.find('<'); Pos != StringRef::npos)
       Tok = Tok.take_front(Pos);
-    if (size_t Pos = Tok.find('{'); Pos != StringRef::npos)
-      Tok = Tok.take_front(Pos);
     return Tok;
-  };
-
-  auto mnemonicTok = [&](StringRef Default) -> StringRef {
-    if (!RawTok.empty()) {
-      StringRef Tok = stripAngleSuffix(RawTok);
-      if (Tok.equals_insensitive("c.break") && Form.mnemonic &&
-          StringRef(Form.mnemonic).equals_insensitive("C.EBREAK"))
-        return "c.ebreak";
-      if (!Tok.empty())
-        return Tok;
-    }
-    return Default;
   };
 
   // Map field name -> operand (immediate or expression) from MCInst operands in
@@ -167,6 +255,151 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
         return Op->getImm();
     }
     return std::nullopt;
+  };
+
+  SmallString<32> PrintedMnemonicTok;
+  auto mnemonicTok = [&](StringRef Default) -> StringRef {
+    PrintedMnemonicTok.clear();
+    if (RawTok.empty())
+      return Default;
+
+    StringRef Tok = stripAngleSuffix(RawTok);
+    if (Tok.equals_insensitive("c.break") && Form.mnemonic &&
+        StringRef(Form.mnemonic).equals_insensitive("C.EBREAK"))
+      return "c.ebreak";
+
+    if (Tok.empty())
+      return Default;
+
+    auto emitFpT = [&](unsigned SrcType) {
+      switch (SrcType & 0x3u) {
+      case 0:
+        PrintedMnemonicTok += "fd";
+        break;
+      case 1:
+        PrintedMnemonicTok += "fs";
+        break;
+      case 2:
+        PrintedMnemonicTok += "fh";
+        break;
+      case 3:
+        PrintedMnemonicTok += "fb";
+        break;
+      }
+    };
+
+    auto emitCvtFpDst = [&](unsigned DstType) {
+      switch (DstType & 0x1fu) {
+      case 0:
+        PrintedMnemonicTok += "fd";
+        break;
+      case 1:
+        PrintedMnemonicTok += "fs";
+        break;
+      default:
+        PrintedMnemonicTok += "dt";
+        PrintedMnemonicTok += utostr(DstType & 0x1fu);
+        break;
+      }
+    };
+
+    auto emitCvtIntDst = [&](unsigned DstType) {
+      switch (DstType & 0x1fu) {
+      case 0:
+        PrintedMnemonicTok += "ud";
+        break;
+      case 1:
+        PrintedMnemonicTok += "uw";
+        break;
+      case 2:
+        PrintedMnemonicTok += "uh";
+        break;
+      case 3:
+        PrintedMnemonicTok += "ub";
+        break;
+      case 8:
+        PrintedMnemonicTok += "sd";
+        break;
+      case 9:
+        PrintedMnemonicTok += "sw";
+        break;
+      case 10:
+        PrintedMnemonicTok += "sh";
+        break;
+      case 11:
+        PrintedMnemonicTok += "sb";
+        break;
+      default:
+        PrintedMnemonicTok += "dt";
+        PrintedMnemonicTok += utostr(DstType & 0x1fu);
+        break;
+      }
+    };
+
+    auto emitCvtIntSrc = [&](unsigned SrcType, bool Signed) {
+      switch (SrcType & 0x3u) {
+      case 0:
+        PrintedMnemonicTok += Signed ? "sd" : "ud";
+        break;
+      case 1:
+        PrintedMnemonicTok += Signed ? "sw" : "uw";
+        break;
+      case 2:
+        PrintedMnemonicTok += Signed ? "sh" : "uh";
+        break;
+      case 3:
+        PrintedMnemonicTok += Signed ? "sb" : "ub";
+        break;
+      }
+    };
+
+    if (Tok.contains("{T}")) {
+      const size_t Pos = Tok.find('{');
+      PrintedMnemonicTok = Tok.take_front(Pos);
+      unsigned SrcType = 0;
+      if (auto V = findFieldImm("SrcType"))
+        SrcType = static_cast<unsigned>(*V);
+      emitFpT(SrcType);
+      return PrintedMnemonicTok;
+    }
+
+    if (Tok.contains("{srcT2dstT}")) {
+      const size_t Pos = Tok.find('{');
+      PrintedMnemonicTok = Tok.take_front(Pos);
+
+      unsigned SrcType = 0;
+      if (auto V = findFieldImm("SrcType"))
+        SrcType = static_cast<unsigned>(*V);
+
+      unsigned DstType = 0;
+      if (auto V = findFieldImm("DstType"))
+        DstType = static_cast<unsigned>(*V);
+
+      StringRef Mnem = Form.mnemonic ? StringRef(Form.mnemonic) : StringRef();
+
+      if (Mnem.equals_insensitive("SCVTF")) {
+        emitCvtIntSrc(SrcType, /*Signed=*/true);
+        PrintedMnemonicTok += "2";
+        emitCvtFpDst(DstType);
+      } else if (Mnem.equals_insensitive("UCVTF")) {
+        emitCvtIntSrc(SrcType, /*Signed=*/false);
+        PrintedMnemonicTok += "2";
+        emitCvtFpDst(DstType);
+      } else if (Mnem.equals_insensitive("FCVTZ")) {
+        emitFpT(SrcType);
+        PrintedMnemonicTok += "2";
+        emitCvtIntDst(DstType);
+      } else {
+        // FCVT/FCVTA/FCVTM/FCVTN/FCVTP: default to FP->FP naming.
+        emitFpT(SrcType);
+        PrintedMnemonicTok += "2";
+        emitCvtFpDst(DstType);
+      }
+
+      return PrintedMnemonicTok;
+    }
+
+    return Tok;
   };
 
   auto emitReg = [&](StringRef FieldName) {
@@ -247,6 +480,54 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     if (!emitSetRetTarget())
       OS << "0x0";
     OS << ",\t->ra";
+    printAnnotation(OS, Annot);
+    return;
+  }
+
+  // Special-case: accelerator/tile block-start instructions (BSTART.TMA/CUBE).
+  //
+  // These are not control-flow split markers like BSTART.{DIRECT,CALL,COND}.
+  // Treat them as normal instructions and print the functional selector.
+  if (AsmFmt.starts_with("BSTART.TMA") || AsmFmt.starts_with("BSTART.CUBE")) {
+    const StringRef Tok = stripAngleSuffix(RawTok);
+    const unsigned Func =
+        static_cast<unsigned>(findFieldImm("Function").value_or(0)) & 0x1fu;
+    const unsigned DT =
+        static_cast<unsigned>(findFieldImm("DataType").value_or(0)) & 0x1fu;
+
+    OS << Tok;
+    OS << "\t";
+
+    auto emitDt = [&]() { OS << ", dt" << utostr(DT); };
+
+    if (AsmFmt.starts_with("BSTART.TMA")) {
+      switch (Func) {
+      case 0:
+        OS << "TLOAD";
+        break;
+      case 1:
+        OS << "TSTORE";
+        break;
+      default:
+        OS << "TMA_OP" << utostr(Func);
+        break;
+      }
+      emitDt();
+    } else {
+      switch (Func) {
+      case 0:
+        OS << "MAMULB";
+        break;
+      case 8:
+        OS << "ACCCVT";
+        break;
+      default:
+        OS << "CUBE_OP" << utostr(Func);
+        break;
+      }
+      emitDt();
+    }
+
     printAnnotation(OS, Annot);
     return;
   }
@@ -525,13 +806,150 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     return;
   }
 
+  // Special-case: tile block IO descriptors (B.IOT / B.IOTI).
+  //
+  // These use bracket syntax in the ISA, but they are not memory operands and
+  // should not be routed through the generic load/store pretty printer.
+  if (AsmFmt.starts_with("B.IOT")) {
+    const bool IsIOTI = AsmFmt.starts_with("B.IOTI");
+    const unsigned S0V =
+        static_cast<unsigned>(findFieldImm("S0V").value_or(0)) & 0x1u;
+    const unsigned S1V =
+        static_cast<unsigned>(findFieldImm("S1V").value_or(0)) & 0x1u;
+    const unsigned S0R =
+        static_cast<unsigned>(findFieldImm("S0R").value_or(0)) & 0x1u;
+    const unsigned S1R =
+        static_cast<unsigned>(findFieldImm("S1R").value_or(0)) & 0x1u;
+    const unsigned DstTile =
+        static_cast<unsigned>(findFieldImm("DstTile").value_or(0)) & 0x7u;
+    const unsigned Src0 =
+        static_cast<unsigned>(findFieldImm("SrcTile0").value_or(0)) & 0x1fu;
+    const unsigned Src1 =
+        static_cast<unsigned>(findFieldImm("SrcTile1").value_or(0)) & 0x1fu;
+    const unsigned Reg =
+        static_cast<unsigned>(findFieldImm("RegSrc").value_or(0)) & 0x1fu;
+    std::optional<int64_t> SizeOpt = findFieldImm("Size");
+    if (!SizeOpt)
+      SizeOpt = findFieldImm("imm5");
+    if (!SizeOpt)
+      SizeOpt = findFieldImm("uimm5");
+    const unsigned Size = static_cast<unsigned>(SizeOpt.value_or(0)) & 0x1fu;
+
+    OS << (IsIOTI ? "B.IOTI" : "B.IOT");
+    OS << "\t[";
+
+    bool First = true;
+    if (S0V) {
+      OS << "tile" << utostr(Src0);
+      if (S0R)
+        OS << ".reuse";
+      First = false;
+    }
+    if (S1V) {
+      if (!First)
+        OS << ", ";
+      OS << "tile" << utostr(Src1);
+      if (S1R)
+        OS << ".reuse";
+    }
+
+    OS << "], ";
+    OS << (AsmFmt.contains("group=1") ? "group=1" : "group=0");
+    OS << ", ->tile" << utostr(DstTile) << "<";
+    if (IsIOTI) {
+      OS << utostr(Size);
+    } else {
+      OS << reg5Name(Reg);
+    }
+    OS << ">";
+
+    printAnnotation(OS, Annot);
+    return;
+  }
+
+  // Special-case: block argument registers (B.DIM).
+  //
+  // The LB destinations are pseudo-registers in the ISA syntax and are not
+  // modeled as normal `->RegDst` operands.
+  if (AsmFmt.starts_with("B.DIM")) {
+    const unsigned Reg =
+        static_cast<unsigned>(findFieldImm("RegSrc").value_or(0)) & 0x1fu;
+    std::optional<int64_t> UimmOpt = findFieldImm("uimm");
+    if (!UimmOpt)
+      UimmOpt = findFieldImm("uimm17");
+    if (!UimmOpt)
+      UimmOpt = findFieldImm("imm17");
+    const unsigned Uimm = static_cast<unsigned>(UimmOpt.value_or(0)) & 0x1ffffu;
+    unsigned Lb = 0;
+    if (AsmFmt.contains("->LB1"))
+      Lb = 1;
+    else if (AsmFmt.contains("->LB2"))
+      Lb = 2;
+
+    OS << "B.DIM\t" << reg5Name(Reg) << ", " << Uimm << ", ->LB" << utostr(Lb);
+    printAnnotation(OS, Annot);
+    return;
+  }
+
   // Pretty printer for memory operands.
   if (AsmFmt.contains('[')) {
+    const StringRef Mnem = Form.mnemonic ? StringRef(Form.mnemonic) : StringRef();
+    const bool IsPcr = Mnem.ends_with(".PCR");
+    if (IsPcr) {
+      // Prefer a symbol-first syntax for PC-relative accesses:
+      //   lw.pcr <sym+addend>, ->rd
+      //   sw.pcr rs, <sym+addend>
+      OS << mnemonicTok("<pcr>");
+      OS << "\t";
+
+      // Loads: (RegDst, simm17) or (RegDst, simm) for HL.*.PCR.
+      // Stores: (SrcL, simm).
+      auto emitPcrExpr = [&]() {
+        OS << "[";
+        if (auto Op = findField("simm17")) {
+          if (Op->isExpr())
+            MAI.printExpr(OS, *Op->getExpr());
+          else
+            OS << "0x" << utohexstr(static_cast<uint64_t>(Op->getImm()),
+                                    /*LowerCase=*/true);
+          OS << "]";
+          return true;
+        }
+        if (auto Op = findField("simm")) {
+          if (Op->isExpr())
+            MAI.printExpr(OS, *Op->getExpr());
+          else
+            OS << "0x" << utohexstr(static_cast<uint64_t>(Op->getImm()),
+                                    /*LowerCase=*/true);
+          OS << "]";
+          return true;
+        }
+        OS << "]";
+        return false;
+      };
+
+      const bool HasDest = AsmFmt.contains("->");
+      if (HasDest) {
+        if (!emitPcrExpr())
+          OS << "0x0";
+        emitArrowDest();
+        printAnnotation(OS, Annot);
+        return;
+      }
+
+      // Store: value first, then the symbol.
+      emitReg("SrcL");
+      OS << ", ";
+      if (!emitPcrExpr())
+        OS << "0x0";
+      printAnnotation(OS, Annot);
+      return;
+    }
+
     OS << mnemonicTok("<mem>");
     OS << "\t";
 
     const bool HasDest = AsmFmt.contains("->");
-    const StringRef Mnem = Form.mnemonic ? StringRef(Form.mnemonic) : StringRef();
 
     auto scaleFromMnemonic = [&]() -> int64_t {
       if (Mnem == "LBI" || Mnem == "LBUI" || Mnem == "SBI")
@@ -629,7 +1047,25 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
   }
 
   // Pretty printer for the common "SrcL, SrcR<type><<shamt>" operand form.
+  if (Form.mnemonic && StringRef(Form.mnemonic).equals_insensitive("CSEL") &&
+      findField("SrcP") && findField("SrcL") && findField("SrcR") &&
+      findField("SrcRType")) {
+    OS << mnemonicTok("<op>");
+    OS << "\t";
+    emitReg("SrcP");
+    OS << ", ";
+    emitReg("SrcL");
+    OS << ", ";
+    emitSrcRWithTypeAndShift(/*ForcedShift=*/std::nullopt);
+    if (AsmFmt.contains("->"))
+      emitArrowDest();
+    printAnnotation(OS, Annot);
+    return;
+  }
+
+  // Pretty printer for the common "SrcL, SrcR<type><<shamt>" operand form.
   if (findField("SrcL") && findField("SrcR") && findField("SrcRType") &&
+      !findField("SrcP") && !findField("SrcD") && !findField("SrcA") &&
       !AsmFmt.contains('[')) {
     OS << mnemonicTok("<op>");
     OS << "\t";
@@ -682,11 +1118,21 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
         Name.starts_with_insensitive("simm") ||
         Name.starts_with_insensitive("uimm") ||
         Name.starts_with_insensitive("shamt") || Name.equals_insensitive("BrType") ||
-        Name.equals_insensitive("BlockType")) {
+        Name.equals_insensitive("BlockType") || Name.equals_insensitive("SSR_ID") ||
+        Name.equals_insensitive("SSRID")) {
       sep();
       const MCOperand &Op = KV.second;
-      if (Op.isImm())
-        OS << Op.getImm();
+      if (Op.isImm()) {
+        if (Name.equals_insensitive("SSR_ID") || Name.equals_insensitive("SSRID")) {
+          if (const char *Sym = ssrIdSymbol(static_cast<uint64_t>(Op.getImm()))) {
+            OS << Sym;
+          } else {
+            OS << "0x" << utohexstr(static_cast<uint64_t>(Op.getImm()) & 0xfffu);
+          }
+        } else {
+          OS << Op.getImm();
+        }
+      }
       else if (Op.isExpr())
         MAI.printExpr(OS, *Op.getExpr());
     }

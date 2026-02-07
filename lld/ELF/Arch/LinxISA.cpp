@@ -134,6 +134,55 @@ static uint32_t encodeLo12(Ctx &ctx, uint8_t *loc, int64_t value,
   return uimm << 20;
 }
 
+static uint32_t encodePcr17Load(Ctx &ctx, uint8_t *loc, int64_t value,
+                                const Relocation &rel) {
+  // *.PCR loads use a signed 17-bit byte offset in bits [31:15].
+  checkInt(ctx, loc, value, 17, rel);
+  uint32_t uimm = static_cast<uint32_t>(value) & 0x1FFFFu;
+  return uimm << 15;
+}
+
+static uint32_t encodePcr17Store(Ctx &ctx, uint8_t *loc, int64_t value,
+                                 const Relocation &rel) {
+  // *.PCR stores use a signed 17-bit byte offset split across:
+  //   simm[11:0]  -> insn[31:20]
+  //   simm[16:12] -> insn[11:7]
+  checkInt(ctx, loc, value, 17, rel);
+  uint32_t uimm = static_cast<uint32_t>(value) & 0x1FFFFu;
+  uint32_t patch = 0;
+  patch |= (uimm & 0x0FFFu) << 20;
+  patch |= ((uimm >> 12) & 0x1Fu) << 7;
+  return patch;
+}
+
+static uint64_t encodeHLPcr29Load(Ctx &ctx, uint8_t *loc, int64_t value,
+                                  const Relocation &rel) {
+  // HL.*.PCR loads use a signed 29-bit byte offset split across:
+  //   simm[16:0]  -> insn[47:31]
+  //   simm[28:17] -> insn[15:4]
+  checkInt(ctx, loc, value, 29, rel);
+  uint64_t uimm = static_cast<uint64_t>(value) & 0x1FFF'FFFFull;
+  uint64_t patch = 0;
+  patch |= (uimm & 0x1FFFFull) << 31;
+  patch |= ((uimm >> 17) & 0x0FFFull) << 4;
+  return patch;
+}
+
+static uint64_t encodeHLPcr29Store(Ctx &ctx, uint8_t *loc, int64_t value,
+                                   const Relocation &rel) {
+  // HL.*.PCR stores use a signed 29-bit byte offset split across:
+  //   simm[11:0]  -> insn[47:36]
+  //   simm[16:12] -> insn[27:23]
+  //   simm[28:17] -> insn[15:4]
+  checkInt(ctx, loc, value, 29, rel);
+  uint64_t uimm = static_cast<uint64_t>(value) & 0x1FFF'FFFFull;
+  uint64_t patch = 0;
+  patch |= (uimm & 0x0FFFull) << 36;
+  patch |= ((uimm >> 12) & 0x01Full) << 23;
+  patch |= ((uimm >> 17) & 0x0FFFull) << 4;
+  return patch;
+}
+
 class LinxISA final : public TargetInfo {
 public:
   LinxISA(Ctx &ctx);
@@ -184,6 +233,10 @@ RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
   case R_LINX_CSETRET5_PCREL:
   case R_LINX_SETRET20_PCREL:
   case R_LINX_HL_SETRET32_PCREL:
+  case R_LINX_PCR17_LOAD:
+  case R_LINX_PCR17_STORE:
+  case R_LINX_HL_PCR29_LOAD:
+  case R_LINX_HL_PCR29_STORE:
     return R_PC;
   case R_LINX_PCREL_HI20:
     return RE_AARCH64_PAGE_PC;
@@ -334,6 +387,36 @@ void LinxISA::relocate(uint8_t *loc, const Relocation &rel,
     uint32_t cur = read32le(loc);
     cur |= encodeLo12(ctx, loc, sval, rel);
     write32le(loc, cur);
+    return;
+  }
+  case R_LINX_PCR17_LOAD: {
+    uint32_t cur = read32le(loc);
+    cur |= encodePcr17Load(ctx, loc, sval, rel);
+    write32le(loc, cur);
+    return;
+  }
+  case R_LINX_PCR17_STORE: {
+    uint32_t cur = read32le(loc);
+    cur |= encodePcr17Store(ctx, loc, sval, rel);
+    write32le(loc, cur);
+    return;
+  }
+  case R_LINX_HL_PCR29_LOAD: {
+    uint64_t cur = 0;
+    for (unsigned i = 0; i < 6; ++i)
+      cur |= static_cast<uint64_t>(loc[i]) << (i * 8);
+    cur |= encodeHLPcr29Load(ctx, loc, sval, rel);
+    for (unsigned i = 0; i < 6; ++i)
+      loc[i] = static_cast<uint8_t>((cur >> (i * 8)) & 0xFF);
+    return;
+  }
+  case R_LINX_HL_PCR29_STORE: {
+    uint64_t cur = 0;
+    for (unsigned i = 0; i < 6; ++i)
+      cur |= static_cast<uint64_t>(loc[i]) << (i * 8);
+    cur |= encodeHLPcr29Store(ctx, loc, sval, rel);
+    for (unsigned i = 0; i < 6; ++i)
+      loc[i] = static_cast<uint8_t>((cur >> (i * 8)) & 0xFF);
     return;
   }
 

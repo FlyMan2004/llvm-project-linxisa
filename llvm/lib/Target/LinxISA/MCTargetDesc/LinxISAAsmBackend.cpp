@@ -144,12 +144,13 @@ uint64_t encodeHLSetRet32Pcrel(uint64_t Value) {
 
 uint32_t encodePcrelHi20(uint64_t Value) {
   // ADDTPC uses simm20 in bits [31:12] and is scaled by 4KiB (imm20 << 12).
-  // The relocation value is the page delta in bytes:
-  //   (S & ~0xFFF) - (P & ~0xFFF)
-  if (Value & 0xFFF)
-    report_fatal_error("Linx ADDTPC PC-relative page offset is not 4KiB aligned");
-
-  int64_t Imm = static_cast<int64_t>(Value) >> 12;
+  //
+  // Tooling supplies the full PC-relative byte delta (S + A - P). Encode the
+  // high 20 bits using the usual "HI20 with carry" rule so that a subsequent
+  // low-12 add can form the full address:
+  //   hi20 = (delta + 0x800) >> 12
+  int64_t Delta = static_cast<int64_t>(Value);
+  int64_t Imm = (Delta + 0x800) >> 12;
   if (!isInt<20>(Imm))
     report_fatal_error("Linx ADDTPC PC-relative page offset out of range");
 
@@ -161,6 +162,55 @@ uint32_t encodeLo12(uint64_t Value) {
   // ADDI/ADDIW low 12-bit absolute offset in bits [31:20].
   uint32_t UImm = static_cast<uint32_t>(Value) & 0x00000FFFu;
   return UImm << 20;
+}
+
+uint32_t encodePcr17Load(uint64_t Value) {
+  // *.PCR loads use a signed 17-bit byte offset in bits [31:15].
+  if (!isInt<17>(static_cast<int64_t>(Value)))
+    report_fatal_error("Linx *.PCR load target out of range");
+  uint32_t UImm = static_cast<uint32_t>(static_cast<int64_t>(Value)) & 0x1FFFFu;
+  return UImm << 15;
+}
+
+uint32_t encodePcr17Store(uint64_t Value) {
+  // *.PCR stores use a signed 17-bit byte offset split across:
+  //   simm[11:0]  -> insn[31:20]
+  //   simm[16:12] -> insn[11:7]
+  if (!isInt<17>(static_cast<int64_t>(Value)))
+    report_fatal_error("Linx *.PCR store target out of range");
+  uint32_t UImm = static_cast<uint32_t>(static_cast<int64_t>(Value)) & 0x1FFFFu;
+  uint32_t Patch = 0;
+  Patch |= (UImm & 0x0FFFu) << 20;
+  Patch |= ((UImm >> 12) & 0x1Fu) << 7;
+  return Patch;
+}
+
+uint64_t encodeHLPcr29Load(uint64_t Value) {
+  // HL.*.PCR loads use a signed 29-bit byte offset split across:
+  //   simm[16:0]  -> insn[47:31]
+  //   simm[28:17] -> insn[15:4]
+  if (!isInt<29>(static_cast<int64_t>(Value)))
+    report_fatal_error("Linx HL.*.PCR load target out of range");
+  uint64_t UImm = static_cast<uint64_t>(static_cast<int64_t>(Value)) & 0x1FFF'FFFFull;
+  uint64_t Patch = 0;
+  Patch |= (UImm & 0x1FFFFull) << 31;
+  Patch |= ((UImm >> 17) & 0x0FFFull) << 4;
+  return Patch;
+}
+
+uint64_t encodeHLPcr29Store(uint64_t Value) {
+  // HL.*.PCR stores use a signed 29-bit byte offset split across:
+  //   simm[11:0]  -> insn[47:36]
+  //   simm[16:12] -> insn[27:23]
+  //   simm[28:17] -> insn[15:4]
+  if (!isInt<29>(static_cast<int64_t>(Value)))
+    report_fatal_error("Linx HL.*.PCR store target out of range");
+  uint64_t UImm = static_cast<uint64_t>(static_cast<int64_t>(Value)) & 0x1FFF'FFFFull;
+  uint64_t Patch = 0;
+  Patch |= (UImm & 0x0FFFull) << 36;
+  Patch |= ((UImm >> 12) & 0x01Full) << 23;
+  Patch |= ((UImm >> 17) & 0x0FFFull) << 4;
+  return Patch;
 }
 
 static unsigned findSpecOpcodeByAsmFmt(StringRef AsmFmt, unsigned LengthBits) {
@@ -211,6 +261,9 @@ public:
          AsmFmt.contains(" CALL")))
       return true;
 
+    if (!Mnemonic.starts_with("HL.") && Mnemonic.ends_with(".PCR"))
+      return true;
+
     return false;
   }
 
@@ -220,8 +273,26 @@ public:
     (void)F;
     (void)Fixup;
     (void)Target;
-    if (!Resolved)
-      return false;
+    if (!Resolved) {
+      // If the target symbol is not resolved at assembly time (e.g. external
+      // symbols in relocatable objects), conservatively relax instructions that
+      // have short PC-relative ranges. LLD does not currently relax LinxISA
+      // relocations, so emitting the long HL.* forms here avoids link-time
+      // "relocation out of range" failures for large images such as the Linux
+      // kernel.
+      switch (Fixup.getKind()) {
+      case LinxISA::FIXUP_LINX_CBSTART12_PCREL:
+      case LinxISA::FIXUP_LINX_B17_PCREL:
+      case LinxISA::FIXUP_LINX_B17_PLT:
+      case LinxISA::FIXUP_LINX_CSETRET5_PCREL:
+      case LinxISA::FIXUP_LINX_SETRET20_PCREL:
+      case LinxISA::FIXUP_LINX_PCR17_LOAD:
+      case LinxISA::FIXUP_LINX_PCR17_STORE:
+        return true;
+      default:
+        return false;
+      }
+    }
     return fixupNeedsRelaxation(Fixup, Value);
   }
 
@@ -254,6 +325,9 @@ public:
       uint64_t Imm = Value >> 1;
       return !isUInt<20>(Imm);
     }
+    case LinxISA::FIXUP_LINX_PCR17_LOAD:
+    case LinxISA::FIXUP_LINX_PCR17_STORE:
+      return !isInt<17>(static_cast<int64_t>(Value));
     }
   }
 
@@ -311,14 +385,85 @@ public:
       }
     }
 
+    // *.PCR -> HL.*.PCR
+    if (!Mnemonic.starts_with("HL.") && Mnemonic.ends_with(".PCR")) {
+      if (Mnemonic == "LB.PCR") {
+        Inst.setOpcode(findSpecOpcodeByAsmFmt("hl.lb.pcr [<symbol>], ->{t, u, Rd}",
+                                              /*LengthBits=*/48));
+        return;
+      }
+      if (Mnemonic == "LBU.PCR") {
+        Inst.setOpcode(findSpecOpcodeByAsmFmt("hl.lbu.pcr [<symbol>], ->{t, u, Rd}",
+                                              /*LengthBits=*/48));
+        return;
+      }
+      if (Mnemonic == "LH.PCR") {
+        Inst.setOpcode(findSpecOpcodeByAsmFmt("hl.lh.pcr [<symbol>], ->{t, u, Rd}",
+                                              /*LengthBits=*/48));
+        return;
+      }
+      if (Mnemonic == "LHU.PCR") {
+        Inst.setOpcode(findSpecOpcodeByAsmFmt("hl.lhu.pcr [<symbol>], ->{t, u, Rd}",
+                                              /*LengthBits=*/48));
+        return;
+      }
+      if (Mnemonic == "LW.PCR") {
+        Inst.setOpcode(findSpecOpcodeByAsmFmt("hl.lw.pcr [<symbol>], ->{t, u, Rd}",
+                                              /*LengthBits=*/48));
+        return;
+      }
+      if (Mnemonic == "LWU.PCR") {
+        Inst.setOpcode(findSpecOpcodeByAsmFmt("hl.lwu.pcr [<symbol>], ->{t, u, Rd}",
+                                              /*LengthBits=*/48));
+        return;
+      }
+      if (Mnemonic == "LD.PCR") {
+        Inst.setOpcode(findSpecOpcodeByAsmFmt("hl.ld.pcr [<symbol>], ->{t, u, Rd}",
+                                              /*LengthBits=*/48));
+        return;
+      }
+
+      if (Mnemonic == "SB.PCR") {
+        Inst.setOpcode(findSpecOpcodeByAsmFmt("hl.sb.pcr SrcL, [<symbol>]",
+                                              /*LengthBits=*/48));
+        return;
+      }
+      if (Mnemonic == "SH.PCR") {
+        Inst.setOpcode(findSpecOpcodeByAsmFmt("hl.sh.pcr SrcL, [<symbol>]",
+                                              /*LengthBits=*/48));
+        return;
+      }
+      if (Mnemonic == "SW.PCR") {
+        Inst.setOpcode(findSpecOpcodeByAsmFmt("hl.sw.pcr SrcL, [<symbol>]",
+                                              /*LengthBits=*/48));
+        return;
+      }
+      if (Mnemonic == "SD.PCR") {
+        Inst.setOpcode(findSpecOpcodeByAsmFmt("hl.sd.pcr SrcL, [<symbol>]",
+                                              /*LengthBits=*/48));
+        return;
+      }
+    }
+
     report_fatal_error("Linx: unsupported instruction relaxation");
   }
 
   void applyFixup(const MCFragment &F, const MCFixup &Fixup,
                   const MCValue &Target, uint8_t *Data, uint64_t Value,
                   bool IsResolved) override {
+    // Like AArch64 ADRP, ADDTPC uses a page-based delta which can vary by one
+    // depending on the final section alignment. Even if a local target appears
+    // resolvable during assembly, the linker must make the final decision.
+    const bool ForceReloc = (Fixup.getKind() == LinxISA::FIXUP_LINX_PCREL_HI20);
+    if (ForceReloc)
+      IsResolved = false;
+
     if (!IsResolved)
       Asm->getWriter().recordRelocation(F, Fixup, Target, Value);
+
+    // Leave the immediate zeroed and let the linker apply the relocation.
+    if (ForceReloc)
+      return;
 
     if (!Value)
       return;
@@ -386,6 +531,20 @@ public:
     case LinxISA::FIXUP_LINX_LO12:
       Patch = encodeLo12(Value);
       break;
+    case LinxISA::FIXUP_LINX_PCR17_LOAD:
+      Patch = encodePcr17Load(Value);
+      break;
+    case LinxISA::FIXUP_LINX_PCR17_STORE:
+      Patch = encodePcr17Store(Value);
+      break;
+    case LinxISA::FIXUP_LINX_HL_PCR29_LOAD:
+      PatchBytes = 6;
+      Patch = encodeHLPcr29Load(Value);
+      break;
+    case LinxISA::FIXUP_LINX_HL_PCR29_STORE:
+      PatchBytes = 6;
+      Patch = encodeHLPcr29Store(Value);
+      break;
     default:
       llvm_unreachable("Unknown Linx fixup kind");
     }
@@ -449,6 +608,10 @@ public:
         {"FIXUP_LINX_PCREL_HI20", 12, 20, 0},
         // Absolute low 12 bits for ADDI/ADDIW (uimm12).
         {"FIXUP_LINX_LO12", 20, 12, 0},
+        {"FIXUP_LINX_PCR17_LOAD", 0, 17, 0},
+        {"FIXUP_LINX_PCR17_STORE", 0, 17, 0},
+        {"FIXUP_LINX_HL_PCR29_LOAD", 0, 29, 0},
+        {"FIXUP_LINX_HL_PCR29_STORE", 0, 29, 0},
     };
 
     if (Kind < FirstTargetFixupKind)

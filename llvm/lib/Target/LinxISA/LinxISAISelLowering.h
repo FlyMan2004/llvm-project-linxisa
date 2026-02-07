@@ -39,18 +39,40 @@ public:
 
   const char *getTargetNodeName(unsigned Opcode) const override;
 
+  std::pair<unsigned, const TargetRegisterClass *>
+  getRegForInlineAsmConstraint(const TargetRegisterInfo *TRI,
+                               StringRef Constraint,
+                               MVT VT) const override;
+
+  void LowerAsmOperandForConstraint(SDValue Op, StringRef Constraint,
+                                    std::vector<SDValue> &Ops,
+                                    SelectionDAG &DAG) const override;
+
 private:
   SDValue LowerBR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerBRCOND(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerBR_CC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerBRIND(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerJumpTable(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerBlockAddress(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerMULHS(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerMULHU(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSIGN_EXTEND(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerZERO_EXTEND(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSIGN_EXTEND_INREG(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSELECT(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSETCC(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerFPBinOp(SDValue Op, SelectionDAG &DAG, unsigned Opc) const;
+  SDValue LowerFPUnOp(SDValue Op, SelectionDAG &DAG, unsigned Opc) const;
+  SDValue LowerFP_TO_SINT(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerFP_TO_UINT(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerSINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerUINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerFP_ROUND(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerFP_EXTEND(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerGlobalAddress(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerGlobalTLSAddress(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerConstantPool(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerVASTART(SDValue Op, SelectionDAG &DAG) const;
 };
 

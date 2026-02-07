@@ -49,6 +49,14 @@ public:
 
   void emitInstruction(const MachineInstr *MI) override;
 
+  bool PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
+                       const char *ExtraCode,
+                       raw_ostream &OS) override;
+
+  bool PrintAsmMemoryOperand(const MachineInstr *MI, unsigned OpNo,
+                             const char *ExtraCode,
+                             raw_ostream &OS) override;
+
   static char ID;
 };
 
@@ -119,45 +127,69 @@ void LinxISAAsmPrinter::emitInstruction(const MachineInstr *MI) {
     MCInstLowering->Lower(MI, TmpInst);
     OutStreamer->emitInstruction(TmpInst, STI);
   }
+}
 
-  // For readability, emit a "body" label immediately after block-start markers.
-  // This keeps the canonical MBB symbol at the BSTART address (for fixups),
-  // while providing a label at the first non-marker instruction.
-  switch (MI->getOpcode()) {
-  case LinxISA::CBSTART_STD:
-  case LinxISA::BSTART_STD_FALL:
-  case LinxISA::BSTART_STD_DIRECT:
-  case LinxISA::BSTART_STD_COND:
-  case LinxISA::BSTART_STD_CALL:
-  case LinxISA::BSTART_STD_IND:
-  case LinxISA::BSTART_STD_ICALL:
-  case LinxISA::BSTART_STD_RET: {
-    if (!OutStreamer->hasRawTextSupport())
-      break;
+static StringRef linxReg5Name(unsigned Code) {
+  static constexpr const char *Names[32] = {
+      "zero", "sp",  "a0",  "a1",  "a2",  "a3",  "a4",  "a5",
+      "a6",   "a7",  "ra",  "s0",  "s1",  "s2",  "s3",  "s4",
+      "s5",   "s6",  "s7",  "s8",  "x0",  "x1",  "x2",  "x3",
+      "t#1",  "t#2", "t#3", "t#4", "u#1", "u#2", "u#3", "u#4",
+  };
+  if (Code < 32)
+    return Names[Code];
+  return "r?";
+}
 
-    const MachineBasicBlock *MBB = MI->getParent();
-    if (!MBB || BodyLabelsEmitted.contains(MBB))
-      break;
-    BodyLabelsEmitted.insert(MBB);
+bool LinxISAAsmPrinter::PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
+                                       const char *ExtraCode,
+                                       raw_ostream &OS) {
+  // No target-specific modifiers supported yet.
+  if (ExtraCode && ExtraCode[0] != 0)
+    return true;
 
-    SmallString<64> Name;
-    if (MCSymbol *Sym = MBB->getSymbol()) {
-      StringRef BBName = Sym->getName();
-      if (!BBName.empty())
-        Name += BBName;
-    }
-    if (Name.empty()) {
-      const MachineFunction *MF = MBB->getParent();
-      raw_svector_ostream OS(Name);
-      OS << "BB" << (MF ? MF->getFunctionNumber() : 0) << '_' << MBB->getNumber();
-    }
-    Name += ".body";
-    OutStreamer->emitLabel(OutContext.getOrCreateSymbol(Name));
-    break;
+  if (!MCInstLowering)
+    return true;
+  if (OpNo >= MI->getNumOperands())
+    return true;
+
+  const MachineOperand &MO = MI->getOperand(OpNo);
+  if (MO.isReg()) {
+    const unsigned Enc = MCInstLowering->getReg5Encoding(MO.getReg());
+    OS << linxReg5Name(Enc);
+    return false;
   }
-  default:
-    break;
+
+  if (MO.isImm()) {
+    OS << MO.getImm();
+    return false;
   }
+
+  if (MO.isCImm()) {
+    OS << MO.getCImm()->getSExtValue();
+    return false;
+  }
+
+  // Symbols and expressions.
+  MCOperand MCOp;
+  if (MCInstLowering->lowerOperand(MO, MCOp) && MCOp.isExpr()) {
+    MAI->printExpr(OS, *MCOp.getExpr());
+    return false;
+  }
+
+  return true;
+}
+
+bool LinxISAAsmPrinter::PrintAsmMemoryOperand(const MachineInstr *MI,
+                                             unsigned OpNo,
+                                             const char *ExtraCode,
+                                             raw_ostream &OS) {
+  // TODO: Implement when Linx inline asm starts using memory constraints.
+  (void)MI;
+  (void)OpNo;
+  (void)ExtraCode;
+  (void)OS;
+  return true;
 }
 
 char LinxISAAsmPrinter::ID = 0;

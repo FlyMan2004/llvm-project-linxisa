@@ -12,6 +12,7 @@
 #include "LinxISAFrameLowering.h"
 #include "LinxISAISelLowering.h"
 #include "LinxISAInstrInfo.h"
+#include "llvm/CodeGen/SelectionDAGTargetInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include <memory>
 
@@ -27,6 +28,7 @@ class LinxISASubtarget : public LinxISAGenSubtargetInfo {
   std::unique_ptr<LinxISAInstrInfo> InstrInfo;
   std::unique_ptr<LinxISAFrameLowering> FrameLowering;
   std::unique_ptr<LinxISATargetLowering> TLInfo;
+  SelectionDAGTargetInfo TSInfo;
 
 public:
   LinxISASubtarget(const Triple &TT, StringRef CPU, StringRef FS,
@@ -40,6 +42,9 @@ public:
   const LinxISARegisterInfo *getRegisterInfo() const override;
   const LinxISAFrameLowering *getFrameLowering() const override;
   const LinxISATargetLowering *getTargetLowering() const override;
+  const SelectionDAGTargetInfo *getSelectionDAGInfo() const override {
+    return &TSInfo;
+  }
 };
 
 } // namespace llvm

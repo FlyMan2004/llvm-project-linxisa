@@ -10,9 +10,12 @@
 #include "LinxISATargetMachine.h"
 #include "MCTargetDesc/LinxISAMCTargetDesc.h"
 #include "llvm/CodeGen/SelectionDAGISel.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsLinx.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
+#include <optional>
 #include <utility>
 
 using namespace llvm;
@@ -36,6 +39,7 @@ private:
   bool selectMemAddr(SDValue Addr, SDValue &Base, SDValue &Off, int64_t Scale);
   bool selectMemAddrRegOffset(SDValue Addr, SDValue &Base, SDValue &Index,
                               unsigned &Shift);
+  bool selectPcrSymbolAddr(SDValue Addr, SDValue &Sym);
 };
 
 class LinxISADAGToDAGISelLegacy : public SelectionDAGISelLegacy {
@@ -63,7 +67,11 @@ static int64_t getMemScaleForVT(MVT MemVT) {
     return 2;
   if (MemVT == MVT::i32)
     return 4;
+  if (MemVT == MVT::f32)
+    return 4;
   if (MemVT == MVT::i64)
+    return 8;
+  if (MemVT == MVT::f64)
     return 8;
   return 1;
 }
@@ -194,6 +202,110 @@ bool LinxISADAGToDAGISel::selectMemAddrRegOffset(SDValue Addr, SDValue &Base,
   return false;
 }
 
+bool LinxISADAGToDAGISel::selectPcrSymbolAddr(SDValue Addr, SDValue &Sym) {
+  SDLoc DL(Addr);
+  EVT PtrVT = Addr.getValueType();
+
+  auto isSameSymbolRef = [&](SDValue A, SDValue B) -> bool {
+    if (A.getNode() == B.getNode())
+      return true;
+
+    auto asGA = [](SDValue V) -> GlobalAddressSDNode * {
+      return dyn_cast<GlobalAddressSDNode>(V.getNode());
+    };
+    auto asCP = [](SDValue V) -> ConstantPoolSDNode * {
+      return dyn_cast<ConstantPoolSDNode>(V.getNode());
+    };
+
+    if (auto *GAa = asGA(A)) {
+      if (auto *GAb = asGA(B)) {
+        return GAa->getGlobal() == GAb->getGlobal() &&
+               GAa->getOffset() == GAb->getOffset();
+      }
+    }
+    if (auto *CPa = asCP(A)) {
+      if (auto *CPb = asCP(B)) {
+        return CPa->getConstVal() == CPb->getConstVal() &&
+               CPa->getOffset() == CPb->getOffset() &&
+               CPa->getAlign() == CPb->getAlign();
+      }
+    }
+    return false;
+  };
+
+  auto tryMatchMaterialized = [&](SDValue V) -> std::optional<SDValue> {
+    auto *MN = dyn_cast<MachineSDNode>(V.getNode());
+    if (!MN)
+      return std::nullopt;
+
+    const unsigned Opc = MN->getMachineOpcode();
+    if (Opc != LinxISA::ADDIri && Opc != LinxISA::ADDIWri)
+      return std::nullopt;
+
+    if (MN->getNumOperands() < 2)
+      return std::nullopt;
+
+    SDValue Page = MN->getOperand(0);
+    SDValue GA = MN->getOperand(1);
+
+    auto *PageMN = dyn_cast<MachineSDNode>(Page.getNode());
+    if (!PageMN || PageMN->getMachineOpcode() != LinxISA::ADDTPC ||
+        PageMN->getNumOperands() < 1)
+      return std::nullopt;
+
+    // Allow equivalent (but not pointer-identical) symbol refs. Different
+    // lowering paths may recreate the target symbol node.
+    if (!isSameSymbolRef(PageMN->getOperand(0), GA))
+      return std::nullopt;
+
+    return GA;
+  };
+
+  auto adjustAddend = [&](SDValue GA, int64_t AddBytes) -> SDValue {
+    if (AddBytes == 0)
+      return GA;
+    if (auto *G = dyn_cast<GlobalAddressSDNode>(GA.getNode())) {
+      const GlobalValue *GV = G->getGlobal();
+      const int64_t Off = G->getOffset() + AddBytes;
+      return CurDAG->getTargetGlobalAddress(GV, DL, PtrVT, Off);
+    }
+    if (auto *CP = dyn_cast<ConstantPoolSDNode>(GA.getNode())) {
+      const int64_t Off = CP->getOffset() + AddBytes;
+      return CurDAG->getTargetConstantPool(CP->getConstVal(), PtrVT, CP->getAlign(),
+                                           Off);
+    }
+    return SDValue();
+  };
+
+  if (auto GA = tryMatchMaterialized(Addr)) {
+    Sym = *GA;
+    return true;
+  }
+
+  if (Addr.getOpcode() == ISD::ADD) {
+    if (auto *CN = dyn_cast<ConstantSDNode>(Addr.getOperand(1))) {
+      if (auto GA = tryMatchMaterialized(Addr.getOperand(0))) {
+        SDValue Adj = adjustAddend(*GA, CN->getSExtValue());
+        if (Adj.getNode()) {
+          Sym = Adj;
+          return true;
+        }
+      }
+    }
+    if (auto *CN = dyn_cast<ConstantSDNode>(Addr.getOperand(0))) {
+      if (auto GA = tryMatchMaterialized(Addr.getOperand(1))) {
+        SDValue Adj = adjustAddend(*GA, CN->getSExtValue());
+        if (Adj.getNode()) {
+          Sym = Adj;
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
 static unsigned selectBrOpcode(ISD::CondCode CC, bool &SwapOps) {
   SwapOps = false;
   switch (CC) {
@@ -268,6 +380,28 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
   default:
     break;
 
+  case ISD::BITCAST: {
+    // LinxISA uses a unified reg5 register file for integers and scalars.
+    // Treat scalar i32/i64/f32/f64 bitcasts as a no-op and select them to a
+    // COPY to change the SelectionDAG value type.
+    SDLoc DL(N);
+    EVT VT = N->getValueType(0);
+    SDValue Src = N->getOperand(0);
+    EVT SrcVT = Src.getValueType();
+
+    auto IsScalarGPRVT = [](EVT T) {
+      return T == MVT::i32 || T == MVT::i64 || T == MVT::f32 || T == MVT::f64;
+    };
+
+    if (IsScalarGPRVT(VT) && IsScalarGPRVT(SrcVT) &&
+        VT.getSizeInBits() == SrcVT.getSizeInBits()) {
+      ReplaceNode(N, CurDAG->getMachineNode(TargetOpcode::COPY, DL, VT, Src));
+      return;
+    }
+
+    break;
+  }
+
   case ISD::ANY_EXTEND: {
     // any_extend preserves the low bits and leaves the upper bits undefined.
     // This is a no-op on LinxISA GPRs (i32/i64 share the same register file),
@@ -341,6 +475,84 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
     SDValue TFI = CurDAG->getTargetFrameIndex(FIN->getIndex(), VT);
     SDValue ZeroImm = CurDAG->getTargetConstant(0, DL, MVT::i64);
     ReplaceNode(N, CurDAG->getMachineNode(LinxISA::ADDIri, DL, VT, TFI, ZeroImm));
+    return;
+  }
+
+  case ISD::INTRINSIC_W_CHAIN: {
+    auto *C = dyn_cast<ConstantSDNode>(N->getOperand(1));
+    if (!C)
+      break;
+
+    const unsigned IntrID = C->getZExtValue();
+    SDLoc DL(N);
+
+    if (IntrID == Intrinsic::linx_tma_tload) {
+      // (chain, id, base, immSizeCode)
+      auto *SizeC = dyn_cast<ConstantSDNode>(N->getOperand(3));
+      if (!SizeC)
+        report_fatal_error("Linx: tma.tload requires constant SizeCode");
+
+      SDValue Chain = N->getOperand(0);
+      SDValue Base = N->getOperand(2);
+      SDValue SizeImm =
+          CurDAG->getTargetConstant(SizeC->getZExtValue(), DL, MVT::i64);
+      SDValue Ops[] = {Base, SizeImm, Chain};
+      SDNode *Res = CurDAG->getMachineNode(LinxISA::PSEUDO_TMA_TLOAD, DL,
+                                           MVT::v1024i32, MVT::Other, Ops);
+      ReplaceNode(N, Res);
+      return;
+    }
+
+    if (IntrID == Intrinsic::linx_cube_mamulb) {
+      // (chain, id, a, b, immM, immN, immK)
+      auto *MC = dyn_cast<ConstantSDNode>(N->getOperand(4));
+      auto *NC = dyn_cast<ConstantSDNode>(N->getOperand(5));
+      auto *KC = dyn_cast<ConstantSDNode>(N->getOperand(6));
+      if (!MC || !NC || !KC)
+        report_fatal_error("Linx: cube.mamulb requires constant M/N/K");
+
+      SDValue Chain = N->getOperand(0);
+      SDValue A = N->getOperand(2);
+      SDValue B = N->getOperand(3);
+      SDValue MImm =
+          CurDAG->getTargetConstant(MC->getZExtValue(), DL, MVT::i64);
+      SDValue NImm =
+          CurDAG->getTargetConstant(NC->getZExtValue(), DL, MVT::i64);
+      SDValue KImm =
+          CurDAG->getTargetConstant(KC->getZExtValue(), DL, MVT::i64);
+      SDValue Ops[] = {A, B, MImm, NImm, KImm, Chain};
+      SDNode *Res = CurDAG->getMachineNode(LinxISA::PSEUDO_CUBE_MAMULB, DL,
+                                           MVT::v1024i32, MVT::Other, Ops);
+      ReplaceNode(N, Res);
+      return;
+    }
+
+    break;
+  }
+
+  case ISD::INTRINSIC_VOID: {
+    auto *C = dyn_cast<ConstantSDNode>(N->getOperand(1));
+    if (!C)
+      break;
+    const unsigned IntrID = C->getZExtValue();
+    if (IntrID != Intrinsic::linx_tma_tstore)
+      break;
+
+    SDLoc DL(N);
+    // (chain, id, base, tile, immSizeCode)
+    auto *SizeC = dyn_cast<ConstantSDNode>(N->getOperand(4));
+    if (!SizeC)
+      report_fatal_error("Linx: tma.tstore requires constant SizeCode");
+
+    SDValue Chain = N->getOperand(0);
+    SDValue Base = N->getOperand(2);
+    SDValue Tile = N->getOperand(3);
+    SDValue SizeImm =
+        CurDAG->getTargetConstant(SizeC->getZExtValue(), DL, MVT::i64);
+    SDValue Ops[] = {Base, Tile, SizeImm, Chain};
+    SDNode *Res =
+        CurDAG->getMachineNode(LinxISA::PSEUDO_TMA_TSTORE, DL, MVT::Other, Ops);
+    ReplaceNode(N, Res);
     return;
   }
 
@@ -596,6 +808,47 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
     MVT MemVT = LD->getMemoryVT().getSimpleVT();
     int64_t Scale = getMemScaleForVT(MemVT);
 
+    // Fold materialized PC-relative addresses back into a single *.PCR load:
+    //   addr = ADDI(ADDTPC(sym), sym) [+ const]
+    //   load [addr] -> *.pcr [sym+const]
+    SDValue PcrSym;
+	    if (selectPcrSymbolAddr(LD->getBasePtr(), PcrSym)) {
+	      unsigned Opc = 0;
+	      switch (MemVT.SimpleTy) {
+	      case MVT::i8:
+	        Opc = (LD->getExtensionType() == ISD::ZEXTLOAD) ? LinxISA::LBU_PCR
+	                                                        : LinxISA::LB_PCR;
+	        break;
+	      case MVT::i16:
+	        Opc = (LD->getExtensionType() == ISD::ZEXTLOAD) ? LinxISA::LHU_PCR
+	                                                        : LinxISA::LH_PCR;
+	        break;
+	      case MVT::i32:
+	        Opc = (LD->getExtensionType() == ISD::ZEXTLOAD) ? LinxISA::LWU_PCR
+	                                                        : LinxISA::LW_PCR;
+	        break;
+	      case MVT::f32:
+	        // Preserve the f32 bit-pattern in the low 32 bits.
+	        Opc = LinxISA::LWU_PCR;
+	        break;
+	      case MVT::i64:
+	      case MVT::f64:
+	        Opc = LinxISA::LD_PCR;
+	        break;
+	      default:
+	        Opc = 0;
+	        break;
+	      }
+
+      if (Opc) {
+        SDVTList VTs = CurDAG->getVTList(LD->getValueType(0), MVT::Other);
+        SDValue Ops[] = {PcrSym, LD->getChain()};
+        SDNode *Res = CurDAG->getMachineNode(Opc, DL, VTs, Ops);
+        ReplaceNode(N, Res);
+        return;
+      }
+    }
+
     // Prefer reg-offset addressing when the address matches `base + (idx<<sh)`.
     SDValue BaseRO, IndexRO;
     unsigned Shift = 0;
@@ -614,7 +867,14 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
         Opc = (LD->getExtensionType() == ISD::ZEXTLOAD) ? LinxISA::LWU
                                                         : LinxISA::LW;
         break;
+      case MVT::f32:
+        // Preserve the f32 bit-pattern in the low 32 bits.
+        Opc = LinxISA::LWU;
+        break;
       case MVT::i64:
+        Opc = LinxISA::LD;
+        break;
+      case MVT::f64:
         Opc = LinxISA::LD;
         break;
       default:
@@ -634,6 +894,11 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
 
     unsigned Opc = 0;
     switch (MemVT.SimpleTy) {
+    case MVT::i1:
+      // LLVM may represent boolean globals as i1 in memory. On LinxISA, bools
+      // are stored as bytes (0/1), so select a byte load.
+      Opc = LinxISA::LBUI;
+      break;
     case MVT::i8:
       Opc = (LD->getExtensionType() == ISD::ZEXTLOAD) ? LinxISA::LBUI
                                                       : LinxISA::LBI;
@@ -648,7 +913,14 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
       else
         Opc = LinxISA::LWI;
       break;
+    case MVT::f32:
+      // Preserve the f32 bit-pattern in the low 32 bits.
+      Opc = LinxISA::LWUI;
+      break;
     case MVT::i64:
+      Opc = LinxISA::LDI;
+      break;
+    case MVT::f64:
       Opc = LinxISA::LDI;
       break;
     default:
@@ -675,6 +947,40 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
     MVT MemVT = ST->getMemoryVT().getSimpleVT();
     int64_t Scale = getMemScaleForVT(MemVT);
 
+    // Fold materialized PC-relative addresses back into a single *.PCR store:
+    //   addr = ADDI(ADDTPC(sym), sym) [+ const]
+    //   store [addr] -> *.pcr [sym+const]
+    SDValue PcrSym;
+	    if (selectPcrSymbolAddr(ST->getBasePtr(), PcrSym)) {
+	      unsigned Opc = 0;
+	      switch (MemVT.SimpleTy) {
+	      case MVT::i8:
+	        Opc = LinxISA::SB_PCR;
+	        break;
+	      case MVT::i16:
+	        Opc = LinxISA::SH_PCR;
+	        break;
+	      case MVT::i32:
+	      case MVT::f32:
+	        Opc = LinxISA::SW_PCR;
+	        break;
+	      case MVT::i64:
+	      case MVT::f64:
+	        Opc = LinxISA::SD_PCR;
+	        break;
+	      default:
+	        Opc = 0;
+	        break;
+	      }
+
+      if (Opc) {
+        SDValue Ops[] = {ST->getValue(), PcrSym, ST->getChain()};
+        SDNode *Res = CurDAG->getMachineNode(Opc, DL, MVT::Other, Ops);
+        ReplaceNode(N, Res);
+        return;
+      }
+    }
+
     // Prefer reg-offset addressing when the address matches `base + (idx<<sh)`
     // and the shift matches the store-width scale.
     SDValue BaseRO, IndexRO;
@@ -695,7 +1001,15 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
         ExpectedShift = 2;
         Opc = LinxISA::SW;
         break;
+      case MVT::f32:
+        ExpectedShift = 2;
+        Opc = LinxISA::SW;
+        break;
       case MVT::i64:
+        ExpectedShift = 3;
+        Opc = LinxISA::SD;
+        break;
+      case MVT::f64:
         ExpectedShift = 3;
         Opc = LinxISA::SD;
         break;
@@ -714,6 +1028,10 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
 
     unsigned Opc = 0;
     switch (MemVT.SimpleTy) {
+    case MVT::i1:
+      // LLVM may represent boolean stores as i1 in memory. Store a byte (0/1).
+      Opc = LinxISA::SBI;
+      break;
     case MVT::i8:
       Opc = LinxISA::SBI;
       break;
@@ -723,7 +1041,13 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
     case MVT::i32:
       Opc = LinxISA::SWI;
       break;
+    case MVT::f32:
+      Opc = LinxISA::SWI;
+      break;
     case MVT::i64:
+      Opc = LinxISA::SDI;
+      break;
+    case MVT::f64:
       Opc = LinxISA::SDI;
       break;
     default:

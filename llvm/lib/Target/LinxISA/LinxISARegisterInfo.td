@@ -44,17 +44,70 @@ def U2  : LinxISAReg<29, "u#2">;
 def U3  : LinxISAReg<30, "u#3">;
 def U4  : LinxISAReg<31, "u#4">;
 
+// Tile registers (TAU): 4 hands (T/U/M/N) × depth 8 = 32 tiles.
+// The current ISA encoding uses 5-bit tile indices for sources (0..31) and a
+// 3-bit destination depth (0..7) plus a 1-bit group selector. The backend maps
+// physical tile registers TILE0..TILE31 to hands as:
+//   TILE0..TILE7   = T hand
+//   TILE8..TILE15  = U hand
+//   TILE16..TILE23 = M hand
+//   TILE24..TILE31 = N hand
+def TILE0  : LinxISAReg<0,  "tile0">;
+def TILE1  : LinxISAReg<1,  "tile1">;
+def TILE2  : LinxISAReg<2,  "tile2">;
+def TILE3  : LinxISAReg<3,  "tile3">;
+def TILE4  : LinxISAReg<4,  "tile4">;
+def TILE5  : LinxISAReg<5,  "tile5">;
+def TILE6  : LinxISAReg<6,  "tile6">;
+def TILE7  : LinxISAReg<7,  "tile7">;
+def TILE8  : LinxISAReg<8,  "tile8">;
+def TILE9  : LinxISAReg<9,  "tile9">;
+def TILE10 : LinxISAReg<10, "tile10">;
+def TILE11 : LinxISAReg<11, "tile11">;
+def TILE12 : LinxISAReg<12, "tile12">;
+def TILE13 : LinxISAReg<13, "tile13">;
+def TILE14 : LinxISAReg<14, "tile14">;
+def TILE15 : LinxISAReg<15, "tile15">;
+def TILE16 : LinxISAReg<16, "tile16">;
+def TILE17 : LinxISAReg<17, "tile17">;
+def TILE18 : LinxISAReg<18, "tile18">;
+def TILE19 : LinxISAReg<19, "tile19">;
+def TILE20 : LinxISAReg<20, "tile20">;
+def TILE21 : LinxISAReg<21, "tile21">;
+def TILE22 : LinxISAReg<22, "tile22">;
+def TILE23 : LinxISAReg<23, "tile23">;
+def TILE24 : LinxISAReg<24, "tile24">;
+def TILE25 : LinxISAReg<25, "tile25">;
+def TILE26 : LinxISAReg<26, "tile26">;
+def TILE27 : LinxISAReg<27, "tile27">;
+def TILE28 : LinxISAReg<28, "tile28">;
+def TILE29 : LinxISAReg<29, "tile29">;
+def TILE30 : LinxISAReg<30, "tile30">;
+def TILE31 : LinxISAReg<31, "tile31">;
+
 // GPR_Arch: Architectural GPRs only (R0-R23), no T/U queue references.
 // Use this for operands that must hold actual values (like comparison results).
-def GPR_Arch : RegisterClass<"Linx", [i64, i32], 64,
+def GPR_Arch : RegisterClass<"Linx", [i64, i32, f64, f32], 64,
     (sequence "R%i", 0, 23)>;
 
 // GPR: Full GPR class including T/U queue read-only references.
 // The T/U queue registers can be used as source operands to read from the queue.
-def GPR : RegisterClass<"Linx", [i64, i32], 64,
+def GPR : RegisterClass<"Linx", [i64, i32, f64, f32], 64,
     (add (sequence "R%i", 0, 23),
          T1, T2, T3, T4,
          U1, U2, U3, U4)>;
+
+// Tile register classes.
+def TILE : RegisterClass<"Linx", [v1024i32], 32768,
+    (sequence "TILE%i", 0, 31)>;
+
+// Sub-classes for encodable destination banks used by block types:
+// - TMA blocks write into T/U hands (TILE0..TILE15) selected by group.
+// - CUBE blocks write into M/N hands (TILE16..TILE31) selected by group.
+def TILE_TU : RegisterClass<"Linx", [v1024i32], 32768,
+    (sequence "TILE%i", 0, 15)>;
+def TILE_MN : RegisterClass<"Linx", [v1024i32], 32768,
+    (sequence "TILE%i", 16, 31)>;
 
 def CSR_Linx : CalleeSavedRegs<(add R10,
                                    (sequence "R%i", 11, 19))>;

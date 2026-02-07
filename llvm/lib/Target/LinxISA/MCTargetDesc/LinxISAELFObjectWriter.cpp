@@ -55,6 +55,14 @@ public:
       return ELF::R_LINX_HL_SETRET32_PCREL;
     case LinxISA::FIXUP_LINX_PCREL_HI20:
       return ELF::R_LINX_PCREL_HI20;
+    case LinxISA::FIXUP_LINX_PCR17_LOAD:
+      return ELF::R_LINX_PCR17_LOAD;
+    case LinxISA::FIXUP_LINX_PCR17_STORE:
+      return ELF::R_LINX_PCR17_STORE;
+    case LinxISA::FIXUP_LINX_HL_PCR29_LOAD:
+      return ELF::R_LINX_HL_PCR29_LOAD;
+    case LinxISA::FIXUP_LINX_HL_PCR29_STORE:
+      return ELF::R_LINX_HL_PCR29_STORE;
     case LinxISA::FIXUP_LINX_LO12:
       return ELF::R_LINX_LO12;
     case FK_Data_4:

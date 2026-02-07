@@ -9,7 +9,9 @@
 #include "LinxISATargetMachine.h"
 #include "LinxISA.h"
 #include "LinxISAMachineFunctionInfo.h"
+#include "LinxISATargetTransformInfo.h"
 #include "TargetInfo/LinxISATargetInfo.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
@@ -103,4 +105,9 @@ MachineFunctionInfo *LinxISATargetMachine::createMachineFunctionInfo(
   return new (Allocator.Allocate<LinxISAMachineFunctionInfo>())
       LinxISAMachineFunctionInfo(
           F, static_cast<const LinxISASubtarget *>(STI));
+}
+
+TargetTransformInfo
+LinxISATargetMachine::getTargetTransformInfo(const Function &F) const {
+  return TargetTransformInfo(std::make_unique<LinxISATTIImpl>(this, F));
 }
