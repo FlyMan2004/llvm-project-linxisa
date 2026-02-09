@@ -30,6 +30,9 @@ enum Fixups {
   // PC-relative block-start immediate (simm17, scaled by 2 bytes).
   FIXUP_LINX_B17_PCREL,
 
+  // PC-relative block text immediate (B.TEXT simm25, scaled by 2 bytes).
+  FIXUP_LINX_B25_PCREL,
+
   // PC-relative block-start immediate targeting a PLT entry (simm17, scaled by
   // 2 bytes).
   FIXUP_LINX_B17_PLT,

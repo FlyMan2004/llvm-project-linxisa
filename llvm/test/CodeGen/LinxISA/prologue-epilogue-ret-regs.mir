@@ -1,0 +1,49 @@
+# RUN: llc -mtriple=linx64 -run-pass=prologepilog -o - %s | FileCheck %s
+#
+# Ensure LinxISAFrameLowering::emitEpilogue preserves ABI return registers as
+# implicit uses on the emitted FRET macro. Without this, post-PEI cleanups can
+# DCE the final copy into a0/a1, causing callers to observe the wrong return
+# value.
+#
+# CHECK-LABEL: name: ret_regs_liveout
+# CHECK: FRET_STK {{.*}} implicit $r2
+# CHECK-SAME: implicit $r3
+
+--- |
+  ; ModuleID = 'ret_regs_liveout'
+  source_filename = "ret_regs_liveout.c"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "linx64-unknown-unknown-elf"
+  
+  define dso_local i32 @ret_regs_liveout(i32 %x) {
+  entry:
+    ret i32 %x
+  }
+...
+---
+name:            ret_regs_liveout
+alignment:       2
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+frameInfo:
+  stackSize:       8
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        false
+  isCalleeSavedInfoValid: true
+stack:
+  - { id: 0, name: '', type: spill-slot, offset: -8, size: 8, alignment: 8,
+      stack-id: default, callee-saved-register: '$r10',
+      callee-saved-restored: true, debug-info-variable: '',
+      debug-info-expression: '', debug-info-location: '' }
+body:             |
+  bb.0:
+    liveins: $r2, $r3, $r10
+  
+    ; Return value is staged through a non-ABI register and copied into a0
+    ; before the return pseudo. PEI must preserve a0/a1 as live-out at FRET.
+    $r4 = SUBIWri $r0, 19
+    $r2 = COPY $r4
+    PSEUDO_RET implicit $r10, implicit $r2, implicit $r3

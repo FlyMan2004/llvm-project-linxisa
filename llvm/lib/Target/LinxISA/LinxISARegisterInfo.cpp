@@ -88,9 +88,6 @@ bool LinxISARegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
                                               int SPAdj,
                                               unsigned FIOperandNum,
                                               RegScavenger *RS) const {
-  if (SPAdj != 0)
-    report_fatal_error("Linx: non-zero SPAdj not supported");
-
   MachineInstr &MI = *II;
   MachineFunction &MF = *MI.getParent()->getParent();
   const auto &TII = *MF.getSubtarget().getInstrInfo();
@@ -98,7 +95,11 @@ bool LinxISARegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
 
   const int FrameIndex = MI.getOperand(FIOperandNum).getIndex();
 
-  int64_t OffsetBytes = MFI.getObjectOffset(FrameIndex) + MFI.getStackSize();
+  // The frame index offset is computed relative to the stack pointer value at
+  // the end of the prologue. If this instruction is inside a call sequence,
+  // SP has been adjusted by SPAdj (tracked by PEI); incorporate it here.
+  int64_t OffsetBytes =
+      MFI.getObjectOffset(FrameIndex) + MFI.getStackSize() + SPAdj;
 
   // Reg-offset addressing forms do not have an immediate displacement field;
   // materialize the stack-object base address into a temporary register.

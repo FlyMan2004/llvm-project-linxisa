@@ -12,6 +12,7 @@
 #include "LinxISARegisterInfo.h"
 #include "MCTargetDesc/LinxISAMCTargetDesc.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -20,10 +21,13 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/TargetOpcodes.h"
+#include "llvm/MC/MCContext.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <limits>
 #include <optional>
@@ -70,6 +74,8 @@ static bool isFrameMacroInstr(const MachineInstr &MI) {
   case LinxISA::FEXIT:
   case LinxISA::FRET_RA:
   case LinxISA::FRET_STK:
+  case LinxISA::MCOPY:
+  case LinxISA::MSET:
     return true;
   default:
     return false;
@@ -184,6 +190,55 @@ public:
 
     const BitVector Reserved = TRI.getReservedRegs(MF);
     bool Changed = false;
+
+    // Per-function empty decoupled-body stub used by tile/vector block headers.
+    // This is emitted as a linear snippet that terminates at BSTOP and is
+    // referenced via B.TEXT from decoupled headers.
+    MachineBasicBlock *EmptyBodyBB = nullptr;
+    MCSymbol *EmptyBodySym = nullptr;
+    for (MachineBasicBlock &MBB : MF) {
+      for (MachineInstr &MI : MBB) {
+        if (MI.getOpcode() != TargetOpcode::EH_LABEL || MI.getNumOperands() < 1)
+          continue;
+        const MachineOperand &MO = MI.getOperand(0);
+        if (!MO.isMCSymbol())
+          continue;
+        MCSymbol *Sym = MO.getMCSymbol();
+        if (!Sym)
+          continue;
+        if (Sym->getName().starts_with(".__linx_empty_body.")) {
+          EmptyBodyBB = &MBB;
+          EmptyBodySym = Sym;
+          break;
+        }
+      }
+      if (EmptyBodyBB)
+        break;
+    }
+
+    auto getOrCreateEmptyBodySym = [&]() -> MCSymbol * {
+      if (EmptyBodySym)
+        return EmptyBodySym;
+
+      MCContext &Ctx = MF.getContext();
+      SmallString<64> Name;
+      raw_svector_ostream OS(Name);
+      OS << ".__linx_empty_body." << MF.getFunctionNumber();
+      EmptyBodySym = Ctx.getOrCreateSymbol(OS.str());
+
+      EmptyBodyBB = MF.CreateMachineBasicBlock();
+      MF.insert(MF.end(), EmptyBodyBB);
+      EmptyBodyBB->setLabelMustBeEmitted();
+
+      BuildMI(*EmptyBodyBB, EmptyBodyBB->end(), DebugLoc(),
+              TII.get(TargetOpcode::EH_LABEL))
+          .addSym(EmptyBodySym);
+      BuildMI(*EmptyBodyBB, EmptyBodyBB->end(), DebugLoc(),
+              TII.get(LinxISA::BSTOP));
+
+      Changed = true;
+      return EmptyBodySym;
+    };
 
     auto splitAfterCall = [&](MachineBasicBlock &MBB, MachineInstr &CallMI)
         -> MachineBasicBlock * {
@@ -330,6 +385,24 @@ public:
         MachineBasicBlock *TailBB = splitBeforeInstr(*MBB, *MacroMI);
         MacroSplitWorklist.push_back(TailBB);
         Changed = true;
+        break;
+      }
+      case LinxISA::MCOPY:
+      case LinxISA::MSET: {
+        // Template blocks are standalone block start markers and must not be
+        // merged with surrounding instructions.
+        if (hasRealInstrBefore(*MacroMI)) {
+          MachineBasicBlock *TailBB = splitBeforeInstr(*MBB, *MacroMI);
+          MacroSplitWorklist.push_back(TailBB);
+          Changed = true;
+          break;
+        }
+        if (hasRealInstrAfter(*MacroMI)) {
+          MachineBasicBlock *ContBB = splitAfterInstr(*MBB, *MacroMI);
+          MacroSplitWorklist.push_back(ContBB);
+          Changed = true;
+          break;
+        }
         break;
       }
       default:
@@ -482,6 +555,9 @@ public:
             .addImm(DType_I32)
             .addImm(TMA_TLOAD);
 
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_TEXT))
+            .addSym(getOrCreateEmptyBodySym());
+
         const unsigned BIOT = Group ? LinxISA::B_IOT_G1 : LinxISA::B_IOT_G0;
         BuildMI(MBB, InsertPt, DL, TII.get(BIOT))
             .addImm(Depth)  // DstTile (depth)
@@ -520,6 +596,9 @@ public:
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_TMA))
             .addImm(DType_I32)
             .addImm(TMA_TSTORE);
+
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_TEXT))
+            .addSym(getOrCreateEmptyBodySym());
 
         // Store: encode the source tile in SrcTile0 (5-bit) and set S0V.
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOT_G0))
@@ -574,6 +653,9 @@ public:
             .addImm(DType_I32)
             .addImm(CUBE_MAMULB);
 
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_TEXT))
+            .addSym(getOrCreateEmptyBodySym());
+
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_DIM_LB0))
             .addReg(LinxISA::R0)
             .addImm(M);
@@ -606,6 +688,9 @@ public:
         BuildMI(*AccBB, AccBB->end(), DL, TII.get(LinxISA::BSTART_CUBE))
             .addImm(DType_I32)
             .addImm(CUBE_ACCCVT);
+
+        BuildMI(*AccBB, AccBB->end(), DL, TII.get(LinxISA::B_TEXT))
+            .addSym(getOrCreateEmptyBodySym());
 
         const unsigned BIOT = Group ? LinxISA::B_IOT_G1 : LinxISA::B_IOT_G0;
         BuildMI(*AccBB, AccBB->end(), DL, TII.get(BIOT))
@@ -817,6 +902,11 @@ public:
         Ind,
         ICall,
       };
+
+      // Decoupled out-of-line bodies are linear snippets referenced via B.TEXT
+      // and must not be wrapped or rewritten by Blockify.
+      if (EmptyBodyBB && &MBB == EmptyBodyBB)
+        continue;
 
       // Frame prologue/epilogue macros (FENTRY/FEXIT/FRET.*) are standalone
       // blocks in LinxISA: they already contain the required block markers and
@@ -1360,10 +1450,19 @@ public:
 	          } else {
 	            Kind = ExitKind::Call;
 	          }
+          /*
+           * Only emit SETRET (and thus a concrete return target) when the call
+           * has a real CFG successor representing the continuation block.
+           *
+           * For noreturn calls, LLVM can leave the block with no successors;
+           * in that case, fabricating a "next block" return target produces
+           * invalid/unemitted labels (e.g. when the next block is an internal
+           * EH_LABEL-only decoupled body stub).
+           */
           if (!MBB.succ_empty())
             ReturnBB = *MBB.succ_begin();
-          else
-            ReturnBB = MBB.getNextNode();
+          if (EmptyBodyBB && ReturnBB == EmptyBodyBB)
+            ReturnBB = nullptr;
           Last->eraseFromParent();
           Changed = true;
           break;
@@ -2526,6 +2625,15 @@ public:
 	          ++It;
 	          continue;
 	        }
+	        // This peephole is intended for the "address-generation temporary"
+	        // shape `addi tmp, base, C` where `tmp` is a distinct register. If we
+	        // try to fold an in-place update (tmp == base), we would need to
+	        // *remove* the defining instruction to preserve semantics; doing so
+	        // is generally not possible for reserved/live-out regs like `sp`.
+	        if (Tmp == Base) {
+	          ++It;
+	          continue;
+	        }
 	        const bool CanEraseDef = !isPhysRegLiveOutOfBlock(Tmp);
 
 	        struct UseRef {
@@ -2555,6 +2663,27 @@ public:
 	            return true;
 	          default:
 	            return false;
+	          }
+	        };
+	        auto memImmScale = [&](unsigned Opc) -> int64_t {
+	          switch (Opc) {
+	          case LinxISA::LBI:
+	          case LinxISA::LBUI:
+	          case LinxISA::SBI:
+	            return 1;
+	          case LinxISA::LHI:
+	          case LinxISA::LHUI:
+	          case LinxISA::SHI:
+	            return 2;
+	          case LinxISA::LWI:
+	          case LinxISA::LWUI:
+	          case LinxISA::SWI:
+	            return 4;
+	          case LinxISA::LDI:
+	          case LinxISA::SDI:
+	            return 8;
+	          default:
+	            return 1;
 	          }
 	        };
 
@@ -2604,7 +2733,15 @@ public:
 	          }
 
 	          const int64_t OldOff = OffMO.getImm();
-	          const int64_t NewOff = OldOff + Addend;
+	          // The machine-level mem-immediate is in *scaled units* (AArch64
+	          // style): the final byte offset is `imm * access_size`. Convert the
+	          // address-generation addend (bytes) into the same unit system.
+	          const int64_t Scale = memImmScale(MI.getOpcode());
+	          if (Scale <= 0 || (Addend % Scale) != 0) {
+	            Bad = true;
+	            break;
+	          }
+	          const int64_t NewOff = OldOff + (Addend / Scale);
 	          if (!isInt<12>(NewOff)) {
 	            Bad = true;
 	            break;
@@ -2621,7 +2758,8 @@ public:
 	        for (const UseRef &U : Uses) {
 	          U.MI->getOperand(U.BaseOpNo).setReg(Base);
 	          const int64_t OldOff = U.MI->getOperand(U.OffOpNo).getImm();
-	          U.MI->getOperand(U.OffOpNo).setImm(OldOff + Addend);
+	          const int64_t Scale = memImmScale(U.MI->getOpcode());
+	          U.MI->getOperand(U.OffOpNo).setImm(OldOff + (Addend / Scale));
 	        }
 
 	        auto Next = std::next(It);
@@ -3081,6 +3219,7 @@ public:
 	        unsigned DefIdx = 0;
 	        SmallVector<UseSite, 4> Uses;
 	        bool ClosedByRedef = false;
+	        bool TouchesInlineAsm = false;
 	      };
 
       SmallVector<Segment, 32> Segs;
@@ -3128,22 +3267,37 @@ public:
           return false;
         };
 
-        // Identify whether this block header may implicitly consume ABI
-        // argument/return registers (CALL/ICALL/RET). If so, be conservative
-        // about remapping a0-a7 since those uses are not modeled as explicit
-        // register operands on the block header itself.
-        bool BlockHasImplicitAbiUses = false;
-        if (BStartMI) {
-          const unsigned Opc = BStartMI->getOpcode();
+        // Identify whether this block (MachineBasicBlock) contains any BlockISA
+        // headers that may implicitly consume ABI argument/return registers
+        // (CALL/ICALL/RET). If so, be conservative about remapping a0-a7 since
+        // those uses are not modeled as explicit register operands on the block
+        // header itself.
+        //
+        // Note: a single MachineBasicBlock can contain multiple BlockISA blocks
+        // (markers like C.BSTART ...). We must therefore scan all marker
+        // instructions, not just the first header.
+        auto markerHasImplicitAbiUses = [&](const MachineInstr &MI) -> bool {
+          const unsigned Opc = MI.getOpcode();
           if (Opc == LinxISA::BSTART_STD_CALL || Opc == LinxISA::BSTART_STD_ICALL ||
               Opc == LinxISA::BSTART_STD_RET) {
+            return true;
+          }
+          if (Opc == LinxISA::CBSTART_STD && MI.getNumOperands() >= 1 &&
+              MI.getOperand(0).isImm()) {
+            const int64_t BrType = MI.getOperand(0).getImm() & 0x7;
+            return BrType == 4 /*CALL*/ || BrType == 6 /*ICALL*/ ||
+                   BrType == 7 /*RET*/;
+          }
+          return false;
+        };
+
+        bool BlockHasImplicitAbiUses = false;
+        for (const MachineInstr &MI : MBB) {
+          if (!isMarkerInstr(MI))
+            continue;
+          if (markerHasImplicitAbiUses(MI)) {
             BlockHasImplicitAbiUses = true;
-          } else if (Opc == LinxISA::CBSTART_STD && BStartMI->getNumOperands() >= 1 &&
-                     BStartMI->getOperand(0).isImm()) {
-            const int64_t BrType = BStartMI->getOperand(0).getImm() & 0x7;
-            if (BrType == 4 /*CALL*/ || BrType == 6 /*ICALL*/ ||
-                BrType == 7 /*RET*/)
-              BlockHasImplicitAbiUses = true;
+            break;
           }
         }
 
@@ -3251,6 +3405,8 @@ public:
 
 	          Segment &S = Segs[It->second];
 	          S.Uses.push_back(UseSite{&MI, OpNo, InstIdx});
+	          if (MI.isInlineAsm())
+	            S.TouchesInlineAsm = true;
 	        }
 
         for (unsigned OpNo = 0; OpNo < MI.getNumOperands(); ++OpNo) {
@@ -3274,6 +3430,7 @@ public:
           S.DefMI = &MI;
           S.DefOpNo = OpNo;
           S.DefIdx = InstIdx;
+          S.TouchesInlineAsm = MI.isInlineAsm();
           ActiveSeg[Reg.id()] = Segs.size();
           Segs.push_back(S);
         }
@@ -3286,6 +3443,12 @@ public:
 	      for (unsigned I = 0; I < Segs.size(); ++I) {
 	        const Segment &S = Segs[I];
 	        if (!S.DefMI || S.Uses.empty())
+	          continue;
+	        // Never remap values that touch inline asm. Inline asm operand
+	        // constraints expect architectural registers; rewriting defs/uses to
+	        // the T/U hand queues breaks the ABI-visible semantics (notably
+	        // syscall/ACR entry/exit sequences).
+	        if (S.TouchesInlineAsm)
 	          continue;
 	        unsigned LastUseIdx = 0;
 	        for (const UseSite &U : S.Uses)
@@ -3523,6 +3686,13 @@ public:
 	        }
 
 	        if (!hasSingleNonDbgUseInMBB(Dst, &SetcMI, &LdMI)) {
+	          ++It;
+	          continue;
+	        }
+	        // The T/U hand queues are block-private: values pushed into the queue
+	        // do not survive control-flow edges. Only rewrite when the loaded
+	        // value is guaranteed not to be live-out of this MachineBasicBlock.
+	        if (isPhysRegLiveOutOfBlock(Dst)) {
 	          ++It;
 	          continue;
 	        }

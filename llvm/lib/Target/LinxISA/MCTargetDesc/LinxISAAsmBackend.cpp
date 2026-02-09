@@ -67,6 +67,19 @@ uint32_t encodeB17Pcrel(uint64_t Value) {
   return (UImm << 15);
 }
 
+uint32_t encodeB25Pcrel(uint64_t Value) {
+  // B.TEXT immediates are encoded in units of 2 bytes (bit 0 is implicit 0).
+  if (Value & 0x1)
+    report_fatal_error("Linx B.TEXT target is not 2-byte aligned");
+
+  int64_t Imm = static_cast<int64_t>(Value) >> 1;
+  if (!isInt<25>(Imm))
+    report_fatal_error("Linx B.TEXT target out of range");
+
+  uint32_t UImm = static_cast<uint32_t>(Imm) & 0x01FFFFFFu; // 25 bits
+  return (UImm << 7);
+}
+
 uint16_t encodeCBStart12Pcrel(uint64_t Value) {
   // C.BSTART immediates are encoded in units of 2 bytes (bit 0 is implicit 0).
   if (Value & 0x1)
@@ -507,6 +520,9 @@ public:
     case LinxISA::FIXUP_LINX_B17_PCREL:
       Patch = encodeB17Pcrel(Value);
       break;
+    case LinxISA::FIXUP_LINX_B25_PCREL:
+      Patch = encodeB25Pcrel(Value);
+      break;
     case LinxISA::FIXUP_LINX_B17_PLT:
       Patch = encodeB17Pcrel(Value);
       break;
@@ -598,6 +614,7 @@ public:
         {"FIXUP_LINX_J22_PCREL", 0, 22, 0},
         {"FIXUP_LINX_CBSTART12_PCREL", 0, 12, 0},
         {"FIXUP_LINX_B17_PCREL", 0, 17, 0},
+        {"FIXUP_LINX_B25_PCREL", 7, 25, 0},
         {"FIXUP_LINX_B17_PLT", 0, 17, 0},
         // simm30 byte offset, instruction-aligned.
         {"FIXUP_LINX_HL_BSTART30_PCREL", 0, 30, 0},

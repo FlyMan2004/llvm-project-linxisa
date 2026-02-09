@@ -175,11 +175,22 @@ void LinxISAFrameLowering::emitEpilogue(MachineFunction &MF,
     return;
 
   SmallVector<Register, 8> RetValRegs;
+  auto AddRetValReg = [&](Register Reg) {
+    if (!Reg)
+      return;
+    // Skip special registers that are unrelated to the C ABI return value.
+    if (Reg == LinxISA::R1 /*sp*/ || Reg == LinxISA::R10 /*ra*/)
+      return;
+    for (Register Existing : RetValRegs) {
+      if (Existing == Reg)
+        return;
+    }
+    RetValRegs.push_back(Reg);
+  };
   for (const MachineOperand &MO : RetMI->operands()) {
-    if (!MO.isReg() || MO.isDef() || MO.isImplicit())
+    if (!MO.isReg() || MO.isDef())
       continue;
-    if (Register Reg = MO.getReg())
-      RetValRegs.push_back(Reg);
+    AddRetValReg(MO.getReg());
   }
   RetMI->eraseFromParent();
 
@@ -197,6 +208,15 @@ void LinxISAFrameLowering::emitEpilogue(MachineFunction &MF,
           .addImm(StackSize);
   for (Register Reg : RetValRegs)
     MIB.addReg(Reg, RegState::Implicit);
+
+  // Post-RA MachineCopyPropagation deletes copies at the end of a block unless
+  // the copy destination is listed as live-in to a successor block. Our return
+  // value registers are modeled as implicit uses on FRET_STK (so they are not
+  // necessarily present in live-in lists). Add them explicitly to keep return
+  // value materialization in predecessor blocks intact.
+  EpilogueBB->addLiveIn(LinxISA::R1);
+  for (Register Reg : RetValRegs)
+    EpilogueBB->addLiveIn(Reg);
 }
 
 bool LinxISAFrameLowering::spillCalleeSavedRegisters(
@@ -226,8 +246,33 @@ bool LinxISAFrameLowering::restoreCalleeSavedRegisters(
 MachineBasicBlock::iterator LinxISAFrameLowering::eliminateCallFramePseudoInstr(
     MachineFunction &MF, MachineBasicBlock &MBB,
     MachineBasicBlock::iterator MI) const {
-  // With FENTRY/FRET.STK, we don't need dynamic call frame adjustments
-  // The stack is fixed at function entry
-  // Just remove the pseudo instructions
+  // LinxISA uses explicit call-sequence stack adjustments for outgoing stack
+  // arguments. This keeps the fixed FENTRY/FRET "home" area (modeled in QEMU as
+  // LINX_CALLFRAME_SIZE) independent from the variable per-call stack argument
+  // area.
+  if (hasReservedCallFrame(MF))
+    return MBB.erase(MI);
+
+  int64_t Amount = MI->getOperand(0).getImm();
+  if (Amount == 0)
+    return MBB.erase(MI);
+
+  const LinxISAInstrInfo &TII =
+      *static_cast<const LinxISAInstrInfo *>(MF.getSubtarget().getInstrInfo());
+  DebugLoc DL = MI->getDebugLoc();
+
+  const bool IsDown = MI->getOpcode() == LinxISA::ADJCALLSTACKDOWN;
+  unsigned Op = IsDown ? LinxISA::SUBIri : LinxISA::ADDIri;
+
+  // The immediate range for ADDI/SUBI is 12-bit unsigned; chunk large call
+  // frames to keep bring-up code simple.
+  while (Amount > 0) {
+    int64_t Chunk = std::min<int64_t>(Amount, 4095);
+    BuildMI(MBB, MI, DL, TII.get(Op), LinxISA::R1)
+        .addReg(LinxISA::R1)
+        .addImm(Chunk);
+    Amount -= Chunk;
+  }
+
   return MBB.erase(MI);
 }

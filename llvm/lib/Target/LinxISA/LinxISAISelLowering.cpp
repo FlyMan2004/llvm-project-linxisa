@@ -80,10 +80,13 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   addRegisterClass(MVT::i32, &LinxISA::GPRRegClass);
   addRegisterClass(MVT::f64, &LinxISA::GPRRegClass);
   addRegisterClass(MVT::f32, &LinxISA::GPRRegClass);
-  // Bring-up: keep tile registers out of the legal type set. Otherwise, Clang
-  // may choose <1024 x i32> for large zero-inits (e.g. with
-  // -ftrivial-auto-var-init=zero) and SelectionDAG will see vector ops we do
-  // not lower yet.
+  // Tile registers (TAU): model hardware tiles as an opaque vector payload.
+  //
+  // Bring-up rule: tile values are expected to be produced/consumed only by
+  // Linx tile intrinsics (e.g. llvm.linx.tma.* / llvm.linx.cube.*). Keep all
+  // generic vector ops expanded/custom so the backend does not accidentally
+  // start treating <1024 x i32> as a general SIMD type.
+  addRegisterClass(MVT::v1024i32, &LinxISA::TILERegClass);
 
   computeRegisterProperties(STI.getRegisterInfo());
   setStackPointerRegisterToSaveRestore(LinxISA::R1);
@@ -1294,6 +1297,19 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &DL,
     SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
+  // LinxISA bring-up ABI: reserve a fixed "call frame"/home area above the
+  // local stack frame. The QEMU model adjusts SP by (StackSize + CallFrameSize)
+  // in the FENTRY/FRET.* template blocks.
+  //
+  // Stack-passed arguments are laid out by the caller at the entry SP (before
+  // FENTRY), so after the template SP adjustment they appear at
+  //   SP + StackSize + CallFrameSize + ArgOffset.
+  //
+  // Our eliminateFrameIndex logic materializes addresses as
+  //   SP + StackSize + FixedObjectOffset,
+  // so we bias the fixed-object offsets by CallFrameSize to compensate.
+  static constexpr int64_t CallFrameSize = 64;
+
   // Varargs support is limited during bring-up.
   // All varargs must be passed on stack.
   if (IsVarArg && CallConv != CallingConv::C) {
@@ -1325,7 +1341,8 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
       Chain = Copy.getValue(1);
     } else {
       assert(VA.isMemLoc() && "Unknown argument location");
-      int FI = MFI.CreateFixedObject(LocVT.getStoreSize(), VA.getLocMemOffset(),
+      int FI = MFI.CreateFixedObject(LocVT.getStoreSize(),
+                                     VA.getLocMemOffset() + CallFrameSize,
                                      /*IsImmutable=*/true);
       SDValue FIN = DAG.getFrameIndex(FI, PtrVT);
       SDValue Load = DAG.getLoad(LocVT, DL, Chain, FIN,
@@ -1344,7 +1361,7 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
     // variadic arguments are passed on the stack with natural size/alignment
     // (see LinxISACallingConv.td). The varargs area therefore begins at the
     // first stack slot after the fixed arguments.
-    const int VaArgOffset = CCInfo.getStackSize();
+    const int VaArgOffset = CCInfo.getStackSize() + CallFrameSize;
     const int FI = MFI.CreateFixedObject(/*Size=*/1, VaArgOffset,
                                          /*IsImmutable=*/true);
     FuncInfo->setVarArgsFrameIndex(FI);
@@ -1414,6 +1431,8 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
   CCInfo.AnalyzeCallOperands(CLI.Outs, Is64 ? CC_Linx64 : CC_Linx32);
 
   unsigned NumBytes = CCInfo.getStackSize();
+  // Keep the stack aligned at call boundaries.
+  NumBytes = alignTo(NumBytes, 16u);
   Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
 
   SmallVector<std::pair<unsigned, SDValue>, 8> RegsToPass;
@@ -1586,7 +1605,12 @@ LinxISATargetLowering::getRegForInlineAsmConstraint(
     switch (Constraint[0]) {
     case 'r':
       if (!VT.isVector())
-        return std::make_pair(0u, &LinxISA::GPRRegClass);
+        // The Linx GPR encoding space includes queue pseudo-registers
+        // (t#k/u#k and the special RegDst encodings for ->t/->u). These are not
+        // general-purpose registers and are not safe for C inline-asm operands
+        // (especially for syscall/ACR entry/exit sequences). Restrict the "r"
+        // constraint to architectural registers only.
+        return std::make_pair(0u, &LinxISA::GPR_ArchRegClass);
       break;
     default:
       break;
@@ -1653,7 +1677,7 @@ LinxISATargetLowering::getRegForInlineAsmConstraint(
       Found = false;
 
     if (Found)
-      return std::make_pair(Phys, &LinxISA::GPRRegClass);
+      return std::make_pair(Phys, &LinxISA::GPR_ArchRegClass);
   }
 
   return TargetLowering::getRegForInlineAsmConstraint(TRI, Constraint, VT);

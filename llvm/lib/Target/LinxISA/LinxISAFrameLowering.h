@@ -21,6 +21,13 @@ public:
   LinxISAFrameLowering()
       : TargetFrameLowering(StackGrowsDown, Align(16), /*LocalAreaOffset=*/0) {}
 
+  bool hasReservedCallFrame(const MachineFunction &MF) const override {
+    // LinxISA uses explicit call-sequence stack adjustments for outgoing stack
+    // arguments. The fixed "home" area is provided by the FENTRY/FRET template
+    // blocks (see QEMU model and LinxISATargetLowering::LowerFormalArguments).
+    return false;
+  }
+
   void determineCalleeSaves(MachineFunction &MF, BitVector &SavedRegs,
                             RegScavenger *RS = nullptr) const override;
 

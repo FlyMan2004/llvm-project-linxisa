@@ -249,18 +249,24 @@ def FEXIT : LinxISAInst<(outs), (ins fentry_regbegin:$begin, fentry_regend:$end,
 
 // FRET.RA (32-bit): Function return via RA - restore registers, adjust SP, return
 let hasSideEffects = 1, mayLoad = 1, isReturn = 1, isTerminator = 1, isBarrier = 1,
-    // Model ABI return regs (a0/a1) as live-out at the terminator so that
-    // late machine DCE does not drop CopyToReg sequences that place the
-    // function's return value(s) into the fixed ABI registers.
-    Size = 4, Uses = [R1, R10, R2, R3], Defs = [R1] in
+    Size = 4, Uses = [R1, R10], Defs = [R1] in
 def FRET_RA : LinxISAInst<(outs), (ins fentry_regbegin:$begin, fentry_regend:$end, fentry_stacksize:$stacksize), "", []>;
 
 // FRET.STK (32-bit): Function return via stack - restore registers, adjust SP, return
 // This is the most common return instruction for non-leaf functions
 let hasSideEffects = 1, mayLoad = 1, isReturn = 1, isTerminator = 1, isBarrier = 1,
-    // See FRET_RA note above about keeping ABI return regs live-out.
-    Size = 4, Uses = [R1, R2, R3], Defs = [R1, R10] in
+    Size = 4, Uses = [R1], Defs = [R1, R10] in
 def FRET_STK : LinxISAInst<(outs), (ins fentry_regbegin:$begin, fentry_regend:$end, fentry_stacksize:$stacksize), "", []>;
+
+// Bulk memory template blocks (LinxISA spec).
+//
+// These are standalone template blocks (block start markers) that expand to a
+// restartable sequence of micro-ops in hardware.
+let hasSideEffects = 1, mayLoad = 1, mayStore = 1, Size = 4 in
+def MCOPY : LinxISAInst<(outs), (ins GPR_Arch:$dst, GPR_Arch:$src, GPR_Arch:$size), "", []>;
+
+let hasSideEffects = 1, mayStore = 1, Size = 4 in
+def MSET  : LinxISAInst<(outs), (ins GPR_Arch:$dst, GPR_Arch:$val, GPR_Arch:$size), "", []>;
 
 //===----------------------------------------------------------------------===//
 // Integer arithmetic/logical ops (selected by patterns)
@@ -427,6 +433,9 @@ def PSEUDO_CUBE_MAMULB : Pseudo<(outs TILE_MN:$dst),
 let hasSideEffects = 1, isBarrier = 1, Size = 4 in {
   def BSTART_TMA  : LinxISAInst<(outs), (ins uimm5:$dtype, uimm5:$func), "", []>;
   def BSTART_CUBE : LinxISAInst<(outs), (ins uimm5:$dtype, uimm5:$func), "", []>;
+
+  // Decoupled-body pointer for tile/vector headers (see ISA manual: decoupled blocks).
+  def B_TEXT : LinxISAInst<(outs), (ins BrTarget:$dst), "", []>;
 
   def B_DIM_LB0 : LinxISAInst<(outs), (ins GPR_Arch:$reg, i64imm:$imm), "", []>;
   def B_DIM_LB1 : LinxISAInst<(outs), (ins GPR_Arch:$reg, i64imm:$imm), "", []>;

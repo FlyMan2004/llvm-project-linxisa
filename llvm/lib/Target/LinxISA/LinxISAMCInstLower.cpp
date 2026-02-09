@@ -199,6 +199,11 @@ bool LinxISAMCInstLower::lowerOperand(const MachineOperand &MO,
     OutOp = MCOperand::createExpr(Expr);
     return true;
   }
+  case MachineOperand::MO_MCSymbol: {
+    const MCExpr *Expr = MCSymbolRefExpr::create(MO.getMCSymbol(), Ctx);
+    OutOp = MCOperand::createExpr(Expr);
+    return true;
+  }
   case MachineOperand::MO_BlockAddress: {
     const MCExpr *Expr = MCSymbolRefExpr::create(
         Printer.GetBlockAddressSymbol(MO.getBlockAddress()), Ctx);
@@ -317,6 +322,12 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.setOpcode(getSpecOpcode("BSTART.CUBE", /*LengthBits=*/32, /*Fields=*/2));
     OutMI.addOperand(MCOperand::createImm(I(0))); // DataType
     OutMI.addOperand(MCOperand::createImm(I(1))); // Function
+    return;
+  }
+
+  case LinxISA::B_TEXT: {
+    OutMI.setOpcode(getSpecOpcode("B.TEXT", /*LengthBits=*/32, /*Fields=*/1));
+    OutMI.addOperand(lowerBranchTarget(0));
     return;
   }
 
@@ -1917,6 +1928,24 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(I(0))); // reg_begin
     OutMI.addOperand(MCOperand::createImm(I(1))); // reg_end
     OutMI.addOperand(MCOperand::createImm(I(2))); // stacksize
+    return;
+  }
+
+  case LinxISA::MCOPY: {
+    // MCOPY [DstAddr, SrcAddr, Size]
+    OutMI.setOpcode(getSpecOpcode("MCOPY", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // dst
+    OutMI.addOperand(MCOperand::createImm(R(1))); // src
+    OutMI.addOperand(MCOperand::createImm(R(2))); // size
+    return;
+  }
+
+  case LinxISA::MSET: {
+    // MSET [DstAddr, Value, Size]
+    OutMI.setOpcode(getSpecOpcode("MSET", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // dst
+    OutMI.addOperand(MCOperand::createImm(R(1))); // val
+    OutMI.addOperand(MCOperand::createImm(R(2))); // size
     return;
   }
 
