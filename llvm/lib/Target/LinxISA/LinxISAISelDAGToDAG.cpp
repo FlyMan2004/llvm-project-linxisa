@@ -535,25 +535,56 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
     if (!C)
       break;
     const unsigned IntrID = C->getZExtValue();
-    if (IntrID != Intrinsic::linx_tma_tstore)
-      break;
-
     SDLoc DL(N);
-    // (chain, id, base, tile, immSizeCode)
-    auto *SizeC = dyn_cast<ConstantSDNode>(N->getOperand(4));
-    if (!SizeC)
-      report_fatal_error("Linx: tma.tstore requires constant SizeCode");
 
-    SDValue Chain = N->getOperand(0);
-    SDValue Base = N->getOperand(2);
-    SDValue Tile = N->getOperand(3);
-    SDValue SizeImm =
-        CurDAG->getTargetConstant(SizeC->getZExtValue(), DL, MVT::i64);
-    SDValue Ops[] = {Base, Tile, SizeImm, Chain};
-    SDNode *Res =
-        CurDAG->getMachineNode(LinxISA::PSEUDO_TMA_TSTORE, DL, MVT::Other, Ops);
-    ReplaceNode(N, Res);
-    return;
+    if (IntrID == Intrinsic::linx_tma_tstore) {
+      // (chain, id, base, tile, immSizeCode)
+      auto *SizeC = dyn_cast<ConstantSDNode>(N->getOperand(4));
+      if (!SizeC)
+        report_fatal_error("Linx: tma.tstore requires constant SizeCode");
+
+      SDValue Chain = N->getOperand(0);
+      SDValue Base = N->getOperand(2);
+      SDValue Tile = N->getOperand(3);
+      SDValue SizeImm =
+          CurDAG->getTargetConstant(SizeC->getZExtValue(), DL, MVT::i64);
+      SDValue Ops[] = {Base, Tile, SizeImm, Chain};
+      SDNode *Res = CurDAG->getMachineNode(LinxISA::PSEUDO_TMA_TSTORE, DL,
+                                           MVT::Other, Ops);
+      ReplaceNode(N, Res);
+      return;
+    }
+
+    if (IntrID == Intrinsic::linx_vblock_launch) {
+      // (chain, id, vkind, body_sym, dim0, dim1, dim2, attr_bits)
+      auto *VKindC = dyn_cast<ConstantSDNode>(N->getOperand(2));
+      auto *Dim0C = dyn_cast<ConstantSDNode>(N->getOperand(4));
+      auto *Dim1C = dyn_cast<ConstantSDNode>(N->getOperand(5));
+      auto *Dim2C = dyn_cast<ConstantSDNode>(N->getOperand(6));
+      auto *AttrC = dyn_cast<ConstantSDNode>(N->getOperand(7));
+      if (!VKindC || !Dim0C || !Dim1C || !Dim2C || !AttrC)
+        report_fatal_error("Linx: vblock.launch requires constant args for now");
+
+      SDValue Chain = N->getOperand(0);
+      SDValue VKindImm =
+          CurDAG->getTargetConstant(VKindC->getZExtValue(), DL, MVT::i64);
+      SDValue Dim0Imm =
+          CurDAG->getTargetConstant(Dim0C->getZExtValue(), DL, MVT::i64);
+      SDValue Dim1Imm =
+          CurDAG->getTargetConstant(Dim1C->getZExtValue(), DL, MVT::i64);
+      SDValue Dim2Imm =
+          CurDAG->getTargetConstant(Dim2C->getZExtValue(), DL, MVT::i64);
+      SDValue AttrImm =
+          CurDAG->getTargetConstant(AttrC->getZExtValue(), DL, MVT::i64);
+
+      SDValue Ops[] = {VKindImm, Dim0Imm, Dim1Imm, Dim2Imm, AttrImm, Chain};
+      SDNode *Res = CurDAG->getMachineNode(LinxISA::PSEUDO_VBLOCK_LAUNCH, DL,
+                                           MVT::Other, Ops);
+      ReplaceNode(N, Res);
+      return;
+    }
+
+    break;
   }
 
   case ISD::SHL:

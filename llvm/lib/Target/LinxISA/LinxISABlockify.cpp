@@ -61,6 +61,8 @@ static bool isMarkerInstr(const MachineInstr &MI) {
   case LinxISA::BSTART_STD_RET:
   case LinxISA::BSTART_TMA:
   case LinxISA::BSTART_CUBE:
+  case LinxISA::BSTART_VPAR:
+  case LinxISA::BSTART_VSEQ:
   case LinxISA::BSTOP:
     return true;
   default:
@@ -87,6 +89,15 @@ static bool isTilePseudoInstr(const MachineInstr &MI) {
   case LinxISA::PSEUDO_TMA_TLOAD:
   case LinxISA::PSEUDO_TMA_TSTORE:
   case LinxISA::PSEUDO_CUBE_MAMULB:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool isVBlockPseudoInstr(const MachineInstr &MI) {
+  switch (MI.getOpcode()) {
+  case LinxISA::PSEUDO_VBLOCK_LAUNCH:
     return true;
   default:
     return false;
@@ -410,8 +421,8 @@ public:
       }
     }
 
-    // Ensure tile pseudo instructions are standalone blocks, then expand them
-    // to tile-block descriptor sequences (BSTART.TMA/CUBE + B.IOT/B.IOTI/B.DIM).
+    // Ensure tile/vector pseudo instructions are standalone blocks, then expand
+    // them to decoupled-header descriptor sequences.
     //
     // Tile blocks are block-structured ISA units; their headers must be the
     // first real instruction in the block.
@@ -426,7 +437,7 @@ public:
       for (MachineInstr &MI : *MBB) {
         if (MI.isDebugInstr() || MI.isCFIInstruction() || isMarkerInstr(MI))
           continue;
-        if (isTilePseudoInstr(MI)) {
+        if (isTilePseudoInstr(MI) || isVBlockPseudoInstr(MI)) {
           PseudoMI = &MI;
           break;
         }
@@ -485,7 +496,7 @@ public:
       for (MachineInstr &MI : MBB) {
         if (MI.isDebugInstr() || MI.isCFIInstruction() || isMarkerInstr(MI))
           continue;
-        if (isTilePseudoInstr(MI)) {
+        if (isTilePseudoInstr(MI) || isVBlockPseudoInstr(MI)) {
           PseudoMI = &MI;
           break;
         }
@@ -703,6 +714,42 @@ public:
             .addImm(0)     // SrcTile0
             .addImm(0)     // SrcTile1
             .addReg(Dst, RegState::Define | RegState::Implicit);
+
+        PseudoMI->eraseFromParent();
+        Changed = true;
+        break;
+      }
+
+      case LinxISA::PSEUDO_VBLOCK_LAUNCH: {
+        // Expand into a decoupled vector block header:
+        //   BSTART.VSEQ/VPAR + B.TEXT empty_body + B.DIM(LB0..2)
+        const int64_t VKind = PseudoMI->getOperand(0).getImm();
+        const int64_t Dim0 = PseudoMI->getOperand(1).getImm();
+        const int64_t Dim1 = PseudoMI->getOperand(2).getImm();
+        const int64_t Dim2 = PseudoMI->getOperand(3).getImm();
+        const int64_t AttrBits = PseudoMI->getOperand(4).getImm();
+        (void)AttrBits; // Bring-up: B.ATTR is not wired in the backend yet.
+
+        const unsigned Mode = 0; // bring-up default
+        const unsigned BStartOpc = (VKind == 0)   ? LinxISA::BSTART_VSEQ
+                                 : (VKind == 1) ? LinxISA::BSTART_VPAR
+                                                : 0;
+        if (!BStartOpc)
+          report_fatal_error("Linx: vblock.launch vkind must be 0(VSEQ) or 1(VPAR)");
+
+        BuildMI(MBB, InsertPt, DL, TII.get(BStartOpc)).addImm(Mode);
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_TEXT))
+            .addSym(getOrCreateEmptyBodySym());
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_DIM_LB0))
+            .addReg(LinxISA::R0)
+            .addImm(Dim0);
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_DIM_LB1))
+            .addReg(LinxISA::R0)
+            .addImm(Dim1);
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_DIM_LB2))
+            .addReg(LinxISA::R0)
+            .addImm(Dim2);
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTOP));
 
         PseudoMI->eraseFromParent();
         Changed = true;

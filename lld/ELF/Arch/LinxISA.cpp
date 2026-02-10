@@ -189,6 +189,7 @@ public:
   RelType getDynRel(RelType type) const override { return type; }
   RelExpr getRelExpr(RelType type, const Symbol &s,
                      const uint8_t *loc) const override;
+  bool usesOnlyLowPageBits(RelType type) const override;
   void writeGotPlt(uint8_t *buf, const Symbol &s) const override;
   void writePlt(uint8_t *buf, const Symbol &sym,
                 uint64_t pltEntryAddr) const override;
@@ -244,6 +245,15 @@ RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
     return R_ABS;
   default:
     return R_ABS;
+  }
+}
+
+bool LinxISA::usesOnlyLowPageBits(RelType type) const {
+  switch (type) {
+  case R_LINX_LO12:
+    return true;
+  default:
+    return false;
   }
 }
 

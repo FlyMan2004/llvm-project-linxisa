@@ -325,6 +325,15 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     return;
   }
 
+  case LinxISA::BSTART_VPAR:
+  case LinxISA::BSTART_VSEQ: {
+    const StringRef Mnem = (Opc == LinxISA::BSTART_VPAR) ? "BSTART.VPAR"
+                                                         : "BSTART.VSEQ";
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/1));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // Mode
+    return;
+  }
+
   case LinxISA::B_TEXT: {
     OutMI.setOpcode(getSpecOpcode("B.TEXT", /*LengthBits=*/32, /*Fields=*/1));
     OutMI.addOperand(lowerBranchTarget(0));

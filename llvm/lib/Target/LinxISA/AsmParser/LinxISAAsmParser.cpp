@@ -96,7 +96,87 @@ static std::optional<unsigned> parseRegCode(StringRef Name) {
 
 static std::optional<uint32_t> parseSSRIdName(StringRef Name) {
   std::string Up = toUpperStr(Name.trim());
-  return StringSwitch<std::optional<uint32_t>>(Up)
+
+  // Normalize common suffixes: *_ACRn, *_ACR<n>.
+  StringRef UpRef(Up);
+  if (UpRef.ends_with("_ACRN"))
+    UpRef = UpRef.drop_back(StringRef("_ACRN").size());
+  if (size_t Pos = UpRef.rfind("_ACR"); Pos != StringRef::npos) {
+    StringRef Tail = UpRef.drop_front(Pos + 4);
+    bool AllDigits = !Tail.empty() && Tail.size() <= 2;
+    for (char C : Tail)
+      if (!std::isdigit((unsigned char)C))
+        AllDigits = false;
+    if (AllDigits) {
+      UpRef = UpRef.take_front(Pos);
+    }
+  }
+
+  // EBARG group (v0.2): ACR-scoped, 0xF40+ (low 12 bits).
+  if (UpRef == "EBARG0")
+    return 0x0f40u;
+  if (UpRef == "EBARG_BPC_CUR")
+    return 0x0f41u;
+  if (UpRef == "EBARG_BPC_TGT")
+    return 0x0f42u;
+  if (UpRef == "EBARG_TPC")
+    return 0x0f43u;
+  if (UpRef == "EBARG_LRA")
+    return 0x0f44u;
+  if (UpRef == "EBARG_TQ0")
+    return 0x0f45u;
+  if (UpRef == "EBARG_TQ1")
+    return 0x0f46u;
+  if (UpRef == "EBARG_TQ2")
+    return 0x0f47u;
+  if (UpRef == "EBARG_TQ3")
+    return 0x0f48u;
+  if (UpRef == "EBARG_UQ0")
+    return 0x0f49u;
+  if (UpRef == "EBARG_UQ1")
+    return 0x0f4au;
+  if (UpRef == "EBARG_UQ2")
+    return 0x0f4bu;
+  if (UpRef == "EBARG_UQ3")
+    return 0x0f4cu;
+  if (UpRef == "EBARG_LB")
+    return 0x0f4du;
+  if (UpRef == "EBARG_LC")
+    return 0x0f4eu;
+  if (UpRef == "EBARG_EXTCTX_PTR")
+    return 0x0f4fu;
+  if (UpRef == "EBARG_EXTCTX_META")
+    return 0x0f50u;
+
+  // Debug SSRs (v0.2 bring-up subset): ACR-scoped, 0xF80+.
+  if (UpRef == "DBGID")
+    return 0x0f80u;
+
+  auto parseIndexed = [&](StringRef Prefix, uint32_t Base, uint32_t Stride,
+                          unsigned MaxN) -> std::optional<uint32_t> {
+    if (!UpRef.starts_with(Prefix))
+      return std::nullopt;
+    StringRef Tail = UpRef.drop_front(Prefix.size());
+    unsigned N = 0;
+    if (Tail.empty() || Tail.getAsInteger(10, N) || N >= MaxN)
+      return std::nullopt;
+    return Base + Stride * N;
+  };
+
+  if (auto V = parseIndexed("DBCR", 0x0f90u, 2u, 4))
+    return *V;
+  if (auto V = parseIndexed("DBVR", 0x0f91u, 2u, 4))
+    return *V;
+  if (auto V = parseIndexed("DWCR", 0x0fb0u, 2u, 4))
+    return *V;
+  if (auto V = parseIndexed("DWVR", 0x0fb1u, 2u, 4))
+    return *V;
+  if (UpRef == "DCCR0")
+    return 0x0fa0u;
+  if (UpRef == "DCVR0")
+    return 0x0fa1u;
+
+  return StringSwitch<std::optional<uint32_t>>(UpRef)
       .Case("TP", 0x0000u)
       .Case("GP", 0x0001u)
       .Case("TIME", 0x0010u)
@@ -137,8 +217,8 @@ static std::optional<uint32_t> parseSSRIdName(StringRef Name) {
       .Case("TRAPARG0_ACRN", 0x0f03u)
       .Case("ETEMP", 0x0f05u)
       .Case("ETEMP_ACRN", 0x0f05u)
-      .Case("FUTO", 0x0f06u)
-      .Case("FUTO_ACRN", 0x0f06u)
+      .Case("ETEMP0", 0x0f06u)
+      .Case("ETEMP0_ACRN", 0x0f06u)
       .Case("ECONFIG", 0x0f07u)
       .Case("ECONFIG_ACRN", 0x0f07u)
       .Case("IPENDING", 0x0f08u)
@@ -147,18 +227,21 @@ static std::optional<uint32_t> parseSSRIdName(StringRef Name) {
       .Case("TOPEI_ACRN", 0x0f09u)
       .Case("EOIEI", 0x0f0au)
       .Case("EOIEI_ACRN", 0x0f0au)
-      .Case("EBPC", 0x0f0bu)
-      .Case("EBPC_ACRN", 0x0f0bu)
-      .Case("EBARG", 0x0f0cu)
-      .Case("EBARG_ACRN", 0x0f0cu)
-      .Case("ETPC", 0x0f0du)
-      .Case("ETPC_ACRN", 0x0f0du)
-      .Case("EBPCN", 0x0f0eu)
-      .Case("EBPCN_ACRN", 0x0f0eu)
-      .Case("MMTBASE", 0x0f10u)
-      .Case("MMTBASE_ACRN", 0x0f10u)
-      .Case("MMCONFIG", 0x0f11u)
-      .Case("MMCONFIG_ACRN", 0x0f11u)
+      // MMU/IOMMU (ACR1) bring-up profile.
+      .Case("TTBR0", 0x0f10u)
+      .Case("TTBR0_ACR1", 0x0f10u)
+      .Case("TTBR1", 0x0f11u)
+      .Case("TTBR1_ACR1", 0x0f11u)
+      .Case("TCR", 0x0f12u)
+      .Case("TCR_ACR1", 0x0f12u)
+      .Case("MAIR", 0x0f13u)
+      .Case("MAIR_ACR1", 0x0f13u)
+      .Case("IOTTBR", 0x0f14u)
+      .Case("IOTTBR_ACR1", 0x0f14u)
+      .Case("IOTCR", 0x0f15u)
+      .Case("IOTCR_ACR1", 0x0f15u)
+      .Case("IOMAIR", 0x0f16u)
+      .Case("IOMAIR_ACR1", 0x0f16u)
       .Case("TIMER_TIME", 0x0f20u)
       .Case("TIMER_TIME_ACRN", 0x0f20u)
       .Case("TIMER_TIMECMP", 0x0f21u)
@@ -216,6 +299,24 @@ static std::optional<unsigned> parseBrType(StringRef Tok) {
       .Case("ICALL", 6u)
       .Case("RET", 7u)
       .Default(std::nullopt);
+}
+
+static std::optional<std::string> getLegacyAliasDiag(StringRef Mnemonic) {
+  const std::string Up = toUpperStr(Mnemonic);
+  const StringRef Key(Up);
+
+  if (Key == "BSTART.PAR" || Key.starts_with("BSTART.PAR."))
+    return "legacy alias 'BSTART.PAR' is not allowed in v0.3; use a typed "
+           "header such as BSTART.VPAR/BSTART.VSEQ/BSTART.TMA/BSTART.CUBE";
+
+  if (Key == "L.BSTOP")
+    return "legacy alias 'L.BSTOP' is not allowed in v0.3; use 'C.BSTOP'";
+
+  if (Key.starts_with("L."))
+    return "legacy 'L.*' mnemonics are not allowed in v0.3; use canonical "
+           "mnemonics (for example 'V.*' and typed BSTART.* forms)";
+
+  return std::nullopt;
 }
 
 enum class BStartKind {
@@ -703,10 +804,118 @@ bool LinxISAAsmParser::parseInstruction(ParseInstructionInfo &Info,
     }
 
     if (getTok().is(AsmToken::LBrac)) {
-      ParsedMem M;
-      if (parseMemOperand(M))
+      // Bracketed operands are either:
+      //   - Memory operands: [base, off] (base is a register; ',' after it)
+      //   - Bracketed operand lists: [Key=Val, Key=Val, ...] or [Val, Val, ...]
+      //     (used by template blocks and descriptor-like ops in the spec)
+      SMLoc Start = getTok().getLoc();
+      Lex(); // consume '['
+
+      if (getTok().is(AsmToken::Identifier)) {
+        StringRef Tok = getTok().getString();
+        StringRef BaseTok = Tok;
+        if (size_t Dot = Tok.find('.'); Dot != StringRef::npos)
+          BaseTok = Tok.take_front(Dot);
+
+        const bool LooksLikeReg = parseRegCode(BaseTok).has_value();
+        const bool IsMem = LooksLikeReg && getLexer().peekTok().is(AsmToken::Comma);
+        if (IsMem) {
+          // Parse [base, off] without re-consuming '['.
+          ParsedReg Base;
+          if (parseRegOperand(Base))
+            return true;
+
+          if (parseToken(AsmToken::Comma, "expected ',' in memory operand"))
+            return true;
+
+          ParsedMem M;
+          M.Base = Base;
+          M.StartLoc = Start;
+
+          if (getTok().is(AsmToken::Identifier)) {
+            StringRef ITok = getTok().getString();
+            StringRef IBaseTok = ITok;
+            if (size_t Dot = ITok.find('.'); Dot != StringRef::npos)
+              IBaseTok = ITok.take_front(Dot);
+            if (parseRegCode(IBaseTok)) {
+              ParsedReg Index;
+              if (parseRegOperand(Index))
+                return true;
+              M.HasIndex = true;
+              M.Index = Index;
+            } else {
+              const MCExpr *Expr = nullptr;
+              SMLoc ExprLoc, ExprEnd;
+              if (parseImmOperand(Expr, ExprLoc, ExprEnd))
+                return true;
+              M.OffExpr = Expr;
+            }
+          } else {
+            const MCExpr *Expr = nullptr;
+            SMLoc ExprLoc, ExprEnd;
+            if (parseImmOperand(Expr, ExprLoc, ExprEnd))
+              return true;
+            M.OffExpr = Expr;
+          }
+
+          if (parseToken(AsmToken::RBrac, "expected ']'"))
+            return true;
+          M.EndLoc = getTok().getLoc();
+
+          Operands.push_back(LinxOperand::createMem(M));
+          continue;
+        }
+      }
+
+      // Parse a comma-separated list of optional key-value pairs inside [..].
+      while (!getTok().is(AsmToken::EndOfStatement) &&
+             !getTok().is(AsmToken::RBrac)) {
+        if (getTok().is(AsmToken::Comma)) {
+          Lex();
+          continue;
+        }
+
+        // Optional "Key=" (ignored; order defines field binding for now).
+        if (getTok().is(AsmToken::Identifier) &&
+            getLexer().peekTok().is(AsmToken::Equal)) {
+          Lex(); // key
+          Lex(); // '='
+        }
+
+        if (getTok().is(AsmToken::Identifier)) {
+          // Try register first, then SSR name, then expression.
+          StringRef VTok = getTok().getString();
+          StringRef VBase = VTok;
+          if (size_t Dot = VTok.find('.'); Dot != StringRef::npos)
+            VBase = VTok.take_front(Dot);
+
+          if (parseRegCode(VBase)) {
+            ParsedReg R;
+            if (parseRegOperand(R))
+              return true;
+            Operands.push_back(LinxOperand::createReg(R, getTok().getLoc()));
+            continue;
+          }
+
+          if (auto SSR = parseSSRIdName(getTok().getString())) {
+            SMLoc S = getTok().getLoc();
+            SMLoc E = getTok().getEndLoc();
+            Lex();
+            Operands.push_back(LinxOperand::createImm(
+                MCConstantExpr::create(*SSR, getContext()), S, E));
+            continue;
+          }
+        }
+
+        const MCExpr *Expr = nullptr;
+        SMLoc ExprStart, ExprEnd;
+        if (parseImmOperand(Expr, ExprStart, ExprEnd))
+          return true;
+        Operands.push_back(LinxOperand::createImm(Expr, ExprStart, ExprEnd));
+      }
+
+      if (parseToken(AsmToken::RBrac, "expected ']'"))
         return true;
-      Operands.push_back(LinxOperand::createMem(M));
       continue;
     }
 
@@ -1018,10 +1227,7 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
   }
 
   // Memory ops.
-  if (AsmFmt.contains('[')) {
-    if (!require(PI.Mem.has_value(), "expected memory operand"))
-      return false;
-
+  if (PI.Mem.has_value()) {
     const ParsedMem &M = *PI.Mem;
     const bool IsLoad = AsmFmt.contains("->");
 
@@ -1228,6 +1434,21 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
       continue;
     }
 
+    // Block header fields (bring-up subset).
+    //
+    // The spec tables name these symbolically; for bring-up, accept numeric
+    // immediates (keywords like dt0/tload can be added later).
+    if (FN == "DataType" || FN == "Function" || FN == "Mode") {
+      const MCExpr *E = takeImmExpr();
+      if (!require(E != nullptr, ("missing " + FN + " immediate").str()))
+        return false;
+      int64_t V = 0;
+      if (!require(isConstExpr(E, V), (FN + " must be a constant for now").str()))
+        return false;
+      emitFieldImm(V);
+      continue;
+    }
+
     if (FN == "RST_Type" || FN == "RRA_Type") {
       const MCExpr *E = takeImmExpr();
       if (!require(E != nullptr, ("missing " + FN + " immediate").str()))
@@ -1280,6 +1501,9 @@ bool LinxISAAsmParser::matchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
 
   auto *TokOp = static_cast<LinxOperand *>(Operands[0].get());
   StringRef Mnemonic = TokOp->getToken();
+  if (auto LegacyDiag = getLegacyAliasDiag(Mnemonic))
+    return Error(IDLoc, *LegacyDiag);
+
   std::string Key = toUpperStr(Mnemonic);
 
   const auto &Map = getMnemonicMap();

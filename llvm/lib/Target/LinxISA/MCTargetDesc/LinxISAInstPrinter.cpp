@@ -61,6 +61,29 @@ static const char *ssrIdSymbol(uint64_t Id) {
   // SSR_ID is encoded as a 12-bit field in the base forms (SSRGET/SSRSET/SSRSWAP).
   // Keep this mapping aligned with isa.txt (and the ISA manual SSR table).
   unsigned V = static_cast<unsigned>(Id) & 0xfffu;
+
+  // Debug SSRs (v0.2 bring-up subset).
+  if (V == 0xf80)
+    return "DBGID_ACRn";
+  if (V >= 0xf90 && V <= 0xf97) {
+    static constexpr const char *Names[8] = {
+        "DBCR0_ACRn", "DBVR0_ACRn", "DBCR1_ACRn", "DBVR1_ACRn",
+        "DBCR2_ACRn", "DBVR2_ACRn", "DBCR3_ACRn", "DBVR3_ACRn",
+    };
+    return Names[V - 0xf90];
+  }
+  if (V == 0xfa0)
+    return "DCCR0_ACRn";
+  if (V == 0xfa1)
+    return "DCVR0_ACRn";
+  if (V >= 0xfb0 && V <= 0xfb7) {
+    static constexpr const char *Names[8] = {
+        "DWCR0_ACRn", "DWVR0_ACRn", "DWCR1_ACRn", "DWVR1_ACRn",
+        "DWCR2_ACRn", "DWVR2_ACRn", "DWCR3_ACRn", "DWVR3_ACRn",
+    };
+    return Names[V - 0xfb0];
+  }
+
   switch (V) {
   case 0x000:
     return "TP";
@@ -125,7 +148,7 @@ static const char *ssrIdSymbol(uint64_t Id) {
   case 0xf05:
     return "ETEMP_ACRn";
   case 0xf06:
-    return "FUTO_ACRn";
+    return "ETEMP0_ACRn";
   case 0xf07:
     return "ECONFIG_ACRn";
   case 0xf08:
@@ -134,18 +157,20 @@ static const char *ssrIdSymbol(uint64_t Id) {
     return "TOPEI_ACRn";
   case 0xf0a:
     return "EOIEI_ACRn";
-  case 0xf0b:
-    return "EBPC_ACRn";
-  case 0xf0c:
-    return "EBARG_ACRn";
-  case 0xf0d:
-    return "ETPC_ACRn";
-  case 0xf0e:
-    return "EBPCN_ACRn";
   case 0xf10:
-    return "MMTBASE_ACRn";
+    return "TTBR0_ACR1";
   case 0xf11:
-    return "MMCONFIG_ACRn";
+    return "TTBR1_ACR1";
+  case 0xf12:
+    return "TCR_ACR1";
+  case 0xf13:
+    return "MAIR_ACR1";
+  case 0xf14:
+    return "IOTTBR_ACR1";
+  case 0xf15:
+    return "IOTCR_ACR1";
+  case 0xf16:
+    return "IOMAIR_ACR1";
   case 0xf20:
     return "TIMER_TIME_ACRn";
   case 0xf21:
@@ -154,6 +179,42 @@ static const char *ssrIdSymbol(uint64_t Id) {
     return "XBINFO_ACRn";
   case 0xf31:
     return "ACR_PARAM_ACRn";
+
+  // EBARG group (v0.2): 0xF40+.
+  case 0xf40:
+    return "EBARG0_ACRn";
+  case 0xf41:
+    return "EBARG_BPC_CUR_ACRn";
+  case 0xf42:
+    return "EBARG_BPC_TGT_ACRn";
+  case 0xf43:
+    return "EBARG_TPC_ACRn";
+  case 0xf44:
+    return "EBARG_LRA_ACRn";
+  case 0xf45:
+    return "EBARG_TQ0_ACRn";
+  case 0xf46:
+    return "EBARG_TQ1_ACRn";
+  case 0xf47:
+    return "EBARG_TQ2_ACRn";
+  case 0xf48:
+    return "EBARG_TQ3_ACRn";
+  case 0xf49:
+    return "EBARG_UQ0_ACRn";
+  case 0xf4a:
+    return "EBARG_UQ1_ACRn";
+  case 0xf4b:
+    return "EBARG_UQ2_ACRn";
+  case 0xf4c:
+    return "EBARG_UQ3_ACRn";
+  case 0xf4d:
+    return "EBARG_LB_ACRn";
+  case 0xf4e:
+    return "EBARG_LC_ACRn";
+  case 0xf4f:
+    return "EBARG_EXTCTX_PTR_ACRn";
+  case 0xf50:
+    return "EBARG_EXTCTX_META_ACRn";
   default:
     return nullptr;
   }

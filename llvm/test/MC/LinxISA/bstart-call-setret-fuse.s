@@ -1,7 +1,7 @@
 # RUN: llvm-mc -triple=linx64 -filetype=obj %s -o - | llvm-objdump -d --triple=linx64 - | FileCheck %s
 
 # CHECK-LABEL: <foo>:
-# CHECK: BSTART{{[[:space:]]+}}CALL, 0x{{[0-9a-f]+}}, ra=0x6
+# CHECK: {{(HL\.)?BSTART(\.STD)?}} CALL, bar, ra=foo_ret
 # CHECK-NOT: setret
 
 	.text

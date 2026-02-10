@@ -1,4 +1,4 @@
-// LinxISA register definitions (v0.1).
+// LinxISA register definitions (v0.2).
 
 // Registers are encoded as 5-bit values in fields like SrcL/SrcR/RegDst.
 class LinxISAReg<bits<16> Enc, string Name> : Register<Name> {

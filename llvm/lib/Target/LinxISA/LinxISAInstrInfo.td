@@ -429,10 +429,25 @@ def PSEUDO_CUBE_MAMULB : Pseudo<(outs TILE_MN:$dst),
                                      i64imm:$m, i64imm:$n, i64imm:$k),
                                 "# PSEUDO_CUBE_MAMULB", []>;
 
+// Vector decoupled blocks (bring-up): lowered late into BSTART.VSEQ/VPAR headers
+// with B.TEXT + B.DIM descriptors and a per-function empty body stub.
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_VBLOCK_LAUNCH : Pseudo<(outs),
+                                  (ins i64imm:$vkind, i64imm:$dim0, i64imm:$dim1,
+                                       i64imm:$dim2, i64imm:$attr_bits),
+                                  "# PSEUDO_VBLOCK_LAUNCH", []>;
+
 // Real tile-block descriptor instructions (emitted after register allocation).
 let hasSideEffects = 1, isBarrier = 1, Size = 4 in {
   def BSTART_TMA  : LinxISAInst<(outs), (ins uimm5:$dtype, uimm5:$func), "", []>;
   def BSTART_CUBE : LinxISAInst<(outs), (ins uimm5:$dtype, uimm5:$func), "", []>;
+
+  // Vector block start markers (decoupled headers).
+  //
+  // The bring-up encoding exposes a single "Mode" field; keep it explicit in
+  // the MachineInstr for now (vblock.launch emits Mode=0).
+  def BSTART_VPAR : LinxISAInst<(outs), (ins uimm5:$mode), "", []>;
+  def BSTART_VSEQ : LinxISAInst<(outs), (ins uimm5:$mode), "", []>;
 
   // Decoupled-body pointer for tile/vector headers (see ISA manual: decoupled blocks).
   def B_TEXT : LinxISAInst<(outs), (ins BrTarget:$dst), "", []>;

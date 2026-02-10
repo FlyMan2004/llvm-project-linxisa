@@ -50,4 +50,25 @@ let TargetPrefix = "linx" in {
                  llvm_i32_ty, llvm_i32_ty, llvm_i32_ty],
                 [IntrNoMem, IntrHasSideEffects,
                  ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>, ImmArg<ArgIndex<4>>]>;
+
+  // -------------------------------------------------------------------------
+  // Vector decoupled blocks (bring-up interface).
+  //
+  // This intrinsic acts as a compiler-facing hook to emit a decoupled block
+  // header that references an out-of-line linear body via B.TEXT.
+  //
+  // Bring-up lowering policy:
+  // - vkind: 0 = VSEQ, 1 = VPAR
+  // - body_sym is currently a placeholder symbol anchor; the backend emits a
+  //   per-function empty body stub for now.
+  // - dim0..2 and attr_bits must be constants in the initial implementation.
+  // -------------------------------------------------------------------------
+
+  // void @llvm.linx.vblock.launch(i32 vkind, ptr body_sym,
+  //                               i64 dim0, i64 dim1, i64 dim2, i32 attr_bits)
+  def int_linx_vblock_launch :
+      Intrinsic<[],
+                [llvm_i32_ty, llvm_ptr_ty, llvm_i64_ty, llvm_i64_ty, llvm_i64_ty,
+                 llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects]>;
 }
