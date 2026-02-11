@@ -23,6 +23,61 @@ static StringRef reg5Name(unsigned Code) {
   return "r?";
 }
 
+static void printTileRef(raw_ostream &OS, unsigned TileId) {
+  const unsigned Hand = (TileId >> 3) & 0x3u;
+  const unsigned Depth = TileId & 0x7u;
+  const char Prefix = (Hand == 0) ? 't'
+                     : (Hand == 1) ? 'u'
+                     : (Hand == 2) ? 'm'
+                                   : 'n';
+  OS << Prefix << "#" << utostr(Depth + 1u);
+}
+
+static StringRef dtypeName(unsigned DT) {
+  switch (DT & 0x1f) {
+  case 0:
+    return "INT32";
+  case 1:
+    return "FP32";
+  case 4:
+    return "FP16";
+  case 6:
+    return "BF16";
+  default:
+    return StringRef();
+  }
+}
+
+static StringRef parTileOpName(unsigned TileOp10) {
+  switch (TileOp10 & 0x3ffu) {
+  case 0:
+    return "VCALL";
+  case 2:
+    return "MAMULB";
+  case 33:
+    return "TLOAD";
+  case 65:
+    return "TSTORE";
+  case 66:
+    return "MAMULB.ACC";
+  case 258:
+    return "ACCCVT";
+  default:
+    return StringRef();
+  }
+}
+
+static bool isCubeTileOp(unsigned TileOp10) {
+  switch (TileOp10 & 0x3ffu) {
+  case 2:
+  case 66:
+  case 258:
+    return true;
+  default:
+    return false;
+  }
+}
+
 static StringRef brTypeName(unsigned BrType) {
   switch (BrType & 0x7) {
   case 1:
@@ -545,50 +600,53 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     return;
   }
 
-  // Special-case: accelerator/tile block-start instructions (BSTART.TMA/CUBE).
+  // Special-case: accelerator/tile block-start instructions.
   //
-  // These are not control-flow split markers like BSTART.{DIRECT,CALL,COND}.
-  // Treat them as normal instructions and print the functional selector.
-  if (AsmFmt.starts_with("BSTART.TMA") || AsmFmt.starts_with("BSTART.CUBE")) {
-    const StringRef Tok = stripAngleSuffix(RawTok);
-    const unsigned Func =
-        static_cast<unsigned>(findFieldImm("Function").value_or(0)) & 0x1fu;
+  // v0.3-facing disassembly is typed (`BSTART.TMA` / `BSTART.CUBE`).
+  static constexpr StringLiteral LegacyPackedStart = "BSTART." "PAR";
+  const bool IsLegacyPacked = AsmFmt.starts_with(LegacyPackedStart);
+  const bool IsTypedTMA = AsmFmt.starts_with("BSTART.TMA");
+  const bool IsTypedCUBE = AsmFmt.starts_with("BSTART.CUBE");
+  if (IsLegacyPacked || IsTypedTMA || IsTypedCUBE) {
     const unsigned DT =
         static_cast<unsigned>(findFieldImm("DataType").value_or(0)) & 0x1fu;
 
-    OS << Tok;
-    OS << "\t";
-
-    auto emitDt = [&]() { OS << ", dt" << utostr(DT); };
-
-    if (AsmFmt.starts_with("BSTART.TMA")) {
-      switch (Func) {
-      case 0:
-        OS << "TLOAD";
-        break;
-      case 1:
-        OS << "TSTORE";
-        break;
-      default:
-        OS << "TMA_OP" << utostr(Func);
-        break;
-      }
-      emitDt();
+    unsigned TileOp10 = 0;
+    if (IsLegacyPacked) {
+      TileOp10 = static_cast<unsigned>(findFieldImm("TileOp10").value_or(0)) &
+                 0x3ffu;
     } else {
-      switch (Func) {
-      case 0:
-        OS << "MAMULB";
-        break;
-      case 8:
-        OS << "ACCCVT";
-        break;
-      default:
-        OS << "CUBE_OP" << utostr(Func);
-        break;
+      const unsigned Func =
+          static_cast<unsigned>(findFieldImm("Function").value_or(0)) & 0x1fu;
+      if (IsTypedTMA) {
+        TileOp10 = (Func == 0) ? 33u : (Func == 1) ? 65u : (32u + Func);
+      } else {
+        TileOp10 = Func;
+        if (Func == 0) {
+          TileOp10 = 2u;
+        } else if (Func == 2) {
+          TileOp10 = 66u;
+        } else if (Func == 8) {
+          TileOp10 = 258u;
+        }
       }
-      emitDt();
     }
 
+    const char *TypedPrefix = isCubeTileOp(TileOp10) ? "BSTART.CUBE" : "BSTART.TMA";
+    OS << TypedPrefix << "\t";
+    if (StringRef N = parTileOpName(TileOp10); !N.empty()) {
+      OS << N;
+    } else {
+      OS << utostr(TileOp10);
+    }
+    OS << ", ";
+    if (StringRef DTName = dtypeName(DT); !DTName.empty()) {
+      OS << DTName;
+    } else {
+      OS << "DT" << utostr(DT);
+    }
+    LastParTileOp = TileOp10;
+    LastParTileOpValid = true;
     printAnnotation(OS, Annot);
     return;
   }
@@ -632,10 +690,6 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     } else if (FirstTokBase == "BSTART" &&
                (AsmFmt.contains("{DIRECT, CALL}") || AsmFmt.contains(" COND"))) {
       // These encodings are scalar-block forms; the default BlockType is STD.
-      OS << "BSTART";
-    } else if (FirstTokBase == "C.BSTART.STD") {
-      OS << "C.BSTART";
-    } else if (FirstTokBase == "BSTART.STD") {
       OS << "BSTART";
     } else {
       OS << FirstTokBase;
@@ -867,6 +921,40 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     return;
   }
 
+  // Special-case: GPR descriptor binding (B.IOR).
+  if (AsmFmt.starts_with("B.IOR")) {
+    const unsigned Src0 =
+        static_cast<unsigned>(findFieldImm("RegSrc0").value_or(0)) & 0x1fu;
+    const unsigned Src1 =
+        static_cast<unsigned>(findFieldImm("RegSrc1").value_or(0)) & 0x1fu;
+    const unsigned Src2 =
+        static_cast<unsigned>(findFieldImm("RegSrc2").value_or(0)) & 0x1fu;
+
+    auto printRegList = [&](ArrayRef<unsigned> Regs) {
+      bool First = true;
+      for (unsigned R : Regs) {
+        if (R == 0)
+          continue;
+        if (!First)
+          OS << ",";
+        OS << reg5Name(R);
+        First = false;
+      }
+    };
+
+    OS << "B.IOR\t[";
+    // Disassembly contract: treat zero as absent and omit it.
+    //
+    // The common bring-up streams place base/stride in RegSrc1/RegSrc0 order
+    // (example: `[s0,a6]`).
+    printRegList({Src1, Src0});
+    OS << "],[";
+    printRegList({Src2});
+    OS << "]";
+    printAnnotation(OS, Annot);
+    return;
+  }
+
   // Special-case: tile block IO descriptors (B.IOT / B.IOTI).
   //
   // These use bracket syntax in the ISA, but they are not memory operands and
@@ -899,31 +987,137 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     OS << (IsIOTI ? "B.IOTI" : "B.IOT");
     OS << "\t[";
 
+    const bool Src0Present = (S0V == 0u);
+    const bool Src1Present = (S1V == 0u);
     bool First = true;
-    if (S0V) {
-      OS << "tile" << utostr(Src0);
+    if (Src0Present) {
+      printTileRef(OS, Src0);
       if (S0R)
         OS << ".reuse";
       First = false;
     }
-    if (S1V) {
+    if (Src1Present) {
       if (!First)
         OS << ", ";
-      OS << "tile" << utostr(Src1);
+      printTileRef(OS, Src1);
       if (S1R)
         OS << ".reuse";
     }
 
-    OS << "], ";
-    OS << (AsmFmt.contains("group=1") ? "group=1" : "group=0");
-    OS << ", ->tile" << utostr(DstTile) << "<";
+    OS << "]";
+    const bool Group1 = AsmFmt.contains("group=1");
+    if (Group1)
+      OS << ", last";
+
+    const unsigned ActiveParOp = LastParTileOpValid ? LastParTileOp : 0u;
+
+    // v0.3 bring-up: MAMULB-class blocks write an implicit accumulator.
+    const bool IsAccDst = (ActiveParOp == 2u || ActiveParOp == 66u);
+
+    const char *DstKind = "t";
+    if (IsAccDst) {
+      DstKind = "acc";
+    } else {
+      // If a tile destination is encoded, it lives in the first *absent* source
+      // slot (preferring SrcTile1). This matches the disassembly snippet
+      // contract where the arrow kind tracks the destination tile hand.
+      std::optional<unsigned> DstTileReg;
+      if (!Src1Present)
+        DstTileReg = Src1;
+      else if (!Src0Present)
+        DstTileReg = Src0;
+
+      if (DstTileReg) {
+        const unsigned Tile = *DstTileReg & 0x1fu;
+        if (Tile < 8u)
+          DstKind = "t";
+        else if (Tile < 16u)
+          DstKind = "u";
+        else if (Tile < 24u)
+          DstKind = "m";
+        else
+          DstKind = "n";
+      } else {
+        // Fallback: treat DstTile as an enum in bring-up streams.
+        switch (DstTile) {
+        case 0u:
+          DstKind = "t";
+          break;
+        case 1u:
+          DstKind = "u";
+          break;
+        case 2u:
+          DstKind = "m";
+          break;
+        case 3u:
+          DstKind = "n";
+          break;
+        case 4u:
+          DstKind = "acc";
+          break;
+        default:
+          DstKind = "t";
+          break;
+        }
+      }
+    }
+
+    OS << "\t->" << DstKind << "<";
     if (IsIOTI) {
-      OS << utostr(Size);
+      const uint64_t Bytes = (Size < 60u) ? (1ull << (Size + 4u)) : 0ull;
+      if (Bytes >= 1024u && (Bytes % 1024u) == 0u)
+        OS << utostr(static_cast<unsigned>(Bytes / 1024u)) << "KB";
+      else
+        OS << utostr(Size);
     } else {
       OS << reg5Name(Reg);
     }
     OS << ">";
 
+    printAnnotation(OS, Annot);
+    return;
+  }
+
+  // Special-case: block argument format selector.
+  if (AsmFmt.starts_with("B.ARG")) {
+    if (AsmFmt.contains("ND2ZN.normal") || AsmFmt.contains("DN2NZ.normal") ||
+        AsmFmt.contains("DN2ZN.normal") || AsmFmt.contains("NZ2DN.canon") ||
+        AsmFmt.contains("NORM.normal")) {
+      const StringRef Prefix = "B.ARG ";
+      StringRef Tail = AsmFmt;
+      if (Tail.starts_with(Prefix))
+        Tail = Tail.drop_front(Prefix.size());
+      OS << "B.ARG\t" << Tail;
+      printAnnotation(OS, Annot);
+      return;
+    }
+
+    const unsigned Format =
+        static_cast<unsigned>(findFieldImm("format").value_or(0)) & 0x1fu;
+    StringRef LayoutName = "format";
+    switch (Format) {
+    case 0:
+      LayoutName = "NORM.normal";
+      break;
+    case 3:
+      LayoutName = "ND2ZN.normal";
+      break;
+    case 8:
+      LayoutName = "DN2ZN.normal";
+      break;
+    case 9:
+      LayoutName = "DN2NZ.normal";
+      break;
+    case 28:
+      LayoutName = "NZ2DN.canon";
+      break;
+    default:
+      LayoutName = "format";
+      break;
+    }
+    OS << "B.ARG\t" << LayoutName;
+    if (LayoutName == "format")
+      OS << "=" << utostr(Format);
     printAnnotation(OS, Annot);
     return;
   }
@@ -947,7 +1141,18 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     else if (AsmFmt.contains("->LB2"))
       Lb = 2;
 
-    OS << "B.DIM\t" << reg5Name(Reg) << ", " << Uimm << ", ->LB" << utostr(Lb);
+    OS << "B.DIM\t" << reg5Name(Reg) << ", " << Uimm << ", ->lb" << utostr(Lb);
+    printAnnotation(OS, Annot);
+    return;
+  }
+
+  // Special-case: compressed block dimensions.
+  if (AsmFmt.starts_with("C.B.DIMI")) {
+    const unsigned LoopNest =
+        static_cast<unsigned>(findFieldImm("LoopNest").value_or(0)) & 0x3u;
+    const unsigned Imm =
+        static_cast<unsigned>(findFieldImm("imm8").value_or(0)) & 0xffu;
+    OS << "C.B.DIMI\t" << Imm << ", \t->lb" << utostr(LoopNest);
     printAnnotation(OS, Annot);
     return;
   }

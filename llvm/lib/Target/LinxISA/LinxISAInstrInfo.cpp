@@ -45,13 +45,24 @@ void LinxISAInstrInfo::storeRegToStackSlot(
   if (MBBI != MBB.end())
     DL = MBBI->getDebugLoc();
 
-  if (!LinxISA::GPRRegClass.hasSubClassEq(RC))
-    report_fatal_error("Linx: cannot store this register class");
+  if (LinxISA::GPRRegClass.hasSubClassEq(RC)) {
+    BuildMI(MBB, MBBI, DL, get(LinxISA::SDI))
+        .addReg(SrcReg, getKillRegState(IsKill))
+        .addFrameIndex(FrameIndex)
+        .addImm(0);
+    return;
+  }
 
-  BuildMI(MBB, MBBI, DL, get(LinxISA::SDI))
-      .addReg(SrcReg, getKillRegState(IsKill))
-      .addFrameIndex(FrameIndex)
-      .addImm(0);
+  if (LinxISA::TILERegClass.hasSubClassEq(RC)) {
+    // Tile spills use TSTORE with a fixed 4KiB payload (SizeCode=8).
+    BuildMI(MBB, MBBI, DL, get(LinxISA::PSEUDO_TMA_TSTORE))
+        .addFrameIndex(FrameIndex)
+        .addReg(SrcReg, getKillRegState(IsKill))
+        .addImm(8);
+    return;
+  }
+
+  report_fatal_error("Linx: cannot store this register class");
 }
 
 void LinxISAInstrInfo::loadRegFromStackSlot(
@@ -63,12 +74,22 @@ void LinxISAInstrInfo::loadRegFromStackSlot(
   if (MBBI != MBB.end())
     DL = MBBI->getDebugLoc();
 
-  if (!LinxISA::GPRRegClass.hasSubClassEq(RC))
-    report_fatal_error("Linx: cannot load this register class");
+  if (LinxISA::GPRRegClass.hasSubClassEq(RC)) {
+    BuildMI(MBB, MBBI, DL, get(LinxISA::LDI), DestReg)
+        .addFrameIndex(FrameIndex)
+        .addImm(0);
+    return;
+  }
 
-  BuildMI(MBB, MBBI, DL, get(LinxISA::LDI), DestReg)
-      .addFrameIndex(FrameIndex)
-      .addImm(0);
+  if (LinxISA::TILERegClass.hasSubClassEq(RC)) {
+    // Tile reloads use TLOAD with a fixed 4KiB payload (SizeCode=8).
+    BuildMI(MBB, MBBI, DL, get(LinxISA::PSEUDO_TMA_TLOAD_ANY), DestReg)
+        .addFrameIndex(FrameIndex)
+        .addImm(8);
+    return;
+  }
+
+  report_fatal_error("Linx: cannot load this register class");
 }
 
 unsigned LinxISAInstrInfo::insertBranch(MachineBasicBlock &MBB,

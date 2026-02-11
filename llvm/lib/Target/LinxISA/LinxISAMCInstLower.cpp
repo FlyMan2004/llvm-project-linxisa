@@ -313,15 +313,21 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   }
 
   case LinxISA::BSTART_TMA: {
-    OutMI.setOpcode(getSpecOpcode("BSTART.TMA", /*LengthBits=*/32, /*Fields=*/2));
-    OutMI.addOperand(MCOperand::createImm(I(0))); // DataType
-    OutMI.addOperand(MCOperand::createImm(I(1))); // Function
+    const int64_t DataType = I(0) & 0x1f;
+    const int64_t Func = I(1) & 0x1f;
+    OutMI.setOpcode(
+        getSpecOpcodeByAsmFmt("BSTART.TMA TileOp, DataType", /*LengthBits=*/32));
+    OutMI.addOperand(MCOperand::createImm(DataType));
+    OutMI.addOperand(MCOperand::createImm(Func));
     return;
   }
   case LinxISA::BSTART_CUBE: {
-    OutMI.setOpcode(getSpecOpcode("BSTART.CUBE", /*LengthBits=*/32, /*Fields=*/2));
-    OutMI.addOperand(MCOperand::createImm(I(0))); // DataType
-    OutMI.addOperand(MCOperand::createImm(I(1))); // Function
+    const int64_t DataType = I(0) & 0x1f;
+    const int64_t Func = I(1) & 0x1f;
+    OutMI.setOpcode(
+        getSpecOpcodeByAsmFmt("BSTART.CUBE TileOP, DataType", /*LengthBits=*/32));
+    OutMI.addOperand(MCOperand::createImm(DataType));
+    OutMI.addOperand(MCOperand::createImm(Func));
     return;
   }
 
@@ -337,6 +343,12 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   case LinxISA::B_TEXT: {
     OutMI.setOpcode(getSpecOpcode("B.TEXT", /*LengthBits=*/32, /*Fields=*/1));
     OutMI.addOperand(lowerBranchTarget(0));
+    return;
+  }
+
+  case LinxISA::B_ARG: {
+    OutMI.setOpcode(getSpecOpcodeByAsmFmt("B.ARG format", /*LengthBits=*/32));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // format
     return;
   }
 
@@ -360,6 +372,25 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.setOpcode(getSpecOpcodeByAsmFmt(AsmFmt, /*LengthBits=*/32));
     OutMI.addOperand(MCOperand::createImm(R(0))); // RegSrc
     OutMI.addOperand(MCOperand::createImm(I(1))); // uimm17
+    return;
+  }
+
+  case LinxISA::C_B_DIMI: {
+    OutMI.setOpcode(getSpecOpcodeByAsmFmt("C.B.DIMI imm, ->{LB0, LB1, LB2}",
+                                          /*LengthBits=*/16));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // LoopNest
+    OutMI.addOperand(MCOperand::createImm(I(1))); // imm8
+    return;
+  }
+
+  case LinxISA::B_IOR: {
+    OutMI.setOpcode(
+        getSpecOpcodeByAsmFmt("B.IOR RegSrc0, RegSrc1, RegSrc2, ->RegDst",
+                              /*LengthBits=*/32));
+    OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
+    OutMI.addOperand(MCOperand::createImm(R(1))); // RegSrc0
+    OutMI.addOperand(MCOperand::createImm(R(2))); // RegSrc1
+    OutMI.addOperand(MCOperand::createImm(R(3))); // RegSrc2
     return;
   }
 

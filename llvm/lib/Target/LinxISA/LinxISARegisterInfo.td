@@ -109,5 +109,18 @@ def TILE_TU : RegisterClass<"Linx", [v1024i32], 32768,
 def TILE_MN : RegisterClass<"Linx", [v1024i32], 32768,
     (sequence "TILE%i", 16, 31)>;
 
+// Hand-specific classes (v0.3 auto-mode canonical policy).
+//
+// These are used to enforce deterministic hand placement in post-isel MIR and
+// when constructing spill/reload sequences for tile pressure scenarios.
+def TILE_T : RegisterClass<"Linx", [v1024i32], 32768,
+    (sequence "TILE%i", 0, 7)>;
+def TILE_U : RegisterClass<"Linx", [v1024i32], 32768,
+    (sequence "TILE%i", 8, 15)>;
+def TILE_M : RegisterClass<"Linx", [v1024i32], 32768,
+    (sequence "TILE%i", 16, 23)>;
+def TILE_N : RegisterClass<"Linx", [v1024i32], 32768,
+    (sequence "TILE%i", 24, 31)>;
+
 def CSR_Linx : CalleeSavedRegs<(add R10,
                                    (sequence "R%i", 11, 19))>;

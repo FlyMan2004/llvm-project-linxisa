@@ -11,9 +11,8 @@ test_v03_canonical:
 	.size	test_v03_canonical, .-test_v03_canonical
 
 # CHECK-LABEL: <test_v03_canonical>:
-# CHECK: BSTART.TMA
-# CHECK: BSTART.CUBE
+# CHECK: BSTART.TMA{{[[:space:]]+}}TLOAD
+# CHECK: BSTART.CUBE{{[[:space:]]+}}MAMULB
 # CHECK: v.add
 # CHECK: C.BSTOP
-# CHECK-NOT: BSTART{{.}}PAR
 # CHECK-NOT: L{{.}}BSTOP

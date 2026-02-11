@@ -416,18 +416,41 @@ def BSTOP : LinxISAInst<(outs), (ins), "", []>;
 //===----------------------------------------------------------------------===//
 
 let hasSideEffects = 1, isBarrier = 1, mayLoad = 1, Size = 4 in
-def PSEUDO_TMA_TLOAD : Pseudo<(outs TILE_TU:$dst), (ins GPR:$base, i64imm:$size),
+def PSEUDO_TMA_TLOAD : Pseudo<(outs TILE_TU:$dst), (ins GPR_Arch:$base, i64imm:$size),
                               "# PSEUDO_TMA_TLOAD", []>;
 
+// Spill/reload helper: allow TLOAD into any architectural tile register bank.
+let hasSideEffects = 1, isBarrier = 1, mayLoad = 1, Size = 4 in
+def PSEUDO_TMA_TLOAD_ANY : Pseudo<(outs TILE:$dst), (ins GPR_Arch:$base, i64imm:$size),
+                                  "# PSEUDO_TMA_TLOAD_ANY", []>;
+
+let hasSideEffects = 1, isBarrier = 1, mayLoad = 1, Size = 4 in
+def PSEUDO_TMA_TLOAD_DESC : Pseudo<(outs TILE_TU:$dst),
+                                   (ins GPR_Arch:$base, i64imm:$layout, i64imm:$lb0,
+                                        i64imm:$lb1, i64imm:$size),
+                                   "# PSEUDO_TMA_TLOAD_DESC", []>;
+
 let hasSideEffects = 1, isBarrier = 1, mayStore = 1, Size = 4 in
-def PSEUDO_TMA_TSTORE : Pseudo<(outs), (ins GPR:$base, TILE:$src, i64imm:$size),
+def PSEUDO_TMA_TSTORE : Pseudo<(outs), (ins GPR_Arch:$base, TILE:$src, i64imm:$size),
                                "# PSEUDO_TMA_TSTORE", []>;
+
+let hasSideEffects = 1, isBarrier = 1, mayStore = 1, Size = 4 in
+def PSEUDO_TMA_TSTORE_DESC : Pseudo<(outs),
+                                    (ins GPR_Arch:$base, TILE:$src, i64imm:$layout,
+                                         i64imm:$lb0, i64imm:$lb1, i64imm:$size),
+                                    "# PSEUDO_TMA_TSTORE_DESC", []>;
 
 let hasSideEffects = 1, isBarrier = 1, Size = 4 in
 def PSEUDO_CUBE_MAMULB : Pseudo<(outs TILE_MN:$dst),
                                 (ins TILE:$srcA, TILE:$srcB,
                                      i64imm:$m, i64imm:$n, i64imm:$k),
                                 "# PSEUDO_CUBE_MAMULB", []>;
+
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_CUBE_MAMULB_ACC : Pseudo<(outs TILE_MN:$dst),
+                                    (ins TILE:$acc, TILE:$srcA, TILE:$srcB,
+                                         i64imm:$m, i64imm:$n, i64imm:$k),
+                                    "# PSEUDO_CUBE_MAMULB_ACC", []>;
 
 // Vector decoupled blocks (bring-up): lowered late into BSTART.VSEQ/VPAR headers
 // with B.TEXT + B.DIM descriptors and a per-function empty body stub.
@@ -452,9 +475,17 @@ let hasSideEffects = 1, isBarrier = 1, Size = 4 in {
   // Decoupled-body pointer for tile/vector headers (see ISA manual: decoupled blocks).
   def B_TEXT : LinxISAInst<(outs), (ins BrTarget:$dst), "", []>;
 
+  def B_ARG : LinxISAInst<(outs), (ins i64imm:$format), "", []>;
+
   def B_DIM_LB0 : LinxISAInst<(outs), (ins GPR_Arch:$reg, i64imm:$imm), "", []>;
   def B_DIM_LB1 : LinxISAInst<(outs), (ins GPR_Arch:$reg, i64imm:$imm), "", []>;
   def B_DIM_LB2 : LinxISAInst<(outs), (ins GPR_Arch:$reg, i64imm:$imm), "", []>;
+
+  // B.IOR descriptor form: multiple descriptors are legal per block.
+  def B_IOR : LinxISAInst<(outs), (ins GPR_Arch:$regdst,
+                                       GPR_Arch:$regsrc0,
+                                       GPR_Arch:$regsrc1,
+                                       GPR_Arch:$regsrc2), "", []>;
 
   // B.IOT / B.IOTI descriptor forms: group bit is selected by opcode.
   def B_IOT_G0  : LinxISAInst<(outs), (ins i64imm:$dst, GPR_Arch:$regsrc,
@@ -494,6 +525,11 @@ let Size = 2 in {
   def C_SEXT_B : LinxISAInst<(outs GPR:$rd), (ins GPR:$rs), "", []>;
   def C_SEXT_H : LinxISAInst<(outs GPR:$rd), (ins GPR:$rs), "", []>;
   def C_SEXT_W : LinxISAInst<(outs GPR:$rd), (ins GPR:$rs), "", []>;
+}
+
+// Compressed tile/block descriptor helpers.
+let hasSideEffects = 1, isBarrier = 1, Size = 2 in {
+  def C_B_DIMI : LinxISAInst<(outs), (ins i64imm:$LoopNest, i64imm:$imm), "", []>;
 }
 
 // Full-width condition setters. These map to `SETC.*` forms in the ISA spec.

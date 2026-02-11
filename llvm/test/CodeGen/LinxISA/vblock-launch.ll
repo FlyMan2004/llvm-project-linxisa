@@ -11,8 +11,8 @@ entry:
 ; CHECK-LABEL: vseq:
 ; CHECK:      BSTART.VSEQ
 ; CHECK-NEXT: B.TEXT {{\.__linx_empty_body\.[0-9]+}}
-; CHECK:      B.DIM{{.*->LB0}}
-; CHECK:      B.DIM{{.*->LB1}}
-; CHECK:      B.DIM{{.*->LB2}}
+; CHECK:      B.DIM{{.*->lb0}}
+; CHECK:      B.DIM{{.*->lb1}}
+; CHECK:      B.DIM{{.*->lb2}}
 ; CHECK:      {{^\.__linx_empty_body\.[0-9]+:}}
 ; CHECK-NEXT: C.BSTOP

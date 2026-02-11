@@ -305,10 +305,6 @@ static std::optional<std::string> getLegacyAliasDiag(StringRef Mnemonic) {
   const std::string Up = toUpperStr(Mnemonic);
   const StringRef Key(Up);
 
-  if (Key == "BSTART.PAR" || Key.starts_with("BSTART.PAR."))
-    return "legacy alias 'BSTART.PAR' is not allowed in v0.3; use a typed "
-           "header such as BSTART.VPAR/BSTART.VSEQ/BSTART.TMA/BSTART.CUBE";
-
   if (Key == "L.BSTOP")
     return "legacy alias 'L.BSTOP' is not allowed in v0.3; use 'C.BSTOP'";
 
@@ -1438,7 +1434,8 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
     //
     // The spec tables name these symbolically; for bring-up, accept numeric
     // immediates (keywords like dt0/tload can be added later).
-    if (FN == "DataType" || FN == "Function" || FN == "Mode") {
+    if (FN == "DataType" || FN == "Function" || FN == "Mode" ||
+        FN == "TileOp10") {
       const MCExpr *E = takeImmExpr();
       if (!require(E != nullptr, ("missing " + FN + " immediate").str()))
         return false;

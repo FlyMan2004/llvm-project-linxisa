@@ -26,7 +26,7 @@ let TargetPrefix = "linx" in {
   // -------------------------------------------------------------------------
 
   // <anyvector> @llvm.linx.tma.tload(ptr base, i32 immSizeCode)
-  // SizeCode convention: log2(bytes). Bring-up uses SizeCode=12 for 4 KiB.
+  // SizeCode convention (v0.3 bring-up): bytes = 2^(SizeCode+4). 4 KiB => SizeCode=8.
   def int_linx_tma_tload :
       Intrinsic<[llvm_anyvector_ty],
                 [llvm_ptr_ty, llvm_i32_ty],
@@ -42,6 +42,34 @@ let TargetPrefix = "linx" in {
                  NoCapture<ArgIndex<0>>,
                  ImmArg<ArgIndex<2>>]>;
 
+  // Descriptor-carrying staged forms (v0.3 auto-mode policy):
+  //
+  // - layout_format is encoded via B.ARG.
+  // - lb0/lb1 are encoded via B.DIM.
+  // - B.IOR still binds the base GPR (and auxiliary metadata lanes can be
+  //   added later without changing this intrinsic ABI).
+  //
+  // <anyvector> @llvm.linx.tma.tload.desc(ptr base, i32 layout, i32 lb0,
+  //                                       i32 lb1, i32 immSizeCode)
+  def int_linx_tma_tload_desc :
+      Intrinsic<[llvm_anyvector_ty],
+                [llvm_ptr_ty, llvm_i32_ty, llvm_i32_ty, llvm_i32_ty, llvm_i32_ty],
+                [IntrReadMem, IntrArgMemOnly,
+                 NoCapture<ArgIndex<0>>,
+                 ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<2>>,
+                 ImmArg<ArgIndex<3>>, ImmArg<ArgIndex<4>>]>;
+
+  // void @llvm.linx.tma.tstore.desc(ptr base, <anyvector> tile, i32 layout,
+  //                                 i32 lb0, i32 lb1, i32 immSizeCode)
+  def int_linx_tma_tstore_desc :
+      Intrinsic<[],
+                [llvm_ptr_ty, llvm_anyvector_ty,
+                 llvm_i32_ty, llvm_i32_ty, llvm_i32_ty, llvm_i32_ty],
+                [IntrWriteMem, IntrArgMemOnly,
+                 NoCapture<ArgIndex<0>>,
+                 ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>,
+                 ImmArg<ArgIndex<4>>, ImmArg<ArgIndex<5>>]>;
+
   // <anyvector> @llvm.linx.cube.mamulb(<anyvector> a, <anyvector> b,
   //                                    i32 immM, i32 immN, i32 immK)
   def int_linx_cube_mamulb :
@@ -50,6 +78,20 @@ let TargetPrefix = "linx" in {
                  llvm_i32_ty, llvm_i32_ty, llvm_i32_ty],
                 [IntrNoMem, IntrHasSideEffects,
                  ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>, ImmArg<ArgIndex<4>>]>;
+
+  // <anyvector> @llvm.linx.cube.mamulb.acc(<anyvector> acc,
+  //                                        <anyvector> a, <anyvector> b,
+  //                                        i32 immM, i32 immN, i32 immK)
+  //
+  // Bring-up model: this updates an implicit accumulator state (as modeled by
+  // the Linx emulator). The explicit acc operand is kept to preserve SSA
+  // dependencies for scheduling and to match PTO's TMATMUL_ACC intent.
+  def int_linx_cube_mamulb_acc :
+      Intrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>,
+                 llvm_i32_ty, llvm_i32_ty, llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects,
+                 ImmArg<ArgIndex<3>>, ImmArg<ArgIndex<4>>, ImmArg<ArgIndex<5>>]>;
 
   // -------------------------------------------------------------------------
   // Vector decoupled blocks (bring-up interface).

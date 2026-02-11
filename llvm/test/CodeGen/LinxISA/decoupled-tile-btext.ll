@@ -5,13 +5,12 @@ declare void @llvm.linx.tma.tstore(ptr, <1024 x i32>, i32)
 
 define void @tload_store(ptr %src, ptr %dst) {
 entry:
-  %t = call <1024 x i32> @llvm.linx.tma.tload(ptr %src, i32 12)
-  call void @llvm.linx.tma.tstore(ptr %dst, <1024 x i32> %t, i32 12)
+  %t = call <1024 x i32> @llvm.linx.tma.tload(ptr %src, i32 8)
+  call void @llvm.linx.tma.tstore(ptr %dst, <1024 x i32> %t, i32 8)
   ret void
 }
 
 ; CHECK-LABEL: tload_store:
-; CHECK:      BSTART.TMA
-; CHECK-NEXT: B.TEXT {{\.__linx_empty_body\.[0-9]+}}
-; CHECK:      {{^\.__linx_empty_body\.[0-9]+:}}
-; CHECK-NEXT: C.BSTOP
+; CHECK:      BSTART.TMA{{[[:space:]]+}}TLOAD,
+; CHECK:      BSTART.TMA{{[[:space:]]+}}TSTORE,
+; CHECK-NOT:  B.TEXT

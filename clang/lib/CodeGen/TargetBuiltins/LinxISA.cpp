@@ -38,6 +38,42 @@ llvm::Value *CodeGenFunction::EmitLinxISABuiltinExpr(unsigned BuiltinID,
         CGM.getIntrinsic(llvm::Intrinsic::linx_tma_tstore, {Tile->getType()});
     return Builder.CreateCall(F, {Base, Tile, Size});
   }
+  case LinxISA::BI__builtin_linx_tma_tload_desc: {
+    llvm::Value *Base = EmitScalarExpr(E->getArg(0));
+    llvm::Value *Layout = EmitScalarExpr(E->getArg(1));
+    llvm::Value *LB0 = EmitScalarExpr(E->getArg(2));
+    llvm::Value *LB1 = EmitScalarExpr(E->getArg(3));
+    llvm::Value *Size = EmitScalarExpr(E->getArg(4));
+    llvm::Type *I32 = Builder.getInt32Ty();
+    Layout = Builder.CreateIntCast(Layout, I32, /*isSigned=*/false);
+    LB0 = Builder.CreateIntCast(LB0, I32, /*isSigned=*/false);
+    LB1 = Builder.CreateIntCast(LB1, I32, /*isSigned=*/false);
+    Size = Builder.CreateIntCast(Size, I32, /*isSigned=*/false);
+
+    llvm::Type *TileTy = ConvertType(E->getType());
+    llvm::Function *F =
+        CGM.getIntrinsic(llvm::Intrinsic::linx_tma_tload_desc, {TileTy});
+    return Builder.CreateCall(F, {Base, Layout, LB0, LB1, Size},
+                              "linx.tload.desc");
+  }
+  case LinxISA::BI__builtin_linx_tma_tstore_desc: {
+    llvm::Value *Base = EmitScalarExpr(E->getArg(0));
+    llvm::Value *Tile = EmitScalarExpr(E->getArg(1));
+    llvm::Value *Layout = EmitScalarExpr(E->getArg(2));
+    llvm::Value *LB0 = EmitScalarExpr(E->getArg(3));
+    llvm::Value *LB1 = EmitScalarExpr(E->getArg(4));
+    llvm::Value *Size = EmitScalarExpr(E->getArg(5));
+    llvm::Type *I32 = Builder.getInt32Ty();
+    Layout = Builder.CreateIntCast(Layout, I32, /*isSigned=*/false);
+    LB0 = Builder.CreateIntCast(LB0, I32, /*isSigned=*/false);
+    LB1 = Builder.CreateIntCast(LB1, I32, /*isSigned=*/false);
+    Size = Builder.CreateIntCast(Size, I32, /*isSigned=*/false);
+
+    llvm::Function *F =
+        CGM.getIntrinsic(llvm::Intrinsic::linx_tma_tstore_desc,
+                         {Tile->getType()});
+    return Builder.CreateCall(F, {Base, Tile, Layout, LB0, LB1, Size});
+  }
   case LinxISA::BI__builtin_linx_cube_mamulb: {
     llvm::Value *A = EmitScalarExpr(E->getArg(0));
     llvm::Value *B = EmitScalarExpr(E->getArg(1));
@@ -53,6 +89,23 @@ llvm::Value *CodeGenFunction::EmitLinxISABuiltinExpr(unsigned BuiltinID,
     llvm::Function *F =
         CGM.getIntrinsic(llvm::Intrinsic::linx_cube_mamulb, {A->getType()});
     return Builder.CreateCall(F, {A, B, M, N, K}, "linx.mamulb");
+  }
+  case LinxISA::BI__builtin_linx_cube_mamulb_acc: {
+    llvm::Value *Acc = EmitScalarExpr(E->getArg(0));
+    llvm::Value *A = EmitScalarExpr(E->getArg(1));
+    llvm::Value *B = EmitScalarExpr(E->getArg(2));
+    llvm::Value *M = EmitScalarExpr(E->getArg(3));
+    llvm::Value *N = EmitScalarExpr(E->getArg(4));
+    llvm::Value *K = EmitScalarExpr(E->getArg(5));
+
+    llvm::Type *I32 = Builder.getInt32Ty();
+    M = Builder.CreateIntCast(M, I32, /*isSigned=*/false);
+    N = Builder.CreateIntCast(N, I32, /*isSigned=*/false);
+    K = Builder.CreateIntCast(K, I32, /*isSigned=*/false);
+
+    llvm::Function *F = CGM.getIntrinsic(llvm::Intrinsic::linx_cube_mamulb_acc,
+                                         {Acc->getType()});
+    return Builder.CreateCall(F, {Acc, A, B, M, N, K}, "linx.mamulb.acc");
   }
   default:
     break;

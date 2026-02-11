@@ -16,12 +16,12 @@ entry:
 
 ; CHECK-LABEL: vseq:
 ; CHECK: BSTART.VSEQ
-; CHECK: B.DIM{{.*->LB0}}
-; CHECK: B.DIM{{.*->LB1}}
-; CHECK: B.DIM{{.*->LB2}}
+; CHECK: B.DIM{{.*->lb0}}
+; CHECK: B.DIM{{.*->lb1}}
+; CHECK: B.DIM{{.*->lb2}}
 ; CHECK-LABEL: vpar:
 ; CHECK: BSTART.VPAR
-; CHECK: B.DIM{{.*->LB0}}
-; CHECK: B.DIM{{.*->LB1}}
-; CHECK: B.DIM{{.*->LB2}}
+; CHECK: B.DIM{{.*->lb0}}
+; CHECK: B.DIM{{.*->lb1}}
+; CHECK: B.DIM{{.*->lb2}}
 ; CHECK-NOT: BSTART{{.}}PAR

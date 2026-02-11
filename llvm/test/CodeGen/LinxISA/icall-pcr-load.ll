@@ -20,5 +20,5 @@ ret:
 ; CHECK-LABEL: foo:
 ; CHECK: {{(hl\.)?}}ld.pcr{{[[:space:]]+}}[fp],{{[[:space:]]+}}->[[CALLEE:[a-z0-9#]+]]
 ; CHECK: setc.{{eqi|nei}}{{[[:space:]]+}}[[CALLEE]],{{[[:space:]]+}}0
-; CHECK: C.BSTART{{[[:space:]]+}}ICALL
+; CHECK: C.BSTART.STD{{[[:space:]]+}}ICALL
 ; CHECK: c.setc.tgt{{[[:space:]]+}}[[CALLEE]]

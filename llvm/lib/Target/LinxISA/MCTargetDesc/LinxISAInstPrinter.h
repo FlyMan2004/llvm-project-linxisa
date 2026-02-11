@@ -18,6 +18,10 @@ public:
   void printInst(const MCInst *MI, uint64_t Address, StringRef Annot,
                  const MCSubtargetInfo &STI,
                  raw_ostream &OS) override;
+
+private:
+  unsigned LastParTileOp = 0;
+  bool LastParTileOpValid = false;
 };
 
 } // namespace llvm

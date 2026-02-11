@@ -155,6 +155,53 @@ bool LinxISARegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     break;
   }
 
+  // Tile pseudo stack accesses carry a FrameIndex in operand #0. Materialize
+  // a base register and rewrite the FrameIndex operand into that register.
+  switch (MI.getOpcode()) {
+  case LinxISA::PSEUDO_TMA_TLOAD:
+  case LinxISA::PSEUDO_TMA_TLOAD_ANY:
+  case LinxISA::PSEUDO_TMA_TSTORE: {
+    if (OffsetBytes == 0) {
+      MI.getOperand(FIOperandNum).ChangeToRegister(LinxISA::R1, /*isDef=*/false);
+      return false;
+    }
+
+    if (!RS) {
+      report_fatal_error("Linx: tile frame index elimination requires RegScavenger");
+    }
+
+    Register BaseReg =
+        RS->scavengeRegisterBackwards(LinxISA::GPRRegClass, II,
+                                      /*RestoreAfter=*/true, SPAdj,
+                                      /*AllowSpill=*/true);
+    if (!BaseReg) {
+      report_fatal_error("Linx: failed to scavenge scratch register for tile spill");
+    }
+
+    DebugLoc DL = MI.getDebugLoc();
+    const int64_t AbsOff = OffsetBytes < 0 ? -OffsetBytes : OffsetBytes;
+    const bool IsPos = OffsetBytes > 0;
+    if (isUInt<12>(AbsOff)) {
+      BuildMI(*MI.getParent(), II, DL,
+              TII.get(IsPos ? LinxISA::ADDIri : LinxISA::SUBIri), BaseReg)
+          .addReg(LinxISA::R1)
+          .addImm(AbsOff);
+    } else if (isUInt<24>(AbsOff)) {
+      BuildMI(*MI.getParent(), II, DL,
+              TII.get(IsPos ? LinxISA::HLADDIri : LinxISA::HLSUBIri), BaseReg)
+          .addReg(LinxISA::R1)
+          .addImm(AbsOff);
+    } else {
+      report_fatal_error("Linx: tile spill stack frame offset out of range");
+    }
+
+    MI.getOperand(FIOperandNum).ChangeToRegister(BaseReg, /*isDef=*/false);
+    return false;
+  }
+  default:
+    break;
+  }
+
   const int64_t Scale = getMemScale(MI.getOpcode());
   const bool UnsignedImm =
       MI.getOpcode() == LinxISA::ADDIri || MI.getOpcode() == LinxISA::SUBIri ||
