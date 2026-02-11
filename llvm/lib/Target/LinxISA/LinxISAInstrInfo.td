@@ -471,6 +471,8 @@ let hasSideEffects = 1, isBarrier = 1, Size = 4 in {
   // the MachineInstr for now (vblock.launch emits Mode=0).
   def BSTART_VPAR : LinxISAInst<(outs), (ins uimm5:$mode), "", []>;
   def BSTART_VSEQ : LinxISAInst<(outs), (ins uimm5:$mode), "", []>;
+  def BSTART_MSEQ : LinxISAInst<(outs), (ins uimm5:$mode), "", []>;  // Sequential vector with memory
+  def BSTART_MPAR : LinxISAInst<(outs), (ins uimm5:$mode), "", []>;  // Parallel vector with memory
 
   // Decoupled-body pointer for tile/vector headers (see ISA manual: decoupled blocks).
   def B_TEXT : LinxISAInst<(outs), (ins BrTarget:$dst), "", []>;
