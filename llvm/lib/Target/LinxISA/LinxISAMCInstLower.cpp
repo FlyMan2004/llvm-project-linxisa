@@ -385,7 +385,7 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
 
   case LinxISA::B_IOR: {
     OutMI.setOpcode(
-        getSpecOpcodeByAsmFmt("B.IOR RegSrc0, RegSrc1, RegSrc2, ->RegDst",
+        getSpecOpcodeByAsmFmt("B.IOR [RegSrc0, RegSrc1, RegSrc2],[RegDst]",
                               /*LengthBits=*/32));
     OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
     OutMI.addOperand(MCOperand::createImm(R(1))); // RegSrc0

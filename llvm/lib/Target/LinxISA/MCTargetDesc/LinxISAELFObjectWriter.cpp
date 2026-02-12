@@ -45,6 +45,8 @@ public:
       return ELF::R_LINX_B17_PCREL;
     case LinxISA::FIXUP_LINX_B17_PLT:
       return ELF::R_LINX_B17_PLT;
+    case LinxISA::FIXUP_LINX_B25_PCREL:
+      return ELF::R_LINX_B25_PCREL;
     case LinxISA::FIXUP_LINX_HL_BSTART30_PCREL:
       return ELF::R_LINX_HL_BSTART30_PCREL;
     case LinxISA::FIXUP_LINX_CSETRET5_PCREL:

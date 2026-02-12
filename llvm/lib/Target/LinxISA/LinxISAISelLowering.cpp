@@ -85,8 +85,15 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   // Bring-up rule: tile values are expected to be produced/consumed only by
   // Linx tile intrinsics (e.g. llvm.linx.tma.* / llvm.linx.cube.*). Keep all
   // generic vector ops expanded/custom so the backend does not accidentally
-  // start treating <1024 x i32> as a general SIMD type.
+  // start treating <1024 x i32> as a general SIMD type. A small allowlist of
+  // elementwise operations is lowered into VPAR decoupled blocks to support
+  // normal C/C++ vector arithmetic on tiles during bring-up.
   addRegisterClass(MVT::v1024i32, &LinxISA::TILERegClass);
+
+  // Bring-up: support elementwise add/sub on tile values (selected late into
+  // decoupled VPAR blocks). Other generic vector ops remain expanded.
+  setOperationAction(ISD::ADD, MVT::v1024i32, Legal);
+  setOperationAction(ISD::SUB, MVT::v1024i32, Legal);
 
   computeRegisterProperties(STI.getRegisterInfo());
   setStackPointerRegisterToSaveRestore(LinxISA::R1);

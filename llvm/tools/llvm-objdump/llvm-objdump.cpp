@@ -1106,18 +1106,19 @@ public:
         if (Off != Address.Address)
           continue;
 
-        const uint64_t Type = Rel.getType();
-        if (Type != ELF::R_LINX_PCR17_LOAD && Type != ELF::R_LINX_PCR17_STORE &&
-            Type != ELF::R_LINX_HL_PCR29_LOAD &&
-            Type != ELF::R_LINX_HL_PCR29_STORE &&
-            Type != ELF::R_LINX_B12_PCREL && Type != ELF::R_LINX_J22_PCREL &&
-            Type != ELF::R_LINX_CBSTART12_PCREL &&
-            Type != ELF::R_LINX_B17_PCREL && Type != ELF::R_LINX_B17_PLT &&
-            Type != ELF::R_LINX_HL_BSTART30_PCREL &&
-            Type != ELF::R_LINX_CSETRET5_PCREL &&
-            Type != ELF::R_LINX_SETRET20_PCREL &&
-            Type != ELF::R_LINX_HL_SETRET32_PCREL)
-          continue;
+	        const uint64_t Type = Rel.getType();
+	        if (Type != ELF::R_LINX_PCR17_LOAD && Type != ELF::R_LINX_PCR17_STORE &&
+	            Type != ELF::R_LINX_HL_PCR29_LOAD &&
+	            Type != ELF::R_LINX_HL_PCR29_STORE &&
+	            Type != ELF::R_LINX_B12_PCREL && Type != ELF::R_LINX_J22_PCREL &&
+	            Type != ELF::R_LINX_CBSTART12_PCREL &&
+	            Type != ELF::R_LINX_B17_PCREL && Type != ELF::R_LINX_B17_PLT &&
+	            Type != ELF::R_LINX_B25_PCREL &&
+	            Type != ELF::R_LINX_HL_BSTART30_PCREL &&
+	            Type != ELF::R_LINX_CSETRET5_PCREL &&
+	            Type != ELF::R_LINX_SETRET20_PCREL &&
+	            Type != ELF::R_LINX_HL_SETRET32_PCREL)
+	          continue;
 
         SmallString<32> Val;
         if (Error E = getRelocationValueString(Rel, SymbolDescription, Val)) {

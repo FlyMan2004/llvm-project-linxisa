@@ -64,6 +64,17 @@ static uint32_t encodeB17Pcrel(Ctx &ctx, uint8_t *loc, int64_t value,
   return uimm << 15;
 }
 
+static uint32_t encodeB25Pcrel(Ctx &ctx, uint8_t *loc, int64_t value,
+                               const Relocation &rel) {
+  if (value & 0x1)
+    Err(ctx) << getErrorLoc(ctx, loc) << "unaligned B.TEXT target";
+
+  int64_t imm = value >> 1;
+  checkInt(ctx, loc, imm, 25, rel);
+  uint32_t uimm = static_cast<uint32_t>(imm) & 0x01FFFFFFu; // 25 bits
+  return uimm << 7;
+}
+
 static uint64_t encodeHLBStart30Pcrel(Ctx &ctx, uint8_t *loc, int64_t value,
                                       const Relocation &rel) {
   if (value & 0x1)
@@ -231,6 +242,7 @@ RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
   case R_LINX_CBSTART12_PCREL:
   case R_LINX_B17_PCREL:
   case R_LINX_HL_BSTART30_PCREL:
+  case R_LINX_B25_PCREL:
   case R_LINX_CSETRET5_PCREL:
   case R_LINX_SETRET20_PCREL:
   case R_LINX_HL_SETRET32_PCREL:
@@ -354,6 +366,12 @@ void LinxISA::relocate(uint8_t *loc, const Relocation &rel,
   case R_LINX_B17_PCREL: {
     uint32_t cur = read32le(loc);
     cur |= encodeB17Pcrel(ctx, loc, sval, rel);
+    write32le(loc, cur);
+    return;
+  }
+  case R_LINX_B25_PCREL: {
+    uint32_t cur = read32le(loc);
+    cur |= encodeB25Pcrel(ctx, loc, sval, rel);
     write32le(loc, cur);
     return;
   }

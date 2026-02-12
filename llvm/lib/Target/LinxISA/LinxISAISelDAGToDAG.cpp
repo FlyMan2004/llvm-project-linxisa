@@ -380,6 +380,22 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
   default:
     break;
 
+  case ISD::ADD:
+  case ISD::SUB: {
+    SDLoc DL(N);
+    EVT VT = N->getValueType(0);
+    if (VT == MVT::v1024i32) {
+      SDValue A = N->getOperand(0);
+      SDValue B = N->getOperand(1);
+      const unsigned PseudoOpc =
+          (Opcode == ISD::ADD) ? LinxISA::PSEUDO_VTILE_ADD
+                               : LinxISA::PSEUDO_VTILE_SUB;
+      ReplaceNode(N, CurDAG->getMachineNode(PseudoOpc, DL, VT, A, B));
+      return;
+    }
+    break;
+  }
+
   case ISD::BITCAST: {
     // LinxISA uses a unified reg5 register file for integers and scalars.
     // Treat scalar i32/i64/f32/f64 bitcasts as a no-op and select them to a
@@ -573,6 +589,42 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
           CurDAG->getTargetConstant(KC->getZExtValue(), DL, MVT::i64);
       SDValue Ops[] = {Acc, A, B, MImm, NImm, KImm, Chain};
       SDNode *Res = CurDAG->getMachineNode(LinxISA::PSEUDO_CUBE_MAMULB_ACC, DL,
+                                           MVT::v1024i32, MVT::Other, Ops);
+      ReplaceNode(N, Res);
+      return;
+    }
+
+    if (IntrID == Intrinsic::linx_vpar_tadd) {
+      // (chain, id, a, b, immSizeCode)
+      auto *SizeC = dyn_cast<ConstantSDNode>(N->getOperand(4));
+      if (!SizeC)
+        report_fatal_error("Linx: vpar.tadd requires constant SizeCode");
+
+      SDValue Chain = N->getOperand(0);
+      SDValue A = N->getOperand(2);
+      SDValue B = N->getOperand(3);
+      SDValue SizeImm =
+          CurDAG->getTargetConstant(SizeC->getZExtValue(), DL, MVT::i64);
+      SDValue Ops[] = {A, B, SizeImm, Chain};
+      SDNode *Res = CurDAG->getMachineNode(LinxISA::PSEUDO_VPAR_TADD, DL,
+                                           MVT::v1024i32, MVT::Other, Ops);
+      ReplaceNode(N, Res);
+      return;
+    }
+
+    if (IntrID == Intrinsic::linx_vpar_tsub) {
+      // (chain, id, a, b, immSizeCode)
+      auto *SizeC = dyn_cast<ConstantSDNode>(N->getOperand(4));
+      if (!SizeC)
+        report_fatal_error("Linx: vpar.tsub requires constant SizeCode");
+
+      SDValue Chain = N->getOperand(0);
+      SDValue A = N->getOperand(2);
+      SDValue B = N->getOperand(3);
+      SDValue SizeImm =
+          CurDAG->getTargetConstant(SizeC->getZExtValue(), DL, MVT::i64);
+      SDValue Ops[] = {A, B, SizeImm, Chain};
+      SDNode *Res = CurDAG->getMachineNode(LinxISA::PSEUDO_VPAR_TSUB, DL,
                                            MVT::v1024i32, MVT::Other, Ops);
       ReplaceNode(N, Res);
       return;

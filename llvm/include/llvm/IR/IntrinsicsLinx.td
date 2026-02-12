@@ -113,4 +113,26 @@ let TargetPrefix = "linx" in {
                 [llvm_i32_ty, llvm_ptr_ty, llvm_i64_ty, llvm_i64_ty, llvm_i64_ty,
                  llvm_i32_ty],
                 [IntrNoMem, IntrHasSideEffects]>;
+
+  // -------------------------------------------------------------------------
+  // Tile vector elementwise ops (VPAR)
+  //
+  // Bring-up contract:
+  // - Executed as a decoupled BSTART.VPAR header that replays a single-lane
+  //   vector body over LB0/LB1 dimensions.
+  // - Tile operands are bound via B.IOTI descriptors and accessed through TA/TB/TO.
+  // - immSizeCode uses the same 2^(SizeCode+4) convention as TLOAD/TSTORE.
+  // -------------------------------------------------------------------------
+
+  // <anyvector> @llvm.linx.vpar.tadd(<anyvector> a, <anyvector> b, i32 immSizeCode)
+  def int_linx_vpar_tadd :
+      Intrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, LLVMMatchType<0>, llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects, ImmArg<ArgIndex<2>>]>;
+
+  // <anyvector> @llvm.linx.vpar.tsub(<anyvector> a, <anyvector> b, i32 immSizeCode)
+  def int_linx_vpar_tsub :
+      Intrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, LLVMMatchType<0>, llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects, ImmArg<ArgIndex<2>>]>;
 }

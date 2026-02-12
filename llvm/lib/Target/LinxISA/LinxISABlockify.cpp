@@ -22,6 +22,7 @@
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetOpcodes.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/Support/Debug.h"
@@ -93,6 +94,10 @@ static bool isTilePseudoInstr(const MachineInstr &MI) {
   case LinxISA::PSEUDO_TMA_TSTORE_DESC:
   case LinxISA::PSEUDO_CUBE_MAMULB:
   case LinxISA::PSEUDO_CUBE_MAMULB_ACC:
+  case LinxISA::PSEUDO_VPAR_TADD:
+  case LinxISA::PSEUDO_VPAR_TSUB:
+  case LinxISA::PSEUDO_VTILE_ADD:
+  case LinxISA::PSEUDO_VTILE_SUB:
     return true;
   default:
     return false;
@@ -211,6 +216,10 @@ public:
     // referenced via B.TEXT from decoupled headers.
     MachineBasicBlock *EmptyBodyBB = nullptr;
     MCSymbol *EmptyBodySym = nullptr;
+    MachineBasicBlock *VTileAddBodyBB = nullptr;
+    MCSymbol *VTileAddBodySym = nullptr;
+    MachineBasicBlock *VTileSubBodyBB = nullptr;
+    MCSymbol *VTileSubBodySym = nullptr;
     for (MachineBasicBlock &MBB : MF) {
       for (MachineInstr &MI : MBB) {
         if (MI.getOpcode() != TargetOpcode::EH_LABEL || MI.getNumOperands() < 1)
@@ -224,12 +233,26 @@ public:
         if (Sym->getName().starts_with(".__linx_empty_body.")) {
           EmptyBodyBB = &MBB;
           EmptyBodySym = Sym;
+        } else if (Sym->getName().starts_with(".__linx_vtile_add_body.")) {
+          VTileAddBodyBB = &MBB;
+          VTileAddBodySym = Sym;
+        } else if (Sym->getName().starts_with(".__linx_vtile_sub_body.")) {
+          VTileSubBodyBB = &MBB;
+          VTileSubBodySym = Sym;
           break;
         }
       }
-      if (EmptyBodyBB)
+      if (EmptyBodyBB && VTileAddBodyBB && VTileSubBodyBB)
         break;
     }
+
+    SmallPtrSet<MachineBasicBlock *, 8> DecoupledBodyBBs;
+    if (EmptyBodyBB)
+      DecoupledBodyBBs.insert(EmptyBodyBB);
+    if (VTileAddBodyBB)
+      DecoupledBodyBBs.insert(VTileAddBodyBB);
+    if (VTileSubBodyBB)
+      DecoupledBodyBBs.insert(VTileSubBodyBB);
 
     auto getOrCreateEmptyBodySym = [&]() -> MCSymbol * {
       if (EmptyBodySym)
@@ -251,8 +274,77 @@ public:
       BuildMI(*EmptyBodyBB, EmptyBodyBB->end(), DebugLoc(),
               TII.get(LinxISA::BSTOP));
 
+      DecoupledBodyBBs.insert(EmptyBodyBB);
       Changed = true;
       return EmptyBodySym;
+    };
+
+    auto getOrCreateVTileAddBodySym = [&]() -> MCSymbol * {
+      if (VTileAddBodySym)
+        return VTileAddBodySym;
+
+      MCContext &Ctx = MF.getContext();
+      SmallString<64> Name;
+      raw_svector_ostream OS(Name);
+      OS << ".__linx_vtile_add_body." << MF.getFunctionNumber();
+      VTileAddBodySym = Ctx.getOrCreateSymbol(OS.str());
+
+      VTileAddBodyBB = MF.CreateMachineBasicBlock();
+      MF.insert(MF.end(), VTileAddBodyBB);
+      VTileAddBodyBB->setLabelMustBeEmitted();
+
+      BuildMI(*VTileAddBodyBB, VTileAddBodyBB->end(), DebugLoc(),
+              TII.get(TargetOpcode::EH_LABEL))
+          .addSym(VTileAddBodySym);
+
+      static const char kBodyAsm[] =
+          "  v.lw.local [ta, lc0<<2, lc1<<8], ->vt.w\n"
+          "  v.lw.local [tb, lc0<<2, lc1<<8], ->vu.w\n"
+          "  v.add vt#1.sw, vu#1.sw, ->vt.w\n"
+          "  v.sw.local vt#1, [to, lc0<<2, lc1<<8]\n"
+          "  C.BSTOP\n";
+      BuildMI(*VTileAddBodyBB, VTileAddBodyBB->end(), DebugLoc(),
+              TII.get(TargetOpcode::INLINEASM))
+          .addExternalSymbol(kBodyAsm)
+          .addImm(InlineAsm::Extra_HasSideEffects);
+
+      DecoupledBodyBBs.insert(VTileAddBodyBB);
+      Changed = true;
+      return VTileAddBodySym;
+    };
+
+    auto getOrCreateVTileSubBodySym = [&]() -> MCSymbol * {
+      if (VTileSubBodySym)
+        return VTileSubBodySym;
+
+      MCContext &Ctx = MF.getContext();
+      SmallString<64> Name;
+      raw_svector_ostream OS(Name);
+      OS << ".__linx_vtile_sub_body." << MF.getFunctionNumber();
+      VTileSubBodySym = Ctx.getOrCreateSymbol(OS.str());
+
+      VTileSubBodyBB = MF.CreateMachineBasicBlock();
+      MF.insert(MF.end(), VTileSubBodyBB);
+      VTileSubBodyBB->setLabelMustBeEmitted();
+
+      BuildMI(*VTileSubBodyBB, VTileSubBodyBB->end(), DebugLoc(),
+              TII.get(TargetOpcode::EH_LABEL))
+          .addSym(VTileSubBodySym);
+
+      static const char kBodyAsm[] =
+          "  v.lw.local [ta, lc0<<2, lc1<<8], ->vt.w\n"
+          "  v.lw.local [tb, lc0<<2, lc1<<8], ->vu.w\n"
+          "  v.sub vt#1.sw, vu#1.sw, ->vt.w\n"
+          "  v.sw.local vt#1, [to, lc0<<2, lc1<<8]\n"
+          "  C.BSTOP\n";
+      BuildMI(*VTileSubBodyBB, VTileSubBodyBB->end(), DebugLoc(),
+              TII.get(TargetOpcode::INLINEASM))
+          .addExternalSymbol(kBodyAsm)
+          .addImm(InlineAsm::Extra_HasSideEffects);
+
+      DecoupledBodyBBs.insert(VTileSubBodyBB);
+      Changed = true;
+      return VTileSubBodySym;
     };
 
     auto splitAfterCall = [&](MachineBasicBlock &MBB, MachineInstr &CallMI)
@@ -928,6 +1020,101 @@ public:
         break;
       }
 
+      case LinxISA::PSEUDO_VPAR_TADD:
+      case LinxISA::PSEUDO_VPAR_TSUB:
+      case LinxISA::PSEUDO_VTILE_ADD:
+      case LinxISA::PSEUDO_VTILE_SUB: {
+        // Expand into a VPAR decoupled header that binds:
+        // - input tiles through TA/TB (first B.IOTI)
+        // - output tile through TO (second B.IOTI or B.IOT for in-place)
+        //
+        // The out-of-line body is a single-lane snippet that executes:
+        //   load TA, load TB, add/sub, store TO
+        // and terminates at C.BSTOP so QEMU can replay it across LB0/LB1.
+        const Register Dst = PseudoMI->getOperand(0).getReg();
+        const Register SrcA = PseudoMI->getOperand(1).getReg();
+        const Register SrcB = PseudoMI->getOperand(2).getReg();
+        const bool IsAdd =
+            (PseudoMI->getOpcode() == LinxISA::PSEUDO_VPAR_TADD) ||
+            (PseudoMI->getOpcode() == LinxISA::PSEUDO_VTILE_ADD);
+        const int64_t Size =
+            (PseudoMI->getOpcode() == LinxISA::PSEUDO_VPAR_TADD ||
+             PseudoMI->getOpcode() == LinxISA::PSEUDO_VPAR_TSUB)
+                ? PseudoMI->getOperand(3).getImm()
+                : 8; // 4KiB tiles (SizeCode=8)
+
+        const unsigned DstID = tileRegId(Dst);
+        const unsigned AID = tileRegId(SrcA);
+        const unsigned BID = tileRegId(SrcB);
+
+        // Derive a compact 2-D iteration space for the tile:
+        // - LB0=64 elements (256B row stride => lc1<<8)
+        // - LB1=bytes/256
+        uint64_t Bytes = 0;
+        if (Size >= 0 && Size < 60) {
+          Bytes = 1ull << (static_cast<unsigned>(Size) + 4u);
+        }
+        if (Bytes == 0 || (Bytes & 3u) != 0 || Bytes > 4096u ||
+            (Bytes % 256u) != 0) {
+          report_fatal_error("Linx: VPAR tile binop requires 256B-aligned tile size <=4KB");
+        }
+        const int64_t LB0 = 64;
+        const int64_t LB1 = static_cast<int64_t>(Bytes / 256u);
+
+        MCSymbol *BodySym = IsAdd ? getOrCreateVTileAddBodySym()
+                                  : getOrCreateVTileSubBodySym();
+
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_VPAR)).addImm(0);
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_TEXT)).addSym(BodySym);
+
+        // Descriptor 0: inputs (TA/TB), group=0.
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G0))
+            .addImm(tileKindFromId(DstID)) // DstTile (hand hint)
+            .addImm(0)                     // S0R
+            .addImm(0)                     // S0V (present)
+            .addImm(0)                     // S1R
+            .addImm(0)                     // S1V (present)
+            .addImm(AID)                   // SrcTile0 (TA)
+            .addImm(BID)                   // SrcTile1 (TB)
+            .addImm(Size)                  // SizeCode
+            .addReg(SrcA, RegState::Implicit)
+            .addReg(SrcB, RegState::Implicit);
+
+        // Descriptor 1: output (TO), group=1 (last). If the output register
+        // aliases an input tile, avoid B.IOTI allocation/clear by using B.IOT.
+        const bool InPlace = (DstID == AID) || (DstID == BID);
+        if (InPlace) {
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOT_G1))
+              .addImm(tileKindFromId(DstID)) // DstTile (hand hint)
+              .addReg(LinxISA::R0)           // RegSrc (unused)
+              .addImm(0)                     // S0R
+              .addImm(1)                     // S0V (absent)
+              .addImm(0)                     // S1R
+              .addImm(1)                     // S1V (absent)
+              .addImm(0)                     // SrcTile0 (unused)
+              .addImm(DstID)                 // SrcTile1 (dst tile id)
+              .addReg(Dst, RegState::Define | RegState::Implicit);
+        } else {
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
+              .addImm(tileKindFromId(DstID)) // DstTile (hand hint)
+              .addImm(0)                     // S0R
+              .addImm(1)                     // S0V (absent)
+              .addImm(0)                     // S1R
+              .addImm(1)                     // S1V (absent)
+              .addImm(0)                     // SrcTile0 (unused)
+              .addImm(DstID)                 // SrcTile1 (dst tile id)
+              .addImm(Size)                  // SizeCode
+              .addReg(Dst, RegState::Define | RegState::Implicit);
+        }
+
+        emitDim(MBB, InsertPt, /*LoopNest=*/0, LB0);
+        emitDim(MBB, InsertPt, /*LoopNest=*/1, LB1);
+
+        PseudoMI->eraseFromParent();
+        Changed = true;
+        break;
+      }
+
       case LinxISA::PSEUDO_VBLOCK_LAUNCH: {
         // Expand into a decoupled vector block header:
         //   BSTART.VSEQ/VPAR + B.TEXT empty_body + B.DIM(LB0..2)
@@ -1160,7 +1347,7 @@ public:
 
       // Decoupled out-of-line bodies are linear snippets referenced via B.TEXT
       // and must not be wrapped or rewritten by Blockify.
-      if (EmptyBodyBB && &MBB == EmptyBodyBB)
+      if (DecoupledBodyBBs.contains(&MBB))
         continue;
 
       // Frame prologue/epilogue macros (FENTRY/FEXIT/FRET.*) are standalone

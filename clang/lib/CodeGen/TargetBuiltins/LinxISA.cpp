@@ -107,6 +107,43 @@ llvm::Value *CodeGenFunction::EmitLinxISABuiltinExpr(unsigned BuiltinID,
                                          {Acc->getType()});
     return Builder.CreateCall(F, {Acc, A, B, M, N, K}, "linx.mamulb.acc");
   }
+  case LinxISA::BI__builtin_linx_vblock_launch: {
+    llvm::Value *VKind = EmitScalarExpr(E->getArg(0));
+    llvm::Value *Body = EmitScalarExpr(E->getArg(1));
+    llvm::Value *Dim0 = EmitScalarExpr(E->getArg(2));
+    llvm::Value *Dim1 = EmitScalarExpr(E->getArg(3));
+    llvm::Value *Dim2 = EmitScalarExpr(E->getArg(4));
+    llvm::Value *Attr = EmitScalarExpr(E->getArg(5));
+
+    VKind = Builder.CreateIntCast(VKind, Builder.getInt32Ty(), /*isSigned=*/false);
+    Dim0 = Builder.CreateIntCast(Dim0, Builder.getInt64Ty(), /*isSigned=*/false);
+    Dim1 = Builder.CreateIntCast(Dim1, Builder.getInt64Ty(), /*isSigned=*/false);
+    Dim2 = Builder.CreateIntCast(Dim2, Builder.getInt64Ty(), /*isSigned=*/false);
+    Attr = Builder.CreateIntCast(Attr, Builder.getInt32Ty(), /*isSigned=*/false);
+
+    llvm::Function *F = CGM.getIntrinsic(llvm::Intrinsic::linx_vblock_launch);
+    return Builder.CreateCall(F, {VKind, Body, Dim0, Dim1, Dim2, Attr});
+  }
+  case LinxISA::BI__builtin_linx_vpar_tadd: {
+    llvm::Value *A = EmitScalarExpr(E->getArg(0));
+    llvm::Value *B = EmitScalarExpr(E->getArg(1));
+    llvm::Value *Size = EmitScalarExpr(E->getArg(2));
+    Size = Builder.CreateIntCast(Size, Builder.getInt32Ty(), /*isSigned=*/false);
+
+    llvm::Function *F =
+        CGM.getIntrinsic(llvm::Intrinsic::linx_vpar_tadd, {A->getType()});
+    return Builder.CreateCall(F, {A, B, Size}, "linx.vpar.tadd");
+  }
+  case LinxISA::BI__builtin_linx_vpar_tsub: {
+    llvm::Value *A = EmitScalarExpr(E->getArg(0));
+    llvm::Value *B = EmitScalarExpr(E->getArg(1));
+    llvm::Value *Size = EmitScalarExpr(E->getArg(2));
+    Size = Builder.CreateIntCast(Size, Builder.getInt32Ty(), /*isSigned=*/false);
+
+    llvm::Function *F =
+        CGM.getIntrinsic(llvm::Intrinsic::linx_vpar_tsub, {A->getType()});
+    return Builder.CreateCall(F, {A, B, Size}, "linx.vpar.tsub");
+  }
   default:
     break;
   }

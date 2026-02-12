@@ -452,6 +452,32 @@ def PSEUDO_CUBE_MAMULB_ACC : Pseudo<(outs TILE_MN:$dst),
                                          i64imm:$m, i64imm:$n, i64imm:$k),
                                     "# PSEUDO_CUBE_MAMULB_ACC", []>;
 
+// Tile vector elementwise ops: execute a SIMT body in a VPAR decoupled block.
+// Lowered late into:
+//   BSTART.VPAR + B.TEXT body + B.IOTI(inputs) + B.IOTI(output) + B.DIM(LB0/LB1)
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in {
+  def PSEUDO_VPAR_TADD : Pseudo<(outs TILE:$dst),
+                                (ins TILE:$srcA, TILE:$srcB, i64imm:$size),
+                                "# PSEUDO_VPAR_TADD", []>;
+  def PSEUDO_VPAR_TSUB : Pseudo<(outs TILE:$dst),
+                                (ins TILE:$srcA, TILE:$srcB, i64imm:$size),
+                                "# PSEUDO_VPAR_TSUB", []>;
+}
+
+// Bring-up: allow C/C++ vector arithmetic on 4KiB tile values to lower to the
+// same VPAR decoupled block expansion without requiring intrinsics.
+//
+// These pseudos are selected from plain `add/sub <1024 x i32>` operations and
+// implicitly assume a 4KiB tile footprint (SizeCode=8).
+let hasSideEffects = 0, isBarrier = 0, Size = 4 in {
+  def PSEUDO_VTILE_ADD : Pseudo<(outs TILE:$dst),
+                                (ins TILE:$srcA, TILE:$srcB),
+                                "# PSEUDO_VTILE_ADD", []>;
+  def PSEUDO_VTILE_SUB : Pseudo<(outs TILE:$dst),
+                                (ins TILE:$srcA, TILE:$srcB),
+                                "# PSEUDO_VTILE_SUB", []>;
+}
+
 // Vector decoupled blocks (bring-up): lowered late into BSTART.VSEQ/VPAR headers
 // with B.TEXT + B.DIM descriptors and a per-function empty body stub.
 let hasSideEffects = 1, isBarrier = 1, Size = 4 in

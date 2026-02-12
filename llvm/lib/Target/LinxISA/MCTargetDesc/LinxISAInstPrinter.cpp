@@ -23,6 +23,58 @@ static StringRef reg5Name(unsigned Code) {
   return "r?";
 }
 
+static void printReg10Name(raw_ostream &OS, unsigned Code) {
+  Code &= 0x3ffu;
+  if (Code < 32u) {
+    OS << reg5Name(Code);
+    return;
+  }
+
+  const unsigned Class = (Code >> 5) & 0x1fu;
+  const unsigned Index = Code & 0x1fu;
+
+  switch (Class) {
+  case 1: // ri*
+    OS << "ri" << utostr(Index);
+    return;
+  case 3: // lc*
+    OS << "lc" << utostr(Index);
+    return;
+  case 4: // vt*
+    OS << "vt";
+    if (Index)
+      OS << "#" << utostr(Index);
+    return;
+  case 5: // vu*
+    OS << "vu";
+    if (Index)
+      OS << "#" << utostr(Index);
+    return;
+  case 6: // vm*
+    OS << "vm";
+    if (Index)
+      OS << "#" << utostr(Index);
+    return;
+  case 7: // vn*
+    OS << "vn";
+    if (Index)
+      OS << "#" << utostr(Index);
+    return;
+  case 8: { // tile bases
+    static constexpr const char *Bases[] = {"ta", "tb", "tc", "td", "to", "ts"};
+    if (Index < std::size(Bases)) {
+      OS << Bases[Index];
+      return;
+    }
+    break;
+  }
+  default:
+    break;
+  }
+
+  OS << "vreg" << utostr(Code);
+}
+
 static void printTileRef(raw_ostream &OS, unsigned TileId) {
   const unsigned Hand = (TileId >> 3) & 0x3u;
   const unsigned Depth = TileId & 0x7u;
@@ -342,6 +394,10 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     return Tok;
   };
 
+  const bool IsVector =
+      Form.length_bits == 64 &&
+      stripAngleSuffix(RawTok).starts_with_insensitive("v.");
+
   // Map field name -> operand (immediate or expression) from MCInst operands in
   // spec field order.
   SmallVector<std::pair<StringRef, MCOperand>, 16> Fields;
@@ -515,6 +571,17 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       return PrintedMnemonicTok;
     }
 
+    // v0.3 vector bridge: `<.local>` is a mnemonic qualifier driven by the L bit.
+    if (AsmFmt.contains("<.local>")) {
+      if (auto L = findFieldImm("L")) {
+        if (((*L) & 1) != 0) {
+          PrintedMnemonicTok += Tok;
+          PrintedMnemonicTok += ".local";
+          return PrintedMnemonicTok;
+        }
+      }
+    }
+
     return Tok;
   };
 
@@ -524,8 +591,11 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       return;
     if (!V->isImm())
       return;
-    unsigned Code = static_cast<unsigned>(V->getImm()) & 0x1F;
-    OS << reg5Name(Code);
+    unsigned Code = static_cast<unsigned>(V->getImm());
+    if (IsVector)
+      printReg10Name(OS, Code);
+    else
+      OS << reg5Name(Code & 0x1F);
   };
 
   auto emitPcRelTargetHexScaled = [&](StringRef FieldName, bool Signed,
@@ -859,7 +929,13 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
   auto emitArrowDest = [&]() {
     if (auto Op = findField("RegDst")) {
       if (Op->isImm()) {
-        unsigned Code = static_cast<unsigned>(Op->getImm()) & 0x1F;
+        unsigned Code = static_cast<unsigned>(Op->getImm());
+        if (IsVector) {
+          OS << ",\t->";
+          printReg10Name(OS, Code);
+          return;
+        }
+        Code &= 0x1F;
         if (Code == 31) {
           OS << ",\t->t";
         } else if (Code == 30) {
@@ -1217,6 +1293,94 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
 
     const bool HasDest = AsmFmt.contains("->");
 
+    if (IsVector) {
+      // Vector/SIMT memory ops: `[base, lc0<<k, idx|imm]`.
+      StringRef BaseField = "SrcL";
+      if (size_t L = AsmFmt.find('['); L != StringRef::npos) {
+        StringRef Inside = AsmFmt.substr(L + 1).split(']').first;
+        StringRef BasePart = Inside.split(',').first.trim();
+        if (BasePart.starts_with_insensitive("srcr"))
+          BaseField = "SrcR";
+        else if (BasePart.starts_with_insensitive("srcl"))
+          BaseField = "SrcL";
+      }
+
+      std::optional<StringRef> ValueField;
+      if (!HasDest) {
+        StringRef Prefix = AsmFmt;
+        if (size_t L = Prefix.find('['); L != StringRef::npos)
+          Prefix = Prefix.take_front(L);
+        if (Prefix.contains_insensitive("SrcD"))
+          ValueField = "SrcD";
+        else if (Prefix.contains_insensitive("SrcL"))
+          ValueField = "SrcL";
+      }
+
+      unsigned LaneScale = 0;
+      if (AsmFmt.contains_insensitive("lc0<<3"))
+        LaneScale = 3;
+      else if (AsmFmt.contains_insensitive("lc0<<2"))
+        LaneScale = 2;
+      else if (AsmFmt.contains_insensitive("lc0<<1"))
+        LaneScale = 1;
+
+      auto emitLane = [&]() {
+        OS << "lc0";
+        if (LaneScale)
+          OS << "<<" << utostr(LaneScale);
+      };
+
+      auto emitVecImm = [&]() -> bool {
+        for (StringRef N : {"simm24", "uimm24", "simm12", "uimm12", "simm"}) {
+          if (auto Op = findField(N)) {
+            if (Op->isExpr())
+              MAI.printExpr(OS, *Op->getExpr());
+            else if (Op->isImm())
+              OS << Op->getImm();
+            return true;
+          }
+        }
+        return false;
+      };
+
+      auto emitVecIndex = [&]() -> bool {
+        if (!findField("SrcR"))
+          return false;
+        emitReg("SrcR");
+        if (auto Sh = findFieldImm("shamt")) {
+          unsigned Shift = static_cast<unsigned>(*Sh) & 0x1fu;
+          if (AsmFmt.contains("+shamt"))
+            Shift += LaneScale;
+          if (Shift)
+            OS << "<<" << utostr(Shift);
+        }
+        return true;
+      };
+
+      if (!HasDest) {
+        if (ValueField.has_value())
+          emitReg(*ValueField);
+        OS << ", ";
+      }
+
+      OS << "[";
+      emitReg(BaseField);
+      OS << ", ";
+      emitLane();
+      OS << ", ";
+      if (!emitVecIndex()) {
+        if (!emitVecImm())
+          OS << "0";
+      }
+      OS << "]";
+
+      if (HasDest)
+        emitArrowDest();
+
+      printAnnotation(OS, Annot);
+      return;
+    }
+
     auto scaleFromMnemonic = [&]() -> int64_t {
       if (Mnem == "LBI" || Mnem == "LBUI" || Mnem == "SBI")
         return 1;
@@ -1434,13 +1598,19 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
   if (auto Op = findField("RegDst")) {
     dstSep();
     if (Op->isImm()) {
-      unsigned Code = static_cast<unsigned>(Op->getImm()) & 0x1F;
-      if (Code == 31)
-        OS << "->t";
-      else if (Code == 30)
-        OS << "->u";
-      else
-        OS << "->" << reg5Name(Code);
+      unsigned Code = static_cast<unsigned>(Op->getImm());
+      if (IsVector) {
+        OS << "->";
+        printReg10Name(OS, Code);
+      } else {
+        Code &= 0x1F;
+        if (Code == 31)
+          OS << "->t";
+        else if (Code == 30)
+          OS << "->u";
+        else
+          OS << "->" << reg5Name(Code);
+      }
     }
   } else if (!AsmFmt.empty()) {
     if (asmImpliesArrowDest(AsmFmt, "->t")) {
