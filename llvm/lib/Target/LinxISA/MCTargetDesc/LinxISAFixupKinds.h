@@ -54,6 +54,14 @@ enum Fixups {
   // PC-relative 20-bit offset for ADDTPC (global address, not scaled).
   FIXUP_LINX_PCREL_HI20,
 
+  // PC-relative 20-bit page offset for ADDTPC when materializing a GOT entry
+  // address in PIC mode.
+  FIXUP_LINX_GOT_HI20,
+
+  // Absolute low 12 bits of the GOT entry address for ADDI/ADDIW uimm12 (used
+  // with FIXUP_LINX_GOT_HI20).
+  FIXUP_LINX_GOT_LO12,
+
   // Absolute low 12 bits for ADDI/ADDIW uimm12 (used with ADDTPC).
   FIXUP_LINX_LO12,
 

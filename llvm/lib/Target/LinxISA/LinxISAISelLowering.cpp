@@ -177,6 +177,10 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   // Variadic argument lowering (va_start/va_arg/va_end).
   setOperationAction(ISD::VASTART, MVT::Other, Custom);
   setOperationAction({ISD::VAARG, ISD::VACOPY, ISD::VAEND}, MVT::Other, Expand);
+  setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i64, Expand);
+  setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i32, Expand);
+  setOperationAction(ISD::STACKSAVE, MVT::Other, Expand);
+  setOperationAction(ISD::STACKRESTORE, MVT::Other, Expand);
 
   // Bring-up: avoid introducing target-specific select/cmov patterns.
   setOperationAction(ISD::SELECT, MVT::i32, Custom);
@@ -323,6 +327,13 @@ SDValue LinxISATargetLowering::LowerOperation(SDValue Op,
   default:
     return SDValue();
   }
+}
+
+bool LinxISATargetLowering::areJTsAllowed(const Function *Fn) const {
+  (void)Fn;
+  // Bring-up policy: keep switches in compare/branch form until Linx PIC jump
+  // table entries have a fully relocation-safe encoding.
+  return false;
 }
 
 SDValue LinxISATargetLowering::LowerBR(SDValue Op, SelectionDAG &DAG) const {
@@ -1219,18 +1230,31 @@ SDValue LinxISATargetLowering::LowerGlobalAddress(SDValue Op,
   GlobalAddressSDNode *N = cast<GlobalAddressSDNode>(Op);
   const GlobalValue *GV = N->getGlobal();
   int64_t Offset = N->getOffset();
+  const TargetMachine &TM = getTargetMachine();
+
+  // In PIC mode, non-DSO-local globals must be addressed through the GOT to
+  // avoid text relocations in shared objects.
+  const bool UseGOT = TM.isPositionIndependent() && !TM.shouldAssumeDSOLocal(GV);
+  const unsigned Flags = UseGOT ? LinxII::MO_GOT : LinxII::MO_NO_FLAG;
 
   // PC-relative global address materialization.
   //
   // ADDTPC's immediate is page-scaled (imm20 << 12). Materialize the full
   // address via:
   //   ADDTPC (page of symbol) + ADDI/ADDIW (low 12 bits).
-  SDValue GA = DAG.getTargetGlobalAddress(GV, DL, Ty, Offset);
+  SDValue GA = DAG.getTargetGlobalAddress(GV, DL, Ty, Offset, Flags);
 
   SDValue Page = SDValue(DAG.getMachineNode(LinxISA::ADDTPC, DL, Ty, GA), 0);
   const unsigned AddOpc =
       (Ty == MVT::i32) ? LinxISA::ADDIWri : LinxISA::ADDIri;
-  return SDValue(DAG.getMachineNode(AddOpc, DL, Ty, Page, GA), 0);
+  SDValue Addr = SDValue(DAG.getMachineNode(AddOpc, DL, Ty, Page, GA), 0);
+
+  if (!UseGOT)
+    return Addr;
+
+  SDValue ZeroOff = DAG.getTargetConstant(0, DL, MVT::i64);
+  const unsigned LoadOpc = (Ty == MVT::i32) ? LinxISA::LWI : LinxISA::LDI;
+  return SDValue(DAG.getMachineNode(LoadOpc, DL, Ty, Addr, ZeroOff), 0);
 }
 
 SDValue LinxISATargetLowering::LowerGlobalTLSAddress(

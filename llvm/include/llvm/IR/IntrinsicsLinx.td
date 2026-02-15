@@ -99,8 +99,14 @@ let TargetPrefix = "linx" in {
   // This intrinsic acts as a compiler-facing hook to emit a decoupled block
   // header that references an out-of-line linear body via B.TEXT.
   //
+  // Decoupled launch contract:
+  // - Header carries only descriptors and B.TEXT body pointer.
+  // - Body is linear and terminated by C.BSTOP.
+  // - LB0 = lane count, LB1 = group count, LB2 = extent2.
+  // - Lane replay index is lc0 + lc1 * lane_count (lb0/lb1 semantics).
+  //
   // Bring-up lowering policy:
-  // - vkind: 0 = VSEQ, 1 = VPAR
+  // - vkind: 0 = MSEQ, 1 = MPAR
   // - body_sym is currently a placeholder symbol anchor; the backend emits a
   //   per-function empty body stub for now.
   // - dim0..2 and attr_bits must be constants in the initial implementation.

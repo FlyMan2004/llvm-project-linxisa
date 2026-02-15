@@ -63,6 +63,31 @@ static bool hasPltVariant(const MCExpr *Expr) {
   return false;
 }
 
+static bool hasGotVariant(const MCExpr *Expr) {
+  if (!Expr)
+    return false;
+  switch (Expr->getKind()) {
+  case MCExpr::Specifier: {
+    const auto *S = cast<MCSpecifierExpr>(Expr);
+    if (S->getSpecifier() == LinxISA::S_GOT)
+      return true;
+    return hasGotVariant(S->getSubExpr());
+  }
+  case MCExpr::SymbolRef:
+    return false;
+  case MCExpr::Binary: {
+    const auto *B = cast<MCBinaryExpr>(Expr);
+    return hasGotVariant(B->getLHS()) || hasGotVariant(B->getRHS());
+  }
+  case MCExpr::Unary:
+    return hasGotVariant(cast<MCUnaryExpr>(Expr)->getSubExpr());
+  case MCExpr::Constant:
+  case MCExpr::Target:
+    return false;
+  }
+  return false;
+}
+
 static void encodeFieldBits(uint64_t &Insn, const linxisa_field &Field,
                             uint64_t Value) {
   for (unsigned j = 0; j < Field.piece_count; ++j) {
@@ -126,9 +151,15 @@ void LinxISAMCCodeEmitter::encodeInstruction(const MCInst &MI,
     } else if (Name == "imm32" && Mnemonic == "HL.SETRET") {
       Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_HL_SETRET32_PCREL);
     } else if (Name == "imm20" && Mnemonic == "ADDTPC") {
-      Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_PCREL_HI20);
+      if (hasGotVariant(Expr))
+        Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_GOT_HI20);
+      else
+        Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_PCREL_HI20);
     } else if (Name == "uimm12" && (Mnemonic == "ADDI" || Mnemonic == "ADDIW")) {
-      Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_LO12);
+      if (hasGotVariant(Expr))
+        Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_GOT_LO12);
+      else
+        Kind = static_cast<MCFixupKind>(LinxISA::FIXUP_LINX_LO12);
       PCRel = false;
     } else if (Name == "simm17" && Mnemonic.ends_with(".PCR")) {
       // 32-bit PC-relative loads (LB/LH/LW/LD/...).

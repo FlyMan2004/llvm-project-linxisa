@@ -21,6 +21,11 @@ enum MOFlags : unsigned {
   // calls into shared libraries).
   MO_PLT = 1u << 0,
 
+  // Use GOT-based addressing when materializing a symbol address in PIC mode.
+  // This is used by ADDTPC/ADDI address materialization before loading the
+  // GOT entry.
+  MO_GOT = 1u << 3,
+
   // Apply a SrcR conversion modifier for instructions that support it.
   // Today this is used for SETC.* and CMP.* forms where only the right operand
   // can be tagged with a width/sign conversion (e.g. `.sw` / `.uw`).

@@ -37,6 +37,18 @@ void LinxISAMCAsmInfo::printSpecifierExpr(raw_ostream &OS,
     OS << "@plt";
     return;
   }
+  case LinxISA::S_GOT: {
+    const MCExpr *Sub = Expr.getSubExpr();
+    const bool NeedParens = Sub->getKind() == MCExpr::Binary ||
+                            Sub->getKind() == MCExpr::Unary;
+    if (NeedParens)
+      OS << '(';
+    printExpr(OS, *Sub);
+    if (NeedParens)
+      OS << ')';
+    OS << "@got";
+    return;
+  }
   default:
     llvm_unreachable("Invalid LinxISA specifier");
   }

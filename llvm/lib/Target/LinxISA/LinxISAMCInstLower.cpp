@@ -173,8 +173,11 @@ bool LinxISAMCInstLower::lowerOperand(const MachineOperand &MO,
     const MCExpr *Expr =
         MCSymbolRefExpr::create(Printer.getSymbol(MO.getGlobal()), Ctx);
     Expr = withOffset(Expr, MO.getOffset(), Ctx);
-    if (MO.getTargetFlags() == LinxII::MO_PLT)
+    const unsigned TF = MO.getTargetFlags();
+    if (TF & LinxII::MO_PLT)
       Expr = MCSpecifierExpr::create(Expr, LinxISA::S_PLT, Ctx);
+    else if (TF & LinxII::MO_GOT)
+      Expr = MCSpecifierExpr::create(Expr, LinxISA::S_GOT, Ctx);
     OutOp = MCOperand::createExpr(Expr);
     return true;
   }
@@ -183,8 +186,11 @@ bool LinxISAMCInstLower::lowerOperand(const MachineOperand &MO,
         MCSymbolRefExpr::create(
             Printer.GetExternalSymbolSymbol(MO.getSymbolName()), Ctx);
     Expr = withOffset(Expr, MO.getOffset(), Ctx);
-    if (MO.getTargetFlags() == LinxII::MO_PLT)
+    const unsigned TF = MO.getTargetFlags();
+    if (TF & LinxII::MO_PLT)
       Expr = MCSpecifierExpr::create(Expr, LinxISA::S_PLT, Ctx);
+    else if (TF & LinxII::MO_GOT)
+      Expr = MCSpecifierExpr::create(Expr, LinxISA::S_GOT, Ctx);
     OutOp = MCOperand::createExpr(Expr);
     return true;
   }

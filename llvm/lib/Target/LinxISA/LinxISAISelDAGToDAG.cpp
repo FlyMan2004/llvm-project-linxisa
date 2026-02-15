@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "LinxISA.h"
+#include "LinxISABaseInfo.h"
 #include "LinxISATargetMachine.h"
 #include "MCTargetDesc/LinxISAMCTargetDesc.h"
 #include "llvm/CodeGen/SelectionDAGISel.h"
@@ -35,6 +36,9 @@ private:
 #include "LinxISAGenDAGISel.inc"
 
   void Select(SDNode *N) override;
+  bool SelectInlineAsmMemoryOperand(const SDValue &Op,
+                                    InlineAsm::ConstraintCode ConstraintID,
+                                    std::vector<SDValue> &OutOps) override;
 
   bool selectMemAddr(SDValue Addr, SDValue &Base, SDValue &Off, int64_t Scale);
   bool selectMemAddrRegOffset(SDValue Addr, SDValue &Base, SDValue &Index,
@@ -248,6 +252,12 @@ bool LinxISADAGToDAGISel::selectPcrSymbolAddr(SDValue Addr, SDValue &Sym) {
     SDValue Page = MN->getOperand(0);
     SDValue GA = MN->getOperand(1);
 
+    // Keep GOT-materialized addresses in base+offset form. Folding them back
+    // into *.PCR would lose GOT relocation semantics.
+    if (auto *G = dyn_cast<GlobalAddressSDNode>(GA.getNode()))
+      if (G->getTargetFlags() & LinxII::MO_GOT)
+        return std::nullopt;
+
     auto *PageMN = dyn_cast<MachineSDNode>(Page.getNode());
     if (!PageMN || PageMN->getMachineOpcode() != LinxISA::ADDTPC ||
         PageMN->getNumOperands() < 1)
@@ -304,6 +314,24 @@ bool LinxISADAGToDAGISel::selectPcrSymbolAddr(SDValue Addr, SDValue &Sym) {
   }
 
   return false;
+}
+
+bool LinxISADAGToDAGISel::SelectInlineAsmMemoryOperand(
+    const SDValue &Op, InlineAsm::ConstraintCode ConstraintID,
+    std::vector<SDValue> &OutOps) {
+  switch (ConstraintID) {
+  case InlineAsm::ConstraintCode::o:
+  case InlineAsm::ConstraintCode::m: {
+    SDValue Base, Off;
+    if (!selectMemAddr(Op, Base, Off, /*Scale=*/1))
+      return true;
+    OutOps.push_back(Base);
+    OutOps.push_back(Off);
+    return false;
+  }
+  default:
+    return true;
+  }
 }
 
 static unsigned selectBrOpcode(ISD::CondCode CC, bool &SwapOps) {

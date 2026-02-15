@@ -236,12 +236,12 @@ RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
                             const uint8_t *loc) const {
   switch (type) {
   case R_LINX_B17_PLT:
+  case R_LINX_HL_BSTART30_PCREL:
     return R_PLT_PC;
   case R_LINX_B12_PCREL:
   case R_LINX_J22_PCREL:
   case R_LINX_CBSTART12_PCREL:
   case R_LINX_B17_PCREL:
-  case R_LINX_HL_BSTART30_PCREL:
   case R_LINX_B25_PCREL:
   case R_LINX_CSETRET5_PCREL:
   case R_LINX_SETRET20_PCREL:
@@ -250,9 +250,14 @@ RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
   case R_LINX_PCR17_STORE:
   case R_LINX_HL_PCR29_LOAD:
   case R_LINX_HL_PCR29_STORE:
+  case R_LINX_32_PCREL:
     return R_PC;
+  case R_LINX_GOT_HI20:
+    return RE_AARCH64_GOT_PAGE_PC;
   case R_LINX_PCREL_HI20:
     return RE_AARCH64_PAGE_PC;
+  case R_LINX_GOT_LO12:
+    return R_GOT;
   case R_LINX_LO12:
     return R_ABS;
   default:
@@ -263,6 +268,7 @@ RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
 bool LinxISA::usesOnlyLowPageBits(RelType type) const {
   switch (type) {
   case R_LINX_LO12:
+  case R_LINX_GOT_LO12:
     return true;
   default:
     return false;
@@ -340,6 +346,10 @@ void LinxISA::relocate(uint8_t *loc, const Relocation &rel,
     checkIntUInt(ctx, loc, val, 32, rel);
     write32le(loc, val);
     return;
+  case R_LINX_32_PCREL:
+    checkInt(ctx, loc, sval, 32, rel);
+    write32le(loc, val);
+    return;
   case R_LINX_64:
     write64le(loc, val);
     return;
@@ -411,7 +421,19 @@ void LinxISA::relocate(uint8_t *loc, const Relocation &rel,
     write32le(loc, cur);
     return;
   }
+  case R_LINX_GOT_HI20: {
+    uint32_t cur = read32le(loc);
+    cur |= encodePcrelHi20(ctx, loc, sval, rel);
+    write32le(loc, cur);
+    return;
+  }
   case R_LINX_LO12: {
+    uint32_t cur = read32le(loc);
+    cur |= encodeLo12(ctx, loc, sval, rel);
+    write32le(loc, cur);
+    return;
+  }
+  case R_LINX_GOT_LO12: {
     uint32_t cur = read32le(loc);
     cur |= encodeLo12(ctx, loc, sval, rel);
     write32le(loc, cur);

@@ -570,38 +570,6 @@ static bool isTsvcAuxHelperName(StringRef Name) {
   return true;
 }
 
-static bool isTsvcKernelName(StringRef Name) {
-  if (Name.empty())
-    return false;
-  if (Name.front() == '_')
-    Name = Name.drop_front();
-  if (isTsvcAuxHelperName(Name))
-    return false;
-  if (Name.front() == 's') {
-    Name = Name.drop_front();
-    if (Name.empty())
-      return false;
-    for (char C : Name) {
-      if (C < '0' || C > '9')
-        return false;
-    }
-    return true;
-  }
-  if (Name.front() == 'v') {
-    Name = Name.drop_front();
-    if (Name.empty())
-      return false;
-    for (char C : Name) {
-      const bool IsAlpha = (C >= 'a' && C <= 'z') || (C >= 'A' && C <= 'Z');
-      const bool IsDigit = (C >= '0' && C <= '9');
-      if (!IsAlpha && !IsDigit)
-        return false;
-    }
-    return true;
-  }
-  return false;
-}
-
 class LinxISASIMTAutoVectorize : public FunctionPass {
 public:
   static char ID;
@@ -630,47 +598,13 @@ public:
       return false;
 
     const StringRef ConfigMode = modeName(LinxSIMTAutoVecMode);
-    const bool IsTsvcKernel = isTsvcKernelName(F.getName());
-
-    auto tryInsertCoverageFallbackMarker = [&]() -> bool {
-      if (!IsTsvcKernel || F.hasFnAttribute("linx-vblock-body-asm"))
-        return false;
-
-      BasicBlock &EntryBB = F.getEntryBlock();
-      Instruction *EntryIP = &*EntryBB.getFirstInsertionPt();
-      IRBuilder<> EB(EntryIP);
-      Type *I32Ty = EB.getInt32Ty();
-      Type *I64Ty = EB.getInt64Ty();
-      LLVMContext &Ctx = F.getContext();
-
-      // Fallback marker: launch a one-lane, side-effect-free vector body to
-      // preserve kernel semantics while keeping coverage accounting stable.
-      Value *VKind = ConstantInt::get(
-          I32Ty, (LinxSIMTAutoVecMode == SIMTAutoVecMode::MParSafe) ? 1 : 0);
-      Value *BodySym = ConstantPointerNull::get(PointerType::getUnqual(Ctx));
-      Value *Dim0 = ConstantInt::get(I64Ty, 1);
-      Value *Dim1 = ConstantInt::get(I64Ty, 1);
-      Value *Dim2 = ConstantInt::get(I64Ty, 1);
-      Value *AttrBits = ConstantInt::get(I32Ty, 0);
-      Value *Zero = ConstantInt::get(I64Ty, 0);
-      EB.CreateCall(Intr, {VKind, BodySym, Dim0, Dim1, Dim2, AttrBits, Zero,
-                           Zero, Zero, Zero, Zero, Zero});
-
-      F.addFnAttr("linx-vblock-body-asm",
-                  "  v.add zero, zero, ->vt#1\n"
-                  "  C.BSTOP\n");
-      return true;
-    };
 
     SmallVector<Loop *, 8> Loops;
     for (Loop *Top : LI)
       collectLoops(Top, Loops);
 
     if (Loops.empty()) {
-      const bool Marker = tryInsertCoverageFallbackMarker();
-      Changed |= Marker;
-      emitRemark(F.getName(), "<none>", Marker ? "lowered" : "reject",
-                 Marker ? "fallback_marker_no_loop" : "no_loop_candidate",
+      emitRemark(F.getName(), "<none>", "reject", "no_loop_candidate",
                  ConfigMode,
                  (LinxSIMTAutoVecMode == SIMTAutoVecMode::MParSafe) ? "mpar"
                                                                      : "mseq",
@@ -681,7 +615,6 @@ public:
     auto &SE = getAnalysis<ScalarEvolutionWrapperPass>().getSE();
 
     bool FunctionLowered = F.hasFnAttribute("linx-vblock-body-asm");
-    bool LoopLowered = false;
     for (Loop *L : Loops) {
       const bool IsInnermost = L->isInnermost();
       const auto TripCountOpt =
@@ -712,7 +645,6 @@ public:
         SelectedMode = "mseq";
         break;
       case SIMTAutoVecMode::MParSafe:
-      case SIMTAutoVecMode::Auto:
         // MPAR is selected either by explicit loop-parallel metadata (pragma
         // style hints) or by conservative structural inference for store-free
         // loop bodies.
@@ -724,6 +656,13 @@ public:
                              ? "mpar"
                              : "mseq";
         }
+        break;
+      case SIMTAutoVecMode::Auto:
+        // Auto mode must stay correctness-first and deterministic:
+        // prefer MSEQ unless we can prove the loop body is independent.
+        SelectedMode = (!HasExtraPhi && !HasCalls && !HasInnerCF && !HasStore)
+                           ? "mpar"
+                           : "mseq";
         break;
       }
 
@@ -2379,10 +2318,10 @@ public:
                 return false;
               continue;
             }
-            auto EmittedVal = emitValue(&I);
             auto RecIt = RecurrencePlansByUpdate.find(&I);
             if (RecIt == RecurrencePlansByUpdate.end())
               continue;
+            auto EmittedVal = emitValue(&I);
             if (!EmittedVal) {
               reject(unsupportedValueReason(&I));
               return false;
@@ -2520,6 +2459,7 @@ public:
                 reject("unsupported_branch_i1_condition");
                 return false;
               }
+
               const bool UsePredicateFallback =
                   isVectorToken(*L) || isVectorToken(*R);
               if (UsePredicateFallback) {
@@ -2756,6 +2696,12 @@ public:
         OS << "  C.BSTOP\n";
         F.addFnAttr("linx-vblock-body-asm", OS.str());
 
+        // Decoupled body contract:
+        // - Launch block carries only BSTART.{MSEQ,MPAR} descriptors.
+        // - Out-of-line body is linear and ends with C.BSTOP.
+        // - Header and body are connected via B.TEXT and execute with
+        //   lane/group replay state (LB0/LB1/LB2).
+        //
         // Create a dedicated launch block so the backend can form a valid
         // block header (BSTART.MSEQ/MPAR + descriptors) without non-descriptor
         // instructions preceding it.
@@ -2839,11 +2785,7 @@ public:
         // LoopSimplifyForm for a stable preheader/header/exit structure.
         reject("not_loop_simplify");
       } else {
-        if (IsTsvcKernel) {
-          reject("fallback_marker_only");
-        } else if (tryLowerToVBlock()) {
-          LoopLowered = true;
-        }
+        (void)tryLowerToVBlock();
       }
 
       BasicBlock *Header = L->getHeader();
@@ -2852,16 +2794,6 @@ public:
                  SelectedMode, IsCounted, IsCanonical, IsSingleBlock, HasStore,
                  HasExtraPhi);
     }
-
-    if (!LoopLowered && tryInsertCoverageFallbackMarker()) {
-      Changed = true;
-      emitRemark(F.getName(), "<none>", "lowered", "fallback_marker",
-                 ConfigMode,
-                 (LinxSIMTAutoVecMode == SIMTAutoVecMode::MParSafe) ? "mpar"
-                                                                     : "mseq",
-                 false, false, false, false, false);
-    }
-
     return Changed;
   }
 
