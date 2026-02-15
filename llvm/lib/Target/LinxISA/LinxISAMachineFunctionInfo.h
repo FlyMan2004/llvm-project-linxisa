@@ -15,17 +15,26 @@
 
 #include "LinxISASubtarget.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include <string>
 
 namespace llvm {
 
 class LinxISAMachineFunctionInfo : public MachineFunctionInfo {
   int VarArgsFrameIndex = 0;
   int VarArgsSaveSize = 0;
+  std::string VBlockBodyAsm;
 
 public:
   LinxISAMachineFunctionInfo(const Function &F, const LinxISASubtarget *STI) {
     (void)F;
     (void)STI;
+    if (F.hasFnAttribute("linx-vblock-body-asm")) {
+      VBlockBodyAsm =
+          F.getFnAttribute("linx-vblock-body-asm").getValueAsString().str();
+      if (!VBlockBodyAsm.empty() && VBlockBodyAsm.back() != '\n') {
+        VBlockBodyAsm.push_back('\n');
+      }
+    }
   }
 
   MachineFunctionInfo *
@@ -43,9 +52,12 @@ public:
 
   int getVarArgsSaveSize() const { return VarArgsSaveSize; }
   void setVarArgsSaveSize(int Size) { VarArgsSaveSize = Size; }
+
+  bool hasVBlockBodyAsm() const { return !VBlockBodyAsm.empty(); }
+  StringRef getVBlockBodyAsm() const { return VBlockBodyAsm; }
+  const char *getVBlockBodyAsmCStr() const { return VBlockBodyAsm.c_str(); }
 };
 
 } // namespace llvm
 
 #endif // LLVM_LIB_TARGET_LINXISA_LINXISAMACHINEFUNCTIONINFO_H
-

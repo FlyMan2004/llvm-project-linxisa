@@ -122,7 +122,9 @@ llvm::Value *CodeGenFunction::EmitLinxISABuiltinExpr(unsigned BuiltinID,
     Attr = Builder.CreateIntCast(Attr, Builder.getInt32Ty(), /*isSigned=*/false);
 
     llvm::Function *F = CGM.getIntrinsic(llvm::Intrinsic::linx_vblock_launch);
-    return Builder.CreateCall(F, {VKind, Body, Dim0, Dim1, Dim2, Attr});
+    llvm::Value *Z = Builder.getInt64(0);
+    return Builder.CreateCall(F, {VKind, Body, Dim0, Dim1, Dim2, Attr,
+                                  Z, Z, Z, Z, Z, Z});
   }
   case LinxISA::BI__builtin_linx_vpar_tadd: {
     llvm::Value *A = EmitScalarExpr(E->getArg(0));

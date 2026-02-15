@@ -13,25 +13,26 @@
 #include "TargetInfo/LinxISATargetInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/CodeGen/Passes.h"
-#include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
+#include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/Compiler.h"
 
 using namespace llvm;
 
-extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeLinxISATarget() {
+extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void
+LLVMInitializeLinxISATarget() {
   RegisterTargetMachine<LinxISATargetMachine> X32(getTheLinx32Target());
   RegisterTargetMachine<LinxISATargetMachine> X64(getTheLinx64Target());
 
   PassRegistry &PR = *PassRegistry::getPassRegistry();
   initializeLinxISAAsmPrinterPass(PR);
   initializeLinxISABlockifyPass(PR);
+  initializeLinxISASIMTAutoVectorizePass(PR);
   initializeLinxISADAGToDAGISelLegacyPass(PR);
 }
 
-static Reloc::Model
-getEffectiveRelocModel(std::optional<Reloc::Model> RM) {
+static Reloc::Model getEffectiveRelocModel(std::optional<Reloc::Model> RM) {
   return RM.value_or(Reloc::Static);
 }
 
@@ -47,22 +48,24 @@ static TargetOptions getEffectiveTargetOptions(const TargetOptions &Options) {
     Opts.FloatABIType = FloatABI::Soft;
   }
 
-  // Linx block templates rely on temporary (local) labels being available during
-  // object emission for internal fixups/relaxation. Keep them by default.
+  // Linx block templates rely on temporary (local) labels being available
+  // during object emission for internal fixups/relaxation. Keep them by
+  // default.
   Opts.MCOptions.MCSaveTempLabels = true;
 
   return Opts;
 }
 
-LinxISATargetMachine::LinxISATargetMachine(
-    const Target &T, const Triple &TT, StringRef CPU, StringRef FS,
-    const TargetOptions &Options, std::optional<Reloc::Model> RM,
-    std::optional<CodeModel::Model> CM, CodeGenOptLevel OL, bool JIT)
-    : CodeGenTargetMachineImpl(
-          T, TT.computeDataLayout(), TT, CPU, FS,
-          getEffectiveTargetOptions(Options),
-          getEffectiveRelocModel(RM),
-          getEffectiveCodeModel(CM, CodeModel::Small), OL),
+LinxISATargetMachine::LinxISATargetMachine(const Target &T, const Triple &TT,
+                                           StringRef CPU, StringRef FS,
+                                           const TargetOptions &Options,
+                                           std::optional<Reloc::Model> RM,
+                                           std::optional<CodeModel::Model> CM,
+                                           CodeGenOptLevel OL, bool JIT)
+    : CodeGenTargetMachineImpl(T, TT.computeDataLayout(), TT, CPU, FS,
+                               getEffectiveTargetOptions(Options),
+                               getEffectiveRelocModel(RM),
+                               getEffectiveCodeModel(CM, CodeModel::Small), OL),
       TLOF(std::make_unique<TargetLoweringObjectFileELF>()),
       Subtarget(TT, CPU, FS, *this) {
   initAsmInfo();
@@ -82,6 +85,10 @@ public:
   void addIRPasses() override {
     addPass(createAtomicExpandLegacyPass());
     TargetPassConfig::addIRPasses();
+    if (getOptLevel() != CodeGenOptLevel::None &&
+        getOptLevel() != CodeGenOptLevel::Less) {
+      addPass(createLinxISASIMTAutoVectorizePass());
+    }
   }
 
   bool addInstSelector() override {
@@ -94,8 +101,7 @@ public:
 
 } // namespace
 
-TargetPassConfig *
-LinxISATargetMachine::createPassConfig(PassManagerBase &PM) {
+TargetPassConfig *LinxISATargetMachine::createPassConfig(PassManagerBase &PM) {
   return new LinxISAPassConfig(*this, &PM);
 }
 
@@ -103,8 +109,7 @@ MachineFunctionInfo *LinxISATargetMachine::createMachineFunctionInfo(
     BumpPtrAllocator &Allocator, const Function &F,
     const TargetSubtargetInfo *STI) const {
   return new (Allocator.Allocate<LinxISAMachineFunctionInfo>())
-      LinxISAMachineFunctionInfo(
-          F, static_cast<const LinxISASubtarget *>(STI));
+      LinxISAMachineFunctionInfo(F, static_cast<const LinxISASubtarget *>(STI));
 }
 
 TargetTransformInfo

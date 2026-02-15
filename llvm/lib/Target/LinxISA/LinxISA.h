@@ -19,10 +19,12 @@ class PassRegistry;
 
 FunctionPass *createLinxISAISelDag(LinxISATargetMachine &TM);
 FunctionPass *createLinxISABlockifyPass();
+FunctionPass *createLinxISASIMTAutoVectorizePass();
 
 void initializeLinxISAAsmPrinterPass(PassRegistry &);
 void initializeLinxISADAGToDAGISelLegacyPass(PassRegistry &);
 void initializeLinxISABlockifyPass(PassRegistry &);
+void initializeLinxISASIMTAutoVectorizePass(PassRegistry &);
 
 namespace LinxISD {
 

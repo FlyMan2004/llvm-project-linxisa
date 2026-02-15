@@ -9,20 +9,22 @@
 #include "LinxISA.h"
 #include "LinxISABaseInfo.h"
 #include "LinxISAInstrInfo.h"
+#include "LinxISAMachineFunctionInfo.h"
 #include "LinxISARegisterInfo.h"
 #include "MCTargetDesc/LinxISAMCTargetDesc.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetOpcodes.h"
-#include "llvm/IR/InlineAsm.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/Support/Debug.h"
@@ -30,8 +32,10 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <cctype>
 #include <limits>
 #include <optional>
+#include <string>
 
 using namespace llvm;
 
@@ -64,6 +68,8 @@ static bool isMarkerInstr(const MachineInstr &MI) {
   case LinxISA::BSTART_CUBE:
   case LinxISA::BSTART_VPAR:
   case LinxISA::BSTART_VSEQ:
+  case LinxISA::BSTART_MPAR:
+  case LinxISA::BSTART_MSEQ:
   case LinxISA::BSTOP:
     return true;
   default:
@@ -107,6 +113,7 @@ static bool isTilePseudoInstr(const MachineInstr &MI) {
 static bool isVBlockPseudoInstr(const MachineInstr &MI) {
   switch (MI.getOpcode()) {
   case LinxISA::PSEUDO_VBLOCK_LAUNCH:
+  case LinxISA::PSEUDO_VBLOCK_LAUNCH_DYN1:
     return true;
   default:
     return false;
@@ -207,15 +214,17 @@ public:
   bool runOnMachineFunction(MachineFunction &MF) override {
     const auto &TII = *MF.getSubtarget().getInstrInfo();
     const auto &TRI = *MF.getSubtarget().getRegisterInfo();
+    MachineRegisterInfo &MRI = MF.getRegInfo();
 
     const BitVector Reserved = TRI.getReservedRegs(MF);
     bool Changed = false;
 
-    // Per-function empty decoupled-body stub used by tile/vector block headers.
-    // This is emitted as a linear snippet that terminates at BSTOP and is
-    // referenced via B.TEXT from decoupled headers.
+    // Per-function decoupled-body stubs used by block headers.
+    // - Empty body: tile headers that execute via descriptor-only semantics.
+    // - VBlock body: generic SIMT vector body used by autovec vblock launch.
     MachineBasicBlock *EmptyBodyBB = nullptr;
-    MCSymbol *EmptyBodySym = nullptr;
+    MachineBasicBlock *VBlockBodyBB = nullptr;
+    MCSymbol *VBlockBodySym = nullptr;
     MachineBasicBlock *VTileAddBodyBB = nullptr;
     MCSymbol *VTileAddBodySym = nullptr;
     MachineBasicBlock *VTileSubBodyBB = nullptr;
@@ -232,7 +241,9 @@ public:
           continue;
         if (Sym->getName().starts_with(".__linx_empty_body.")) {
           EmptyBodyBB = &MBB;
-          EmptyBodySym = Sym;
+        } else if (Sym->getName().starts_with(".__linx_vblock_body.")) {
+          VBlockBodyBB = &MBB;
+          VBlockBodySym = Sym;
         } else if (Sym->getName().starts_with(".__linx_vtile_add_body.")) {
           VTileAddBodyBB = &MBB;
           VTileAddBodySym = Sym;
@@ -242,41 +253,713 @@ public:
           break;
         }
       }
-      if (EmptyBodyBB && VTileAddBodyBB && VTileSubBodyBB)
+      if (EmptyBodyBB && VBlockBodyBB && VTileAddBodyBB && VTileSubBodyBB)
         break;
     }
 
     SmallPtrSet<MachineBasicBlock *, 8> DecoupledBodyBBs;
     if (EmptyBodyBB)
       DecoupledBodyBBs.insert(EmptyBodyBB);
+    if (VBlockBodyBB)
+      DecoupledBodyBBs.insert(VBlockBodyBB);
     if (VTileAddBodyBB)
       DecoupledBodyBBs.insert(VTileAddBodyBB);
     if (VTileSubBodyBB)
       DecoupledBodyBBs.insert(VTileSubBodyBB);
 
-    auto getOrCreateEmptyBodySym = [&]() -> MCSymbol * {
-      if (EmptyBodySym)
-        return EmptyBodySym;
+    struct ParsedVReg {
+      unsigned Code = 0;
+      unsigned SrcRType = 3; // default: no suffix modifier
+      unsigned Shamt = 0;
+    };
+
+    auto toUpperStr = [](StringRef S) -> std::string {
+      std::string Out;
+      Out.reserve(S.size());
+      for (char C : S)
+        Out.push_back(static_cast<char>(
+            std::toupper(static_cast<unsigned char>(C))));
+      return Out;
+    };
+
+    auto parseSrcRTypeSuffix = [&](StringRef Suffix) -> std::optional<unsigned> {
+      std::string Up = toUpperStr(Suffix);
+      if (Up == "SW")
+        return 0u;
+      if (Up == "UW")
+        return 1u;
+      if (Up == "NEG" || Up == "NOT")
+        return 2u;
+      return std::nullopt;
+    };
+
+    auto parseRegCode = [&](StringRef Name) -> std::optional<unsigned> {
+      StringRef N = Name.trim();
+      if (N.size() >= 2 && (N[0] == 'r' || N[0] == 'R') &&
+          std::isdigit(static_cast<unsigned char>(N[1]))) {
+        N = N.drop_front();
+        unsigned V = 0;
+        if (!N.getAsInteger(10, V) && V < 32)
+          return V;
+        return std::nullopt;
+      }
+
+      std::string Upper = toUpperStr(N);
+
+      auto parsePrefixedIndex = [&](StringRef Prefix, unsigned Class,
+                                    unsigned MaxIndex)
+          -> std::optional<unsigned> {
+        StringRef U(Upper);
+        if (!U.starts_with(Prefix))
+          return std::nullopt;
+        StringRef Tail = U.drop_front(Prefix.size());
+        if (Tail.empty())
+          return std::nullopt;
+        unsigned Index = 0;
+        if (Tail.getAsInteger(10, Index) || Index > MaxIndex)
+          return std::nullopt;
+        return (Class << 5) | (Index & 0x1fu);
+      };
+
+      auto parseVecQueue = [&](StringRef Prefix, unsigned Class,
+                               unsigned MaxIndex) -> std::optional<unsigned> {
+        StringRef U(Upper);
+        if (!U.starts_with(Prefix))
+          return std::nullopt;
+        StringRef Tail = U.drop_front(Prefix.size());
+        unsigned Index = 0;
+        if (Tail.empty()) {
+          Index = 0;
+        } else {
+          if (!Tail.consume_front("#"))
+            return std::nullopt;
+          if (Tail.getAsInteger(10, Index) || Index == 0 || Index > MaxIndex)
+            return std::nullopt;
+        }
+        return (Class << 5) | (Index & 0x1fu);
+      };
+
+      if (auto V = parsePrefixedIndex("RI", /*Class=*/1, /*MaxIndex=*/31))
+        return *V;
+      if (auto V = parsePrefixedIndex("LC", /*Class=*/3, /*MaxIndex=*/2))
+        return *V;
+      if (auto V = parseVecQueue("VT", /*Class=*/4, /*MaxIndex=*/31))
+        return *V;
+      if (auto V = parseVecQueue("VU", /*Class=*/5, /*MaxIndex=*/31))
+        return *V;
+      if (auto V = parseVecQueue("VM", /*Class=*/6, /*MaxIndex=*/31))
+        return *V;
+      if (auto V = parseVecQueue("VN", /*Class=*/7, /*MaxIndex=*/31))
+        return *V;
+
+      if (Upper == "TA")
+        return (8u << 5) | 0u;
+      if (Upper == "TB")
+        return (8u << 5) | 1u;
+      if (Upper == "TC")
+        return (8u << 5) | 2u;
+      if (Upper == "TD")
+        return (8u << 5) | 3u;
+      if (Upper == "TO")
+        return (8u << 5) | 4u;
+      if (Upper == "TS")
+        return (8u << 5) | 5u;
+
+      if (Upper == "ZERO")
+        return 0u;
+      if (Upper == "SP")
+        return 1u;
+      if (Upper == "A0")
+        return 2u;
+      if (Upper == "A1")
+        return 3u;
+      if (Upper == "A2")
+        return 4u;
+      if (Upper == "A3")
+        return 5u;
+      if (Upper == "A4")
+        return 6u;
+      if (Upper == "A5")
+        return 7u;
+      if (Upper == "A6")
+        return 8u;
+      if (Upper == "A7")
+        return 9u;
+      if (Upper == "RA")
+        return 10u;
+      if (Upper == "S0")
+        return 11u;
+      if (Upper == "S1")
+        return 12u;
+      if (Upper == "S2")
+        return 13u;
+      if (Upper == "S3")
+        return 14u;
+      if (Upper == "S4")
+        return 15u;
+      if (Upper == "S5")
+        return 16u;
+      if (Upper == "S6")
+        return 17u;
+      if (Upper == "S7")
+        return 18u;
+      if (Upper == "S8")
+        return 19u;
+      if (Upper == "X0")
+        return 20u;
+      if (Upper == "X1")
+        return 21u;
+      if (Upper == "X2")
+        return 22u;
+      if (Upper == "X3")
+        return 23u;
+      if (Upper == "T#1")
+        return 24u;
+      if (Upper == "T#2")
+        return 25u;
+      if (Upper == "T#3")
+        return 26u;
+      if (Upper == "T#4")
+        return 27u;
+      if (Upper == "U#1")
+        return 28u;
+      if (Upper == "U#2")
+        return 29u;
+      if (Upper == "U#3" || Upper == "U")
+        return 30u;
+      if (Upper == "U#4" || Upper == "T")
+        return 31u;
+
+      return std::nullopt;
+    };
+
+    auto parseVecRegToken = [&](StringRef Token) -> std::optional<ParsedVReg> {
+      StringRef T = Token.trim();
+      if (T.empty())
+        return std::nullopt;
+
+      ParsedVReg Out;
+      if (size_t ShiftPos = T.find("<<"); ShiftPos != StringRef::npos) {
+        StringRef Sh = T.drop_front(ShiftPos + 2).trim();
+        unsigned Shamt = 0;
+        if (Sh.getAsInteger(10, Shamt))
+          return std::nullopt;
+        Out.Shamt = Shamt;
+        T = T.take_front(ShiftPos).trim();
+      }
+
+      StringRef Base = T;
+      StringRef Suffix;
+      if (size_t Dot = T.rfind('.'); Dot != StringRef::npos) {
+        Base = T.take_front(Dot).trim();
+        Suffix = T.drop_front(Dot + 1).trim();
+      }
+
+      auto RegCode = parseRegCode(Base);
+      if (!RegCode)
+        return std::nullopt;
+      Out.Code = *RegCode;
+
+      if (!Suffix.empty()) {
+        if (auto SrcRType = parseSrcRTypeSuffix(Suffix))
+          Out.SrcRType = *SrcRType;
+      }
+      return Out;
+    };
+
+    auto splitCSV = [](StringRef S, SmallVectorImpl<StringRef> &Out) {
+      SmallVector<StringRef, 8> Raw;
+      S.split(Raw, ',', -1, false);
+      for (StringRef R : Raw) {
+        R = R.trim();
+        if (!R.empty())
+          Out.push_back(R);
+      }
+    };
+
+    auto parseMemTriple = [&](StringRef MemExpr, ParsedVReg &Base,
+                              ParsedVReg &Index) -> bool {
+      const size_t L = MemExpr.find('[');
+      const size_t R = MemExpr.rfind(']');
+      if (L == StringRef::npos || R == StringRef::npos || R <= L)
+        return false;
+      StringRef Inside = MemExpr.slice(L + 1, R).trim();
+      SmallVector<StringRef, 4> Parts;
+      splitCSV(Inside, Parts);
+      if (Parts.size() != 3)
+        return false;
+      auto BaseOp = parseVecRegToken(Parts[0]);
+      auto LaneOp = parseVecRegToken(Parts[1]);
+      auto IndexOp = parseVecRegToken(Parts[2]);
+      if (!BaseOp || !LaneOp || !IndexOp)
+        return false;
+      // Bring-up contract: lane selector is lc0<<2.
+      const unsigned WantLc0Code = (3u << 5) | 0u;
+      if (LaneOp->Code != WantLc0Code || LaneOp->Shamt != 2u)
+        return false;
+      Base = *BaseOp;
+      Index = *IndexOp;
+      return true;
+    };
+
+    auto normalizeLabel = [&](StringRef Label) -> std::string {
+      std::string Out;
+      StringRef L = Label.trim();
+      if (L.ends_with(":"))
+        L = L.drop_back().trim();
+      Out.reserve(L.size());
+      for (char C : L) {
+        if (std::isalnum(static_cast<unsigned char>(C)) || C == '_' || C == '.')
+          Out.push_back(C);
+      }
+      return Out;
+    };
+
+    auto emitVectorBodyLine =
+        [&](MachineBasicBlock &BodyBB, StringRef RawLine, StringRef CtxName,
+            function_ref<MCSymbol *(StringRef)> LookupLabelSym) {
+      StringRef Line = RawLine;
+      if (size_t Semi = Line.find(';'); Semi != StringRef::npos)
+        Line = Line.take_front(Semi);
+      Line = Line.trim();
+      if (Line.empty())
+        return;
+
+      auto fail = [&](StringRef Msg) -> void {
+        SmallString<256> Full;
+        raw_svector_ostream OS(Full);
+        OS << "Linx blockify: " << Msg << " in " << CtxName << ": '" << Line
+           << "'";
+        report_fatal_error(OS.str());
+      };
+
+      if (Line.ends_with(":")) {
+        std::string Label = normalizeLabel(Line);
+        if (Label.empty())
+          fail("invalid vector body label");
+        MCSymbol *Sym = LookupLabelSym(Label);
+        if (!Sym)
+          fail("undefined vector body label");
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(TargetOpcode::EH_LABEL))
+            .addSym(Sym);
+        return;
+      }
+
+      if (Line.equals_insensitive("C.BSTOP") || Line.equals_insensitive("BSTOP")) {
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(LinxISA::BSTOP));
+        return;
+      }
+
+      size_t SpacePos = Line.find(' ');
+      if (SpacePos == StringRef::npos)
+        fail("invalid vector body statement");
+      StringRef Head = Line.take_front(SpacePos).trim();
+      StringRef Rest = Line.drop_front(SpacePos + 1).trim();
+      if (Head.empty() || Rest.empty())
+        fail("invalid vector body statement");
+
+      if (Head.equals_insensitive("j")) {
+        std::string Label = normalizeLabel(Rest);
+        if (Label.empty())
+          fail("missing label in j");
+        MCSymbol *Sym = LookupLabelSym(Label);
+        if (!Sym)
+          fail("undefined vector body label");
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(LinxISA::PSEUDO_V_J))
+            .addSym(Sym);
+        return;
+      }
+
+      if (Head.equals_insensitive("b.eq") || Head.equals_insensitive("b.ne") ||
+          Head.equals_insensitive("b.lt") || Head.equals_insensitive("b.ge") ||
+          Head.equals_insensitive("b.ltu") || Head.equals_insensitive("b.geu")) {
+        SmallVector<StringRef, 4> Ops;
+        splitCSV(Rest, Ops);
+        if (Ops.size() != 3)
+          fail("expected 'b.<cc> SrcL, SrcR, label'");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        auto SrcR = parseVecRegToken(Ops[1]);
+        std::string Label = normalizeLabel(Ops[2]);
+        if (!SrcL || !SrcR || Label.empty())
+          fail("failed to parse operands for branch");
+        MCSymbol *Sym = LookupLabelSym(Label);
+        if (!Sym)
+          fail("undefined vector body label");
+
+        unsigned Opc = 0;
+        if (Head.equals_insensitive("b.eq"))
+          Opc = LinxISA::PSEUDO_V_B_EQ;
+        else if (Head.equals_insensitive("b.ne"))
+          Opc = LinxISA::PSEUDO_V_B_NE;
+        else if (Head.equals_insensitive("b.lt"))
+          Opc = LinxISA::PSEUDO_V_B_LT;
+        else if (Head.equals_insensitive("b.ge"))
+          Opc = LinxISA::PSEUDO_V_B_GE;
+        else if (Head.equals_insensitive("b.ltu"))
+          Opc = LinxISA::PSEUDO_V_B_LTU;
+        else if (Head.equals_insensitive("b.geu"))
+          Opc = LinxISA::PSEUDO_V_B_GEU;
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+            .addImm(SrcL->Code)
+            .addImm(SrcR->Code)
+            .addSym(Sym);
+        return;
+      }
+
+      auto parseArrow = [&](StringRef Expr, StringRef &SrcPart,
+                            ParsedVReg &Dst) -> bool {
+        size_t Arrow = Expr.find("->");
+        if (Arrow == StringRef::npos)
+          return false;
+        SrcPart = Expr.take_front(Arrow).trim();
+        StringRef DstPart = Expr.drop_front(Arrow + 2).trim();
+        if (size_t Comma = DstPart.find(','); Comma != StringRef::npos)
+          DstPart = DstPart.take_front(Comma).trim();
+        auto DstOp = parseVecRegToken(DstPart);
+        if (!DstOp)
+          return false;
+        Dst = *DstOp;
+        return true;
+      };
+
+      if (Head.equals_insensitive("v.add") || Head.equals_insensitive("v.sub")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in vector ALU op");
+        SmallVector<StringRef, 4> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 2)
+          fail("expected two source operands for vector ALU op");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        auto SrcR = parseVecRegToken(Ops[1]);
+        if (!SrcL || !SrcR)
+          fail("failed to parse source operands for vector ALU op");
+        const unsigned Opc = Head.equals_insensitive("v.add")
+                                 ? LinxISA::PSEUDO_V_ADD
+                                 : LinxISA::PSEUDO_V_SUB;
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+            .addImm(Dst.Code)
+            .addImm(SrcL->Code)
+            .addImm(SrcR->Code)
+            .addImm(SrcR->SrcRType)
+            .addImm(SrcR->Shamt);
+        return;
+      }
+
+      if (Head.equals_insensitive("v.fadd") || Head.equals_insensitive("v.fsub") ||
+          Head.equals_insensitive("v.fmul") || Head.equals_insensitive("v.fdiv")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in vector FP op");
+        SmallVector<StringRef, 4> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 2)
+          fail("expected two source operands for vector FP op");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        auto SrcR = parseVecRegToken(Ops[1]);
+        if (!SrcL || !SrcR)
+          fail("failed to parse source operands for vector FP op");
+        unsigned Opc = LinxISA::PSEUDO_V_FADD;
+        if (Head.equals_insensitive("v.fsub"))
+          Opc = LinxISA::PSEUDO_V_FSUB;
+        else if (Head.equals_insensitive("v.fmul"))
+          Opc = LinxISA::PSEUDO_V_FMUL;
+        else if (Head.equals_insensitive("v.fdiv"))
+          Opc = LinxISA::PSEUDO_V_FDIV;
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+            .addImm(Dst.Code)
+            .addImm(SrcL->Code)
+            .addImm(SrcR->Code);
+        return;
+      }
+
+      if (Head.starts_with_insensitive("v.cmp.")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in vector compare op");
+        SmallVector<StringRef, 4> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 2)
+          fail("expected two source operands for vector compare op");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        auto SrcR = parseVecRegToken(Ops[1]);
+        if (!SrcL || !SrcR)
+          fail("failed to parse source operands for vector compare op");
+
+        unsigned Opc = 0;
+        if (Head.equals_insensitive("v.cmp.eq"))
+          Opc = LinxISA::PSEUDO_V_CMP_EQ;
+        else if (Head.equals_insensitive("v.cmp.ne"))
+          Opc = LinxISA::PSEUDO_V_CMP_NE;
+        else if (Head.equals_insensitive("v.cmp.lt"))
+          Opc = LinxISA::PSEUDO_V_CMP_LT;
+        else if (Head.equals_insensitive("v.cmp.ltu"))
+          Opc = LinxISA::PSEUDO_V_CMP_LTU;
+        else if (Head.equals_insensitive("v.cmp.ge"))
+          Opc = LinxISA::PSEUDO_V_CMP_GE;
+        else if (Head.equals_insensitive("v.cmp.geu"))
+          Opc = LinxISA::PSEUDO_V_CMP_GEU;
+        if (!Opc)
+          fail("unsupported vector compare op");
+
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+            .addImm(Dst.Code)
+            .addImm(SrcL->Code)
+            .addImm(SrcR->Code);
+        return;
+      }
+
+      if (Head.equals_insensitive("v.feq") || Head.equals_insensitive("v.fne") ||
+          Head.equals_insensitive("v.flt") || Head.equals_insensitive("v.fge")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in vector FP compare op");
+        SmallVector<StringRef, 4> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 2)
+          fail("expected two source operands for vector FP compare op");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        auto SrcR = parseVecRegToken(Ops[1]);
+        if (!SrcL || !SrcR)
+          fail("failed to parse source operands for vector FP compare op");
+
+        unsigned Opc = 0;
+        if (Head.equals_insensitive("v.feq"))
+          Opc = LinxISA::PSEUDO_V_FEQ;
+        else if (Head.equals_insensitive("v.fne"))
+          Opc = LinxISA::PSEUDO_V_FNE;
+        else if (Head.equals_insensitive("v.flt"))
+          Opc = LinxISA::PSEUDO_V_FLT;
+        else if (Head.equals_insensitive("v.fge"))
+          Opc = LinxISA::PSEUDO_V_FGE;
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+            .addImm(Dst.Code)
+            .addImm(SrcL->Code)
+            .addImm(SrcR->Code);
+        return;
+      }
+
+      if (Head.starts_with_insensitive("v.rd")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in vector reduction op");
+        SmallVector<StringRef, 2> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 1)
+          fail("expected one source operand for vector reduction op");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        if (!SrcL)
+          fail("failed to parse source operand for vector reduction op");
+
+        unsigned Opc = 0;
+        if (Head.equals_insensitive("v.rdadd"))
+          Opc = LinxISA::PSEUDO_V_RDADD;
+        else if (Head.equals_insensitive("v.rdand"))
+          Opc = LinxISA::PSEUDO_V_RDAND;
+        else if (Head.equals_insensitive("v.rdfadd"))
+          Opc = LinxISA::PSEUDO_V_RDFADD;
+        else if (Head.equals_insensitive("v.rdfmax"))
+          Opc = LinxISA::PSEUDO_V_RDFMAX;
+        else if (Head.equals_insensitive("v.rdfmin"))
+          Opc = LinxISA::PSEUDO_V_RDFMIN;
+        else if (Head.equals_insensitive("v.rdmax"))
+          Opc = LinxISA::PSEUDO_V_RDMAX;
+        else if (Head.equals_insensitive("v.rdmin"))
+          Opc = LinxISA::PSEUDO_V_RDMIN;
+        else if (Head.equals_insensitive("v.rdor"))
+          Opc = LinxISA::PSEUDO_V_RDOR;
+        else if (Head.equals_insensitive("v.rdxor"))
+          Opc = LinxISA::PSEUDO_V_RDXOR;
+        if (!Opc)
+          fail("unsupported vector reduction op");
+
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+            .addImm(Dst.Code)
+            .addImm(SrcL->Code);
+        return;
+      }
+
+      if (Head.equals_insensitive("v.csel")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in v.csel");
+        SmallVector<StringRef, 6> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 3)
+          fail("expected three source operands for v.csel");
+        auto SrcP = parseVecRegToken(Ops[0]);
+        auto SrcL = parseVecRegToken(Ops[1]);
+        auto SrcR = parseVecRegToken(Ops[2]);
+        if (!SrcP || !SrcL || !SrcR)
+          fail("failed to parse source operands for v.csel");
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(LinxISA::PSEUDO_V_CSEL))
+            .addImm(Dst.Code)
+            .addImm(SrcP->Code)
+            .addImm(SrcL->Code)
+            .addImm(SrcR->Code)
+            .addImm(SrcR->SrcRType);
+        return;
+      }
+
+      if (Head.starts_with_insensitive("v.lw.brg") ||
+          Head.equals_insensitive("v.lw.local")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in v.lw");
+        ParsedVReg Base, Index;
+        if (!parseMemTriple(SrcPart, Base, Index))
+          fail("expected memory form [base, lc0<<2, idx] in v.lw");
+        const unsigned LocalBit =
+            (Head.contains_insensitive(".local") ||
+             Head.equals_insensitive("v.lw.local"))
+                ? 1u
+                : 0u;
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(LinxISA::PSEUDO_V_LW_BRG))
+            .addImm(Dst.Code)
+            .addImm(Base.Code)
+            .addImm(Index.Code)
+            .addImm(Index.Shamt)
+            .addImm(LocalBit);
+        return;
+      }
+
+      if (Head.starts_with_insensitive("v.sw.brg") ||
+          Head.equals_insensitive("v.sw.local")) {
+        const size_t LBr = Rest.find('[');
+        if (LBr == StringRef::npos)
+          fail("expected memory operand in v.sw");
+        StringRef ValuePart = Rest.take_front(LBr).trim();
+        if (ValuePart.ends_with(","))
+          ValuePart = ValuePart.drop_back().trim();
+        StringRef MemPart = Rest.drop_front(LBr).trim();
+        auto SrcD = parseVecRegToken(ValuePart);
+        ParsedVReg Base, Index;
+        if (!SrcD || !parseMemTriple(MemPart, Base, Index))
+          fail("expected v.sw SrcD, [base, lc0<<2, idx]");
+        if (Index.Shamt < 2)
+          fail("v.sw index shift must be >= 2");
+        const unsigned EncodedShamt = Index.Shamt - 2;
+        const unsigned LocalBit =
+            (Head.contains_insensitive(".local") ||
+             Head.equals_insensitive("v.sw.local"))
+                ? 1u
+                : 0u;
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(LinxISA::PSEUDO_V_SW_BRG))
+            .addImm(SrcD->Code)
+            .addImm(Base.Code)
+            .addImm(Index.Code)
+            .addImm(EncodedShamt)
+            .addImm(LocalBit);
+        return;
+      }
+
+      fail("unsupported vector body statement");
+    };
+
+    auto emitVectorBodyText = [&](MachineBasicBlock &BodyBB, StringRef BodyText,
+                                  StringRef CtxName) {
+      SmallVector<StringRef, 64> Lines;
+      StringRef Cursor = BodyText;
+      while (!Cursor.empty()) {
+        auto Split = Cursor.split('\n');
+        Lines.push_back(Split.first);
+        Cursor = Split.second;
+      }
+
+      StringMap<MCSymbol *> LabelSyms;
+      MCContext &Ctx = MF.getContext();
+
+      auto makeContextTag = [&](StringRef S) -> std::string {
+        std::string Tag;
+        Tag.reserve(S.size());
+        for (char C : S) {
+          if (std::isalnum(static_cast<unsigned char>(C)))
+            Tag.push_back(static_cast<char>(
+                std::tolower(static_cast<unsigned char>(C))));
+          else
+            Tag.push_back('_');
+        }
+        return Tag;
+      };
+      const std::string CtxTag = makeContextTag(CtxName);
+
+      auto getOrCreateLabelSym = [&](StringRef LabelToken) -> MCSymbol * {
+        std::string Key = normalizeLabel(LabelToken);
+        if (Key.empty())
+          return nullptr;
+        auto It = LabelSyms.find(Key);
+        if (It != LabelSyms.end())
+          return It->second;
+        SmallString<96> SymName;
+        raw_svector_ostream OS(SymName);
+        OS << ".__linx_vbody_" << CtxTag << "." << MF.getFunctionNumber()
+           << "." << Key;
+        MCSymbol *Sym = Ctx.getOrCreateSymbol(OS.str());
+        LabelSyms[Key] = Sym;
+        return Sym;
+      };
+
+      // Pass 1: collect all labels (forward references are legal).
+      for (StringRef RawLine : Lines) {
+        StringRef Line = RawLine;
+        if (size_t Semi = Line.find(';'); Semi != StringRef::npos)
+          Line = Line.take_front(Semi);
+        Line = Line.trim();
+        if (!Line.empty() && Line.ends_with(":"))
+          (void)getOrCreateLabelSym(Line);
+      }
+
+      auto lookupLabelSym = [&](StringRef LabelToken) -> MCSymbol * {
+        std::string Key = normalizeLabel(LabelToken);
+        if (Key.empty())
+          return nullptr;
+        auto It = LabelSyms.find(Key);
+        if (It == LabelSyms.end())
+          return nullptr;
+        return It->second;
+      };
+
+      for (StringRef RawLine : Lines)
+        emitVectorBodyLine(BodyBB, RawLine, CtxName, lookupLabelSym);
+    };
+
+    auto getOrCreateVBlockBodySym = [&]() -> MCSymbol * {
+      if (VBlockBodySym)
+        return VBlockBodySym;
 
       MCContext &Ctx = MF.getContext();
       SmallString<64> Name;
       raw_svector_ostream OS(Name);
-      OS << ".__linx_empty_body." << MF.getFunctionNumber();
-      EmptyBodySym = Ctx.getOrCreateSymbol(OS.str());
+      OS << ".__linx_vblock_body." << MF.getFunctionNumber();
+      VBlockBodySym = Ctx.getOrCreateSymbol(OS.str());
 
-      EmptyBodyBB = MF.CreateMachineBasicBlock();
-      MF.insert(MF.end(), EmptyBodyBB);
-      EmptyBodyBB->setLabelMustBeEmitted();
+      VBlockBodyBB = MF.CreateMachineBasicBlock();
+      MF.insert(MF.end(), VBlockBodyBB);
+      VBlockBodyBB->setLabelMustBeEmitted();
 
-      BuildMI(*EmptyBodyBB, EmptyBodyBB->end(), DebugLoc(),
+      BuildMI(*VBlockBodyBB, VBlockBodyBB->end(), DebugLoc(),
               TII.get(TargetOpcode::EH_LABEL))
-          .addSym(EmptyBodySym);
-      BuildMI(*EmptyBodyBB, EmptyBodyBB->end(), DebugLoc(),
-              TII.get(LinxISA::BSTOP));
+          .addSym(VBlockBodySym);
+      static const char kDefaultBodyAsm[] =
+          "  v.add lc0.sw, lc1.sw, ->vt\n"
+          "  C.BSTOP\n";
+      StringRef BodyText = kDefaultBodyAsm;
+      if (auto *MFI = MF.getInfo<LinxISAMachineFunctionInfo>()) {
+        if (MFI->hasVBlockBodyAsm())
+          BodyText = MFI->getVBlockBodyAsm();
+      }
+      emitVectorBodyText(*VBlockBodyBB, BodyText, "vblock body");
 
-      DecoupledBodyBBs.insert(EmptyBodyBB);
+      DecoupledBodyBBs.insert(VBlockBodyBB);
       Changed = true;
-      return EmptyBodySym;
+      return VBlockBodySym;
     };
 
     auto getOrCreateVTileAddBodySym = [&]() -> MCSymbol * {
@@ -303,10 +986,7 @@ public:
           "  v.add vt#1.sw, vu#1.sw, ->vt.w\n"
           "  v.sw.local vt#1, [to, lc0<<2, lc1<<8]\n"
           "  C.BSTOP\n";
-      BuildMI(*VTileAddBodyBB, VTileAddBodyBB->end(), DebugLoc(),
-              TII.get(TargetOpcode::INLINEASM))
-          .addExternalSymbol(kBodyAsm)
-          .addImm(InlineAsm::Extra_HasSideEffects);
+      emitVectorBodyText(*VTileAddBodyBB, StringRef(kBodyAsm), "vtile add body");
 
       DecoupledBodyBBs.insert(VTileAddBodyBB);
       Changed = true;
@@ -337,10 +1017,7 @@ public:
           "  v.sub vt#1.sw, vu#1.sw, ->vt.w\n"
           "  v.sw.local vt#1, [to, lc0<<2, lc1<<8]\n"
           "  C.BSTOP\n";
-      BuildMI(*VTileSubBodyBB, VTileSubBodyBB->end(), DebugLoc(),
-              TII.get(TargetOpcode::INLINEASM))
-          .addExternalSymbol(kBodyAsm)
-          .addImm(InlineAsm::Extra_HasSideEffects);
+      emitVectorBodyText(*VTileSubBodyBB, StringRef(kBodyAsm), "vtile sub body");
 
       DecoupledBodyBBs.insert(VTileSubBodyBB);
       Changed = true;
@@ -661,6 +1338,17 @@ public:
         BuildMI(DimMBB, DimInsertPt, DL, TII.get(BDimOpc))
             .addReg(LinxISA::R0)
             .addImm(Imm);
+      };
+
+      auto emitDimReg = [&](MachineBasicBlock &DimMBB,
+                            MachineBasicBlock::iterator DimInsertPt,
+                            unsigned LoopNest, Register SrcReg) {
+        const unsigned BDimOpc = (LoopNest == 0)   ? LinxISA::B_DIM_LB0
+                               : (LoopNest == 1) ? LinxISA::B_DIM_LB1
+                               :                  LinxISA::B_DIM_LB2;
+        BuildMI(DimMBB, DimInsertPt, DL, TII.get(BDimOpc))
+            .addReg(SrcReg)
+            .addImm(0);
       };
 
       auto tileKindFromId = [](unsigned ID) -> unsigned {
@@ -1115,35 +1803,60 @@ public:
         break;
       }
 
-      case LinxISA::PSEUDO_VBLOCK_LAUNCH: {
+      case LinxISA::PSEUDO_VBLOCK_LAUNCH:
+      case LinxISA::PSEUDO_VBLOCK_LAUNCH_DYN1: {
         // Expand into a decoupled vector block header:
-        //   BSTART.VSEQ/VPAR + B.TEXT empty_body + B.DIM(LB0..2)
+        //   BSTART.MSEQ/MPAR + B.TEXT body + B.IOR(binds) + B.DIM(LB0..2)
+        const bool DynDim1 =
+            (PseudoMI->getOpcode() == LinxISA::PSEUDO_VBLOCK_LAUNCH_DYN1);
         const int64_t VKind = PseudoMI->getOperand(0).getImm();
         const int64_t Dim0 = PseudoMI->getOperand(1).getImm();
-        const int64_t Dim1 = PseudoMI->getOperand(2).getImm();
+        const int64_t Dim1Imm = DynDim1 ? 0 : PseudoMI->getOperand(2).getImm();
+        const Register Dim1Reg = DynDim1 ? PseudoMI->getOperand(2).getReg()
+                                         : Register();
         const int64_t Dim2 = PseudoMI->getOperand(3).getImm();
         const int64_t AttrBits = PseudoMI->getOperand(4).getImm();
         (void)AttrBits; // Bring-up: B.ATTR is not wired in the backend yet.
 
+        const Register Bind0 = PseudoMI->getOperand(5).getReg();
+        const Register Bind1 = PseudoMI->getOperand(6).getReg();
+        const Register Bind2 = PseudoMI->getOperand(7).getReg();
+        const Register Bind3 = PseudoMI->getOperand(8).getReg();
+        const Register Bind4 = PseudoMI->getOperand(9).getReg();
+        const Register Bind5 = PseudoMI->getOperand(10).getReg();
+
         const unsigned Mode = 0; // bring-up default
-        const unsigned BStartOpc = (VKind == 0)   ? LinxISA::BSTART_VSEQ
-                                 : (VKind == 1) ? LinxISA::BSTART_VPAR
+        const unsigned BStartOpc = (VKind == 0)   ? LinxISA::BSTART_MSEQ
+                                 : (VKind == 1) ? LinxISA::BSTART_MPAR
                                                 : 0;
         if (!BStartOpc)
-          report_fatal_error("Linx: vblock.launch vkind must be 0(VSEQ) or 1(VPAR)");
+          report_fatal_error("Linx: vblock.launch vkind must be 0(MSEQ) or 1(MPAR)");
 
         BuildMI(MBB, InsertPt, DL, TII.get(BStartOpc)).addImm(Mode);
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_TEXT))
-            .addSym(getOrCreateEmptyBodySym());
-        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_DIM_LB0))
-            .addReg(LinxISA::R0)
-            .addImm(Dim0);
-        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_DIM_LB1))
-            .addReg(LinxISA::R0)
-            .addImm(Dim1);
-        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_DIM_LB2))
-            .addReg(LinxISA::R0)
-            .addImm(Dim2);
+            .addSym(getOrCreateVBlockBodySym());
+
+        auto emitIOR = [&](Register A, Register B, Register C) {
+          if (A == LinxISA::R0 && B == LinxISA::R0 && C == LinxISA::R0)
+            return;
+          // v0.3 bring-up contract: bind RI registers as an ordered namespace
+          // via B.IOR sources (RegSrc1, RegSrc0, RegSrc2).
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOR))
+              .addReg(LinxISA::R0) // RegDst (unused in bring-up)
+              .addReg(B)           // RegSrc0
+              .addReg(A)           // RegSrc1
+              .addReg(C);          // RegSrc2
+        };
+
+        emitIOR(Bind0, Bind1, Bind2);
+        emitIOR(Bind3, Bind4, Bind5);
+
+        emitDim(MBB, InsertPt, /*LoopNest=*/0, Dim0);
+        if (DynDim1)
+          emitDimReg(MBB, InsertPt, /*LoopNest=*/1, Dim1Reg);
+        else
+          emitDim(MBB, InsertPt, /*LoopNest=*/1, Dim1Imm);
+        emitDim(MBB, InsertPt, /*LoopNest=*/2, Dim2);
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTOP));
 
         PseudoMI->eraseFromParent();
@@ -1452,6 +2165,12 @@ public:
 	      auto hasSingleNonDbgUseInMBB =
 	          [&](Register Reg, const MachineInstr *UserMI,
 	              const MachineInstr *IgnoreMI) -> bool {
+	        // Cross-block users are not visible in the local MBB scan below.
+	        // Guard virtual registers up front so we never fold a producer that
+	        // still has uses in successor blocks.
+	        if (Reg.isVirtual() && !MRI.hasOneNonDBGUse(Reg))
+	          return false;
+
 	        unsigned Count = 0;
 	        for (const MachineInstr &MI : MBB) {
 	          if (MI.isDebugInstr() || isMarkerInstr(MI))
@@ -1903,7 +2622,7 @@ public:
            */
           if (!MBB.succ_empty())
             ReturnBB = *MBB.succ_begin();
-          if (EmptyBodyBB && ReturnBB == EmptyBodyBB)
+          if (ReturnBB && DecoupledBodyBBs.contains(ReturnBB))
             ReturnBB = nullptr;
           Last->eraseFromParent();
           Changed = true;

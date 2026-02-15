@@ -107,11 +107,17 @@ let TargetPrefix = "linx" in {
   // -------------------------------------------------------------------------
 
   // void @llvm.linx.vblock.launch(i32 vkind, ptr body_sym,
-  //                               i64 dim0, i64 dim1, i64 dim2, i32 attr_bits)
+  //                               i64 dim0, i64 dim1, i64 dim2, i32 attr_bits,
+  //                               i64 bind0, i64 bind1, i64 bind2,
+  //                               i64 bind3, i64 bind4, i64 bind5)
+  //
+  // bindN are compiler-managed scalar inputs that will be bound to the SIMT
+  // `ri*` namespace via header `B.IOR` descriptors in v0.3 mode.
   def int_linx_vblock_launch :
       Intrinsic<[],
                 [llvm_i32_ty, llvm_ptr_ty, llvm_i64_ty, llvm_i64_ty, llvm_i64_ty,
-                 llvm_i32_ty],
+                 llvm_i32_ty, llvm_i64_ty, llvm_i64_ty, llvm_i64_ty, llvm_i64_ty,
+                 llvm_i64_ty, llvm_i64_ty],
                 [IntrNoMem, IntrHasSideEffects]>;
 
   // -------------------------------------------------------------------------
