@@ -464,12 +464,33 @@ public:
   void applyFixup(const MCFragment &F, const MCFixup &Fixup,
                   const MCValue &Target, uint8_t *Data, uint64_t Value,
                   bool IsResolved) override {
-    // Like AArch64 ADRP, ADDTPC uses a page-based delta which can vary by one
-    // depending on the final section alignment. Even if a local target appears
-    // resolvable during assembly, the linker must make the final decision.
-    const bool ForceReloc =
-        (Fixup.getKind() == LinxISA::FIXUP_LINX_PCREL_HI20 ||
-         Fixup.getKind() == LinxISA::FIXUP_LINX_GOT_HI20);
+    // Delegate final encoding of selected PC-relative fixups to the linker.
+    //
+    // Rationale:
+    // - ADDTPC/GOT-HI20, like AArch64 ADRP, depends on final page layout.
+    // - Control-flow and setret fixups can be locally-resolved in .o files, but
+    //   in-section relaxation may still shift target distances before final
+    //   link. For these, force a relocation so LLD recomputes the immediate
+    //   after layout settles.
+    const bool ForceReloc = [&]() {
+      switch (Fixup.getKind()) {
+      case LinxISA::FIXUP_LINX_PCREL_HI20:
+      case LinxISA::FIXUP_LINX_GOT_HI20:
+      case LinxISA::FIXUP_LINX_B12_PCREL:
+      case LinxISA::FIXUP_LINX_J22_PCREL:
+      case LinxISA::FIXUP_LINX_CBSTART12_PCREL:
+      case LinxISA::FIXUP_LINX_B17_PCREL:
+      case LinxISA::FIXUP_LINX_B25_PCREL:
+      case LinxISA::FIXUP_LINX_B17_PLT:
+      case LinxISA::FIXUP_LINX_HL_BSTART30_PCREL:
+      case LinxISA::FIXUP_LINX_CSETRET5_PCREL:
+      case LinxISA::FIXUP_LINX_SETRET20_PCREL:
+      case LinxISA::FIXUP_LINX_HL_SETRET32_PCREL:
+        return true;
+      default:
+        return false;
+      }
+    }();
     if (ForceReloc)
       IsResolved = false;
 

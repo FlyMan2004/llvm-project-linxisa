@@ -868,7 +868,7 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
       llvm_unreachable("Unexpected opcode");
     }
 
-    SDValue Imm = CurDAG->getTargetConstant(ImmVal, DL, MVT::i32);
+    SDValue Imm = CurDAG->getSignedTargetConstant(ImmVal, DL, MVT::i32);
     ReplaceNode(N, CurDAG->getMachineNode(Opc, DL, VT, LHS, Imm));
     return;
   }

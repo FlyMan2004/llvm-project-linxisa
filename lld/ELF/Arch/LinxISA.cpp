@@ -197,7 +197,7 @@ static uint64_t encodeHLPcr29Store(Ctx &ctx, uint8_t *loc, int64_t value,
 class LinxISA final : public TargetInfo {
 public:
   LinxISA(Ctx &ctx);
-  RelType getDynRel(RelType type) const override { return type; }
+  RelType getDynRel(RelType type) const override;
   RelExpr getRelExpr(RelType type, const Symbol &s,
                      const uint8_t *loc) const override;
   bool usesOnlyLowPageBits(RelType type) const override;
@@ -214,8 +214,12 @@ LinxISA::LinxISA(Ctx &ctx) : TargetInfo(ctx) {
   copyRel = R_LINX_COPY;
   pltRel = R_LINX_JUMP_SLOT;
   relativeRel = R_LINX_RELATIVE;
-  iRelativeRel = R_LINX_RELATIVE;
+  iRelativeRel = R_LINX_IRELATIVE;
   symbolicRel = ctx.arg.is64 ? R_LINX_64 : R_LINX_32;
+  tlsModuleIndexRel = R_LINX_TLS_DTPMOD64;
+  tlsOffsetRel = R_LINX_TLS_DTPREL64;
+  tlsGotRel = R_LINX_TLS_TPREL64;
+  tlsDescRel = R_LINX_TLSDESC;
   gotRel = symbolicRel;
 
   // The LinxISA PLT is implemented as a sequence of standalone blocks. Each
@@ -230,6 +234,25 @@ LinxISA::LinxISA(Ctx &ctx) : TargetInfo(ctx) {
   pltHeaderSize = 0;
   pltEntrySize = 20;
   ipltEntrySize = pltEntrySize;
+}
+
+RelType LinxISA::getDynRel(RelType type) const {
+  switch (type) {
+  case R_LINX_RELATIVE:
+  case R_LINX_JUMP_SLOT:
+  case R_LINX_GLOB_DAT:
+  case R_LINX_COPY:
+  case R_LINX_IRELATIVE:
+  case R_LINX_TLS_DTPMOD64:
+  case R_LINX_TLS_DTPREL64:
+  case R_LINX_TLS_TPREL64:
+  case R_LINX_TLSDESC:
+  case R_LINX_32:
+  case R_LINX_64:
+    return type;
+  default:
+    return R_LINX_NONE;
+  }
 }
 
 RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
@@ -260,6 +283,12 @@ RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
     return R_GOT;
   case R_LINX_LO12:
     return R_ABS;
+  case R_LINX_TLS_DTPREL64:
+    return R_DTPREL;
+  case R_LINX_TLS_TPREL64:
+    return R_TPREL;
+  case R_LINX_TLSDESC:
+    return R_TLSDESC;
   default:
     return R_ABS;
   }
@@ -351,6 +380,16 @@ void LinxISA::relocate(uint8_t *loc, const Relocation &rel,
     write32le(loc, val);
     return;
   case R_LINX_64:
+    write64le(loc, val);
+    return;
+  case R_LINX_RELATIVE:
+  case R_LINX_JUMP_SLOT:
+  case R_LINX_GLOB_DAT:
+  case R_LINX_IRELATIVE:
+  case R_LINX_TLS_DTPMOD64:
+  case R_LINX_TLS_DTPREL64:
+  case R_LINX_TLS_TPREL64:
+  case R_LINX_TLSDESC:
     write64le(loc, val);
     return;
 
