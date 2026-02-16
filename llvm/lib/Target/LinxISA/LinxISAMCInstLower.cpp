@@ -12,6 +12,7 @@
 #include "MCTargetDesc/LinxISAMCAsmInfo.h"
 #include "MCTargetDesc/LinxISAMCTargetDesc.h"
 #include "MCTargetDesc/LinxISAOpcodeTables.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/CodeGen/AsmPrinter.h"
@@ -25,6 +26,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -171,8 +173,11 @@ bool LinxISAMCInstLower::lowerOperand(const MachineOperand &MO,
     const MCExpr *Expr =
         MCSymbolRefExpr::create(Printer.getSymbol(MO.getGlobal()), Ctx);
     Expr = withOffset(Expr, MO.getOffset(), Ctx);
-    if (MO.getTargetFlags() == LinxII::MO_PLT)
+    const unsigned TF = MO.getTargetFlags();
+    if (TF & LinxII::MO_PLT)
       Expr = MCSpecifierExpr::create(Expr, LinxISA::S_PLT, Ctx);
+    else if (TF & LinxII::MO_GOT)
+      Expr = MCSpecifierExpr::create(Expr, LinxISA::S_GOT, Ctx);
     OutOp = MCOperand::createExpr(Expr);
     return true;
   }
@@ -181,8 +186,11 @@ bool LinxISAMCInstLower::lowerOperand(const MachineOperand &MO,
         MCSymbolRefExpr::create(
             Printer.GetExternalSymbolSymbol(MO.getSymbolName()), Ctx);
     Expr = withOffset(Expr, MO.getOffset(), Ctx);
-    if (MO.getTargetFlags() == LinxII::MO_PLT)
+    const unsigned TF = MO.getTargetFlags();
+    if (TF & LinxII::MO_PLT)
       Expr = MCSpecifierExpr::create(Expr, LinxISA::S_PLT, Ctx);
+    else if (TF & LinxII::MO_GOT)
+      Expr = MCSpecifierExpr::create(Expr, LinxISA::S_GOT, Ctx);
     OutOp = MCOperand::createExpr(Expr);
     return true;
   }
@@ -262,6 +270,37 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     return Op;
   };
 
+  auto emitNamedImmFields =
+      [&](unsigned SpecOpc,
+          ArrayRef<std::pair<StringRef, int64_t>> NamedValues) -> void {
+    if (SpecOpc >= linxisa_inst_forms_count)
+      report_fatal_error("Linx: invalid spec opcode index");
+    const linxisa_inst_form &Form = linxisa_inst_forms[SpecOpc];
+    OutMI.setOpcode(SpecOpc);
+
+    for (unsigned i = 0; i < Form.field_count; ++i) {
+      const linxisa_field &Field = linxisa_fields[Form.field_start + i];
+      const StringRef FieldName(Field.name ? Field.name : "");
+      bool Found = false;
+      int64_t Value = 0;
+      for (const auto &KV : NamedValues) {
+        if (KV.first == FieldName) {
+          Value = KV.second;
+          Found = true;
+          break;
+        }
+      }
+      if (!Found) {
+        SmallString<96> Msg;
+        raw_svector_ostream OS(Msg);
+        OS << "Linx: missing value for field '" << FieldName
+           << "' in custom MC lowering";
+        report_fatal_error(OS.str());
+      }
+      OutMI.addOperand(MCOperand::createImm(Value));
+    }
+  };
+
   switch (Opc) {
   case LinxISA::CBSTART_STD: {
     // Compressed block start marker: `C.BSTART.STD BrType`.
@@ -335,6 +374,14 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   case LinxISA::BSTART_VSEQ: {
     const StringRef Mnem = (Opc == LinxISA::BSTART_VPAR) ? "BSTART.VPAR"
                                                          : "BSTART.VSEQ";
+    OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/1));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // Mode
+    return;
+  }
+  case LinxISA::BSTART_MPAR:
+  case LinxISA::BSTART_MSEQ: {
+    const StringRef Mnem = (Opc == LinxISA::BSTART_MPAR) ? "BSTART.MPAR"
+                                                          : "BSTART.MSEQ";
     OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/1));
     OutMI.addOperand(MCOperand::createImm(I(0))); // Mode
     return;
@@ -427,6 +474,236 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(I(5))); // SrcTile0
     OutMI.addOperand(MCOperand::createImm(I(6))); // SrcTile1
     OutMI.addOperand(MCOperand::createImm(I(7))); // imm5 (Size)
+    return;
+  }
+
+  case LinxISA::PSEUDO_V_ADD: {
+    emitNamedImmFields(
+        getSpecOpcode("V.ADD", /*LengthBits=*/64, /*Fields=*/5),
+        {{"RegDst", I(0)},
+         {"SrcL", I(1)},
+         {"SrcR", I(2)},
+         {"SrcRType", I(3)},
+         {"shamt", I(4)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_SUB: {
+    emitNamedImmFields(
+        getSpecOpcode("V.SUB", /*LengthBits=*/64, /*Fields=*/5),
+        {{"RegDst", I(0)},
+         {"SrcL", I(1)},
+         {"SrcR", I(2)},
+         {"SrcRType", I(3)},
+         {"shamt", I(4)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_FADD: {
+    emitNamedImmFields(getSpecOpcode("V.FADD", /*LengthBits=*/64, /*Fields=*/3),
+                       {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_FSUB: {
+    emitNamedImmFields(getSpecOpcode("V.FSUB", /*LengthBits=*/64, /*Fields=*/3),
+                       {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_FMUL: {
+    emitNamedImmFields(getSpecOpcode("V.FMUL", /*LengthBits=*/64, /*Fields=*/3),
+                       {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_FDIV: {
+    emitNamedImmFields(getSpecOpcode("V.FDIV", /*LengthBits=*/64, /*Fields=*/3),
+                       {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_CMP_EQ: {
+    emitNamedImmFields(
+        getSpecOpcode("V.CMP.EQ", /*LengthBits=*/64, /*Fields=*/3),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_CMP_NE: {
+    emitNamedImmFields(
+        getSpecOpcode("V.CMP.NE", /*LengthBits=*/64, /*Fields=*/3),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_CMP_LT: {
+    emitNamedImmFields(
+        getSpecOpcode("V.CMP.LT", /*LengthBits=*/64, /*Fields=*/3),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_CMP_LTU: {
+    emitNamedImmFields(
+        getSpecOpcode("V.CMP.LTU", /*LengthBits=*/64, /*Fields=*/3),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_CMP_GE: {
+    emitNamedImmFields(
+        getSpecOpcode("V.CMP.GE", /*LengthBits=*/64, /*Fields=*/3),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_CMP_GEU: {
+    emitNamedImmFields(
+        getSpecOpcode("V.CMP.GEU", /*LengthBits=*/64, /*Fields=*/3),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_FEQ: {
+    emitNamedImmFields(getSpecOpcode("V.FEQ", /*LengthBits=*/64, /*Fields=*/3),
+                       {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_FNE: {
+    emitNamedImmFields(getSpecOpcode("V.FNE", /*LengthBits=*/64, /*Fields=*/3),
+                       {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_FLT: {
+    emitNamedImmFields(getSpecOpcode("V.FLT", /*LengthBits=*/64, /*Fields=*/3),
+                       {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_FGE: {
+    emitNamedImmFields(getSpecOpcode("V.FGE", /*LengthBits=*/64, /*Fields=*/3),
+                       {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_CSEL: {
+    emitNamedImmFields(
+        getSpecOpcode("V.CSEL", /*LengthBits=*/64, /*Fields=*/5),
+        {{"RegDst", I(0)},
+         {"SrcP", I(1)},
+         {"SrcL", I(2)},
+         {"SrcR", I(3)},
+         {"SrcRType", I(4)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_LW_BRG: {
+    emitNamedImmFields(
+        getSpecOpcode("V.LW.BRG", /*LengthBits=*/64, /*Fields=*/6),
+        {{"C", 0},
+         {"L", I(4)},
+         {"RegDst", I(0)},
+         {"SrcL", I(1)},
+         {"SrcR", I(2)},
+         {"shamt", I(3)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_SW_BRG: {
+    emitNamedImmFields(
+        getSpecOpcode("V.SW.BRG", /*LengthBits=*/64, /*Fields=*/6),
+        {{"C", 0},
+         {"L", I(4)},
+         {"SrcD", I(0)},
+         {"SrcL", I(1)},
+         {"SrcR", I(2)},
+         {"shamt", I(3)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_RDADD: {
+    emitNamedImmFields(
+        getSpecOpcode("V.RDADD", /*LengthBits=*/64, /*Fields=*/2),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_RDAND: {
+    emitNamedImmFields(
+        getSpecOpcode("V.RDAND", /*LengthBits=*/64, /*Fields=*/2),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_RDFADD: {
+    emitNamedImmFields(
+        getSpecOpcode("V.RDFADD", /*LengthBits=*/64, /*Fields=*/2),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_RDFMAX: {
+    emitNamedImmFields(
+        getSpecOpcode("V.RDFMAX", /*LengthBits=*/64, /*Fields=*/2),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_RDFMIN: {
+    emitNamedImmFields(
+        getSpecOpcode("V.RDFMIN", /*LengthBits=*/64, /*Fields=*/2),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_RDMAX: {
+    emitNamedImmFields(
+        getSpecOpcode("V.RDMAX", /*LengthBits=*/64, /*Fields=*/2),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_RDMIN: {
+    emitNamedImmFields(
+        getSpecOpcode("V.RDMIN", /*LengthBits=*/64, /*Fields=*/2),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_RDOR: {
+    emitNamedImmFields(
+        getSpecOpcode("V.RDOR", /*LengthBits=*/64, /*Fields=*/2),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_RDXOR: {
+    emitNamedImmFields(
+        getSpecOpcode("V.RDXOR", /*LengthBits=*/64, /*Fields=*/2),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_B_EQ: {
+    OutMI.setOpcode(getSpecOpcode("B.EQ", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(I(1))); // SrcR
+    OutMI.addOperand(lowerBranchTarget(2));       // simm12 (pcrel)
+    return;
+  }
+  case LinxISA::PSEUDO_V_B_NE: {
+    OutMI.setOpcode(getSpecOpcode("B.NE", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(I(1))); // SrcR
+    OutMI.addOperand(lowerBranchTarget(2));       // simm12 (pcrel)
+    return;
+  }
+  case LinxISA::PSEUDO_V_B_LT: {
+    OutMI.setOpcode(getSpecOpcode("B.LT", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(I(1))); // SrcR
+    OutMI.addOperand(lowerBranchTarget(2));       // simm12 (pcrel)
+    return;
+  }
+  case LinxISA::PSEUDO_V_B_GE: {
+    OutMI.setOpcode(getSpecOpcode("B.GE", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(I(1))); // SrcR
+    OutMI.addOperand(lowerBranchTarget(2));       // simm12 (pcrel)
+    return;
+  }
+  case LinxISA::PSEUDO_V_B_LTU: {
+    OutMI.setOpcode(getSpecOpcode("B.LTU", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(I(1))); // SrcR
+    OutMI.addOperand(lowerBranchTarget(2));       // simm12 (pcrel)
+    return;
+  }
+  case LinxISA::PSEUDO_V_B_GEU: {
+    OutMI.setOpcode(getSpecOpcode("B.GEU", /*LengthBits=*/32, /*Fields=*/3));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // SrcL
+    OutMI.addOperand(MCOperand::createImm(I(1))); // SrcR
+    OutMI.addOperand(lowerBranchTarget(2));       // simm12 (pcrel)
+    return;
+  }
+  case LinxISA::PSEUDO_V_J: {
+    OutMI.setOpcode(getSpecOpcode("J", /*LengthBits=*/32, /*Fields=*/1));
+    OutMI.addOperand(lowerBranchTarget(0)); // simm20 (pcrel)
     return;
   }
 

@@ -40,6 +40,10 @@ public:
       : BaseT(TM, F.getDataLayout()), ST(TM->getSubtargetImpl(F)),
         TLI(ST->getTargetLowering()) {}
 
+  void getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
+                               TTI::UnrollingPreferences &UP,
+                               OptimizationRemarkEmitter *ORE) const override;
+
   // Linx bring-up: avoid generic vectorization creating very wide fixed-width
   // vectors (e.g. v1024i32 used for tile tokens) that the scalar pipeline does
   // not lower. Tile blocks are expressed via intrinsics and custom lowering.

@@ -28,7 +28,6 @@ public:
 
   unsigned getRelocType(const MCFixup &Fixup, const MCValue &,
                         bool IsPCRel) const override {
-    (void)IsPCRel;
     // Map Linx fixup kinds to an ELF relocation type. This is a minimal set
     // sufficient for early bring-up (control-flow and basic data relocations).
     const unsigned Kind = Fixup.getKind();
@@ -57,6 +56,10 @@ public:
       return ELF::R_LINX_HL_SETRET32_PCREL;
     case LinxISA::FIXUP_LINX_PCREL_HI20:
       return ELF::R_LINX_PCREL_HI20;
+    case LinxISA::FIXUP_LINX_GOT_HI20:
+      return ELF::R_LINX_GOT_HI20;
+    case LinxISA::FIXUP_LINX_GOT_LO12:
+      return ELF::R_LINX_GOT_LO12;
     case LinxISA::FIXUP_LINX_PCR17_LOAD:
       return ELF::R_LINX_PCR17_LOAD;
     case LinxISA::FIXUP_LINX_PCR17_STORE:
@@ -68,7 +71,7 @@ public:
     case LinxISA::FIXUP_LINX_LO12:
       return ELF::R_LINX_LO12;
     case FK_Data_4:
-      return ELF::R_LINX_32;
+      return IsPCRel ? ELF::R_LINX_32_PCREL : ELF::R_LINX_32;
     case FK_Data_8:
       return ELF::R_LINX_64;
     }

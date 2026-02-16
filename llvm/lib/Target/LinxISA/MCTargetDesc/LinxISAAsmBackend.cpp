@@ -467,7 +467,7 @@ public:
     // Delegate final encoding of selected PC-relative fixups to the linker.
     //
     // Rationale:
-    // - ADDTPC (PCREL_HI20), like AArch64 ADRP, depends on final page layout.
+    // - ADDTPC/GOT-HI20, like AArch64 ADRP, depends on final page layout.
     // - Control-flow and setret fixups can be locally-resolved in .o files, but
     //   in-section relaxation may still shift target distances before final
     //   link. For these, force a relocation so LLD recomputes the immediate
@@ -475,6 +475,7 @@ public:
     const bool ForceReloc = [&]() {
       switch (Fixup.getKind()) {
       case LinxISA::FIXUP_LINX_PCREL_HI20:
+      case LinxISA::FIXUP_LINX_GOT_HI20:
       case LinxISA::FIXUP_LINX_B12_PCREL:
       case LinxISA::FIXUP_LINX_J22_PCREL:
       case LinxISA::FIXUP_LINX_CBSTART12_PCREL:
@@ -566,6 +567,12 @@ public:
     case LinxISA::FIXUP_LINX_PCREL_HI20:
       Patch = encodePcrelHi20(Value);
       break;
+    case LinxISA::FIXUP_LINX_GOT_HI20:
+      Patch = encodePcrelHi20(Value);
+      break;
+    case LinxISA::FIXUP_LINX_GOT_LO12:
+      Patch = encodeLo12(Value);
+      break;
     case LinxISA::FIXUP_LINX_LO12:
       Patch = encodeLo12(Value);
       break;
@@ -645,6 +652,10 @@ public:
         {"FIXUP_LINX_HL_SETRET32_PCREL", 0, 32, 0},
         // PC-relative page offset for ADDTPC (imm20 << 12).
         {"FIXUP_LINX_PCREL_HI20", 12, 20, 0},
+        // GOT page offset for ADDTPC (imm20 << 12).
+        {"FIXUP_LINX_GOT_HI20", 12, 20, 0},
+        // Absolute low 12 bits of the GOT entry address for ADDI/ADDIW.
+        {"FIXUP_LINX_GOT_LO12", 20, 12, 0},
         // Absolute low 12 bits for ADDI/ADDIW (uimm12).
         {"FIXUP_LINX_LO12", 20, 12, 0},
         {"FIXUP_LINX_PCR17_LOAD", 0, 17, 0},

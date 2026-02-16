@@ -177,6 +177,10 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   // Variadic argument lowering (va_start/va_arg/va_end).
   setOperationAction(ISD::VASTART, MVT::Other, Custom);
   setOperationAction({ISD::VAARG, ISD::VACOPY, ISD::VAEND}, MVT::Other, Expand);
+  setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i64, Expand);
+  setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i32, Expand);
+  setOperationAction(ISD::STACKSAVE, MVT::Other, Expand);
+  setOperationAction(ISD::STACKRESTORE, MVT::Other, Expand);
 
   // Dynamic stack allocations (VLAs/alloca with runtime size).
   //
@@ -217,28 +221,25 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   //===----------------------------------------------------------------------===//
   // Floating Point Operations
   //===----------------------------------------------------------------------===//
-  // LinxISA implements scalar floating-point arithmetic using the existing
-  // reg5 register file (no separate architectural FPR file). For bring-up we
-  // enable f32/f64 hard-float operations and keep everything else as libcalls.
-
-  // f32/f64 arithmetic.
-  setOperationAction(ISD::FADD, MVT::f32, Custom);
-  setOperationAction(ISD::FSUB, MVT::f32, Custom);
-  setOperationAction(ISD::FMUL, MVT::f32, Custom);
-  setOperationAction(ISD::FDIV, MVT::f32, Custom);
-  setOperationAction(ISD::FNEG, MVT::f32, Custom);
-  setOperationAction(ISD::FABS, MVT::f32, Custom);
+  // LinxCore bring-up currently relies on software floating-point execution.
+  // Force scalar FP arithmetic/compare/convert to expand into libcalls instead
+  // of selecting hard-float machine instructions.
+  setOperationAction(ISD::FADD, MVT::f32, Expand);
+  setOperationAction(ISD::FSUB, MVT::f32, Expand);
+  setOperationAction(ISD::FMUL, MVT::f32, Expand);
+  setOperationAction(ISD::FDIV, MVT::f32, Expand);
+  setOperationAction(ISD::FNEG, MVT::f32, Expand);
+  setOperationAction(ISD::FABS, MVT::f32, Expand);
   setOperationAction(ISD::SETCC, MVT::f32, Custom);
 
-  setOperationAction(ISD::FADD, MVT::f64, Custom);
-  setOperationAction(ISD::FSUB, MVT::f64, Custom);
-  setOperationAction(ISD::FMUL, MVT::f64, Custom);
-  setOperationAction(ISD::FDIV, MVT::f64, Custom);
-  setOperationAction(ISD::FNEG, MVT::f64, Custom);
-  setOperationAction(ISD::FABS, MVT::f64, Custom);
+  setOperationAction(ISD::FADD, MVT::f64, Expand);
+  setOperationAction(ISD::FSUB, MVT::f64, Expand);
+  setOperationAction(ISD::FMUL, MVT::f64, Expand);
+  setOperationAction(ISD::FDIV, MVT::f64, Expand);
+  setOperationAction(ISD::FNEG, MVT::f64, Expand);
+  setOperationAction(ISD::FABS, MVT::f64, Expand);
   setOperationAction(ISD::SETCC, MVT::f64, Custom);
 
-  // Leave more complex ops as libcalls for now.
   setOperationAction(ISD::FREM, MVT::f32, Expand);
   setOperationAction(ISD::FSQRT, MVT::f32, Expand);
   setOperationAction(ISD::FCOPYSIGN, MVT::f32, Expand);
@@ -251,7 +252,6 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::FEXP2, MVT::f64, Expand);
   setOperationAction(ISD::FLOG2, MVT::f64, Expand);
 
-  // Conversions (action keyed by the source operand type).
   setOperationAction(ISD::FP_TO_SINT, MVT::i32, Custom);
   setOperationAction(ISD::FP_TO_UINT, MVT::i32, Custom);
   setOperationAction(ISD::FP_TO_SINT, MVT::i64, Custom);
@@ -262,11 +262,8 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::SINT_TO_FP, MVT::i64, Custom);
   setOperationAction(ISD::UINT_TO_FP, MVT::i64, Custom);
 
-  // FP_ROUND/FP_EXTEND are keyed by the result type.
-  setOperationAction(ISD::FP_ROUND, MVT::f32, Custom);
-  setOperationAction(ISD::FP_EXTEND, MVT::f64, Custom);
-
-  // FMA (fused multiply-add) stays as a libcall until explicitly enabled.
+  setOperationAction(ISD::FP_ROUND, MVT::f32, Expand);
+  setOperationAction(ISD::FP_EXTEND, MVT::f64, Expand);
   setOperationAction(ISD::FMA, MVT::f32, Expand);
   setOperationAction(ISD::FMA, MVT::f64, Expand);
 
@@ -343,6 +340,13 @@ SDValue LinxISATargetLowering::LowerOperation(SDValue Op,
   default:
     return SDValue();
   }
+}
+
+bool LinxISATargetLowering::areJTsAllowed(const Function *Fn) const {
+  (void)Fn;
+  // Bring-up policy: keep switches in compare/branch form until Linx PIC jump
+  // table entries have a fully relocation-safe encoding.
+  return false;
 }
 
 SDValue LinxISATargetLowering::LowerBR(SDValue Op, SelectionDAG &DAG) const {
@@ -1239,18 +1243,31 @@ SDValue LinxISATargetLowering::LowerGlobalAddress(SDValue Op,
   GlobalAddressSDNode *N = cast<GlobalAddressSDNode>(Op);
   const GlobalValue *GV = N->getGlobal();
   int64_t Offset = N->getOffset();
+  const TargetMachine &TM = getTargetMachine();
+
+  // In PIC mode, non-DSO-local globals must be addressed through the GOT to
+  // avoid text relocations in shared objects.
+  const bool UseGOT = TM.isPositionIndependent() && !TM.shouldAssumeDSOLocal(GV);
+  const unsigned Flags = UseGOT ? LinxII::MO_GOT : LinxII::MO_NO_FLAG;
 
   // PC-relative global address materialization.
   //
   // ADDTPC's immediate is page-scaled (imm20 << 12). Materialize the full
   // address via:
   //   ADDTPC (page of symbol) + ADDI/ADDIW (low 12 bits).
-  SDValue GA = DAG.getTargetGlobalAddress(GV, DL, Ty, Offset);
+  SDValue GA = DAG.getTargetGlobalAddress(GV, DL, Ty, Offset, Flags);
 
   SDValue Page = SDValue(DAG.getMachineNode(LinxISA::ADDTPC, DL, Ty, GA), 0);
   const unsigned AddOpc =
       (Ty == MVT::i32) ? LinxISA::ADDIWri : LinxISA::ADDIri;
-  return SDValue(DAG.getMachineNode(AddOpc, DL, Ty, Page, GA), 0);
+  SDValue Addr = SDValue(DAG.getMachineNode(AddOpc, DL, Ty, Page, GA), 0);
+
+  if (!UseGOT)
+    return Addr;
+
+  SDValue ZeroOff = DAG.getTargetConstant(0, DL, MVT::i64);
+  const unsigned LoadOpc = (Ty == MVT::i32) ? LinxISA::LWI : LinxISA::LDI;
+  return SDValue(DAG.getMachineNode(LoadOpc, DL, Ty, Addr, ZeroOff), 0);
 }
 
 SDValue LinxISATargetLowering::LowerGlobalTLSAddress(
@@ -1399,18 +1416,11 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &DL,
     SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
-  // LinxISA bring-up ABI: reserve a fixed "call frame"/home area above the
-  // local stack frame. The QEMU model adjusts SP by (StackSize + CallFrameSize)
-  // in the FENTRY/FRET.* template blocks.
-  //
-  // Stack-passed arguments are laid out by the caller at the entry SP (before
-  // FENTRY), so after the template SP adjustment they appear at
-  //   SP + StackSize + CallFrameSize + ArgOffset.
-  //
-  // Our eliminateFrameIndex logic materializes addresses as
-  //   SP + StackSize + FixedObjectOffset,
-  // so we bias the fixed-object offsets by CallFrameSize to compensate.
-  static constexpr int64_t CallFrameSize = 64;
+  // Stack-passed arguments are addressed from the callee stack pointer after
+  // prologue emission as:
+  //   SP + StackSize + ArgOffset
+  // Do not add any extra fixed home/call-frame bias here. The current Linx
+  // FENTRY/FRET implementation already uses plain StackSize adjustment.
 
   // Varargs support is limited during bring-up.
   // All varargs must be passed on stack.
@@ -1443,7 +1453,7 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
     } else {
       assert(VA.isMemLoc() && "Unknown argument location");
       int FI = MFI.CreateFixedObject(LocVT.getStoreSize(),
-                                     VA.getLocMemOffset() + CallFrameSize,
+                                     VA.getLocMemOffset(),
                                      /*IsImmutable=*/true);
       SDValue FIN = DAG.getFrameIndex(FI, PtrVT);
       SDValue Load = DAG.getLoad(LocVT, DL, Chain, FIN,
@@ -1462,7 +1472,7 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
     // variadic arguments are passed on the stack with natural size/alignment
     // (see LinxISACallingConv.td). The varargs area therefore begins at the
     // first stack slot after the fixed arguments.
-    const int VaArgOffset = CCInfo.getStackSize() + CallFrameSize;
+    const int VaArgOffset = CCInfo.getStackSize();
     const int FI = MFI.CreateFixedObject(/*Size=*/1, VaArgOffset,
                                          /*IsImmutable=*/true);
     FuncInfo->setVarArgsFrameIndex(FI);

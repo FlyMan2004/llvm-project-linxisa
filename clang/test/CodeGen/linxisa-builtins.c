@@ -5,7 +5,7 @@ void test_vblock_launch(void) {
 }
 
 // CHECK-LABEL: define{{.*}} void @test_vblock_launch
-// CHECK: call void @llvm.linx.vblock.launch(i32 0, ptr null, i64 3, i64 4, i64 5, i32 7)
+// CHECK: call void @llvm.linx.vblock.launch(i32 0, ptr null, i64 3, i64 4, i64 5, i32 7, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)
 
 typedef int tile_i32 __attribute__((vector_size(4096)));
 

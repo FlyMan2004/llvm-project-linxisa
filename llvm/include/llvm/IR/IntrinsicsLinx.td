@@ -99,19 +99,31 @@ let TargetPrefix = "linx" in {
   // This intrinsic acts as a compiler-facing hook to emit a decoupled block
   // header that references an out-of-line linear body via B.TEXT.
   //
+  // Decoupled launch contract:
+  // - Header carries only descriptors and B.TEXT body pointer.
+  // - Body is linear and terminated by C.BSTOP.
+  // - LB0 = lane count, LB1 = group count, LB2 = extent2.
+  // - Lane replay index is lc0 + lc1 * lane_count (lb0/lb1 semantics).
+  //
   // Bring-up lowering policy:
-  // - vkind: 0 = VSEQ, 1 = VPAR
+  // - vkind: 0 = MSEQ, 1 = MPAR
   // - body_sym is currently a placeholder symbol anchor; the backend emits a
   //   per-function empty body stub for now.
   // - dim0..2 and attr_bits must be constants in the initial implementation.
   // -------------------------------------------------------------------------
 
   // void @llvm.linx.vblock.launch(i32 vkind, ptr body_sym,
-  //                               i64 dim0, i64 dim1, i64 dim2, i32 attr_bits)
+  //                               i64 dim0, i64 dim1, i64 dim2, i32 attr_bits,
+  //                               i64 bind0, i64 bind1, i64 bind2,
+  //                               i64 bind3, i64 bind4, i64 bind5)
+  //
+  // bindN are compiler-managed scalar inputs that will be bound to the SIMT
+  // `ri*` namespace via header `B.IOR` descriptors in v0.3 mode.
   def int_linx_vblock_launch :
       Intrinsic<[],
                 [llvm_i32_ty, llvm_ptr_ty, llvm_i64_ty, llvm_i64_ty, llvm_i64_ty,
-                 llvm_i32_ty],
+                 llvm_i32_ty, llvm_i64_ty, llvm_i64_ty, llvm_i64_ty, llvm_i64_ty,
+                 llvm_i64_ty, llvm_i64_ty],
                 [IntrNoMem, IntrHasSideEffects]>;
 
   // -------------------------------------------------------------------------

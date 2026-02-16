@@ -184,12 +184,62 @@ bool LinxISAAsmPrinter::PrintAsmMemoryOperand(const MachineInstr *MI,
                                              unsigned OpNo,
                                              const char *ExtraCode,
                                              raw_ostream &OS) {
-  // TODO: Implement when Linx inline asm starts using memory constraints.
-  (void)MI;
-  (void)OpNo;
-  (void)ExtraCode;
-  (void)OS;
-  return true;
+  if (ExtraCode && ExtraCode[0] != 0)
+    return true;
+
+  if (!MCInstLowering)
+    return true;
+  if (OpNo >= MI->getNumOperands())
+    return true;
+
+  auto PrintOne = [&](const MachineOperand &MO) -> bool {
+    if (MO.isReg()) {
+      const unsigned Enc = MCInstLowering->getReg5Encoding(MO.getReg());
+      OS << linxReg5Name(Enc);
+      return false;
+    }
+
+    if (MO.isImm()) {
+      OS << MO.getImm();
+      return false;
+    }
+
+    if (MO.isCImm()) {
+      OS << MO.getCImm()->getSExtValue();
+      return false;
+    }
+
+    MCOperand MCOp;
+    if (MCInstLowering->lowerOperand(MO, MCOp) && MCOp.isExpr()) {
+      MAI->printExpr(OS, *MCOp.getExpr());
+      return false;
+    }
+
+    return true;
+  };
+
+  const MachineOperand &BaseMO = MI->getOperand(OpNo);
+  OS << "[";
+  if (PrintOne(BaseMO))
+    return true;
+
+  if (OpNo + 1 < MI->getNumOperands()) {
+    const MachineOperand &OffMO = MI->getOperand(OpNo + 1);
+    bool EmitOffset = true;
+    if (OffMO.isImm() && OffMO.getImm() == 0)
+      EmitOffset = false;
+    if (OffMO.isCImm() && OffMO.getCImm()->isZero())
+      EmitOffset = false;
+
+    if (EmitOffset) {
+      OS << ", ";
+      if (PrintOne(OffMO))
+        return true;
+    }
+  }
+
+  OS << "]";
+  return false;
 }
 
 char LinxISAAsmPrinter::ID = 0;
