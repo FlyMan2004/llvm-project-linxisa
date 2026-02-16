@@ -178,6 +178,19 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::VASTART, MVT::Other, Custom);
   setOperationAction({ISD::VAARG, ISD::VACOPY, ISD::VAEND}, MVT::Other, Expand);
 
+  // Dynamic stack allocations (VLAs/alloca with runtime size).
+  //
+  // Without explicit legalization, SelectionDAG may leave
+  // ISD::DYNAMIC_STACKALLOC in the DAG and instruction selection crashes on
+  // functions such as musl's getcwd() that use runtime-sized stack objects.
+  setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i64, Expand);
+  setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i32, Expand);
+  // Likewise expand stack save/restore until dedicated lowering exists.
+  // These nodes are keyed on the chain type (MVT::Other), not pointer width.
+  // musl locale code can otherwise fail with "Cannot select ... stacksave".
+  setOperationAction(ISD::STACKSAVE, MVT::Other, Expand);
+  setOperationAction(ISD::STACKRESTORE, MVT::Other, Expand);
+
   // Bring-up: avoid introducing target-specific select/cmov patterns.
   setOperationAction(ISD::SELECT, MVT::i32, Custom);
   setOperationAction(ISD::SELECT, MVT::i64, Custom);
@@ -1293,11 +1306,93 @@ SDValue LinxISATargetLowering::LowerVASTART(SDValue Op,
                       MachinePointerInfo(SV));
 }
 
-static SDValue convertLocVTToValVT(SDValue V, MVT ValVT, const SDLoc &DL,
-                                  SelectionDAG &DAG) {
-  if (V.getValueType() != ValVT)
-    V = DAG.getNode(ISD::TRUNCATE, DL, ValVT, V);
-  return V;
+static SDValue bitcastAndResizeToVT(SelectionDAG &DAG, SDValue V, EVT DstVT,
+                                    const SDLoc &DL) {
+  EVT SrcVT = V.getValueType();
+  if (SrcVT == DstVT)
+    return V;
+
+  auto toInt = [&](SDValue X) -> SDValue {
+    EVT XVT = X.getValueType();
+    if (XVT.isInteger())
+      return X;
+    EVT IntVT = EVT::getIntegerVT(*DAG.getContext(), XVT.getSizeInBits());
+    return DAG.getNode(ISD::BITCAST, DL, IntVT, X);
+  };
+
+  SDValue IntV = toInt(V);
+  EVT DstIntVT =
+      DstVT.isInteger() ? DstVT
+                        : EVT::getIntegerVT(*DAG.getContext(), DstVT.getSizeInBits());
+  unsigned SrcBits = IntV.getValueType().getSizeInBits();
+  unsigned DstBits = DstIntVT.getSizeInBits();
+  if (SrcBits > DstBits)
+    IntV = DAG.getNode(ISD::TRUNCATE, DL, DstIntVT, IntV);
+  else if (SrcBits < DstBits)
+    IntV = DAG.getNode(ISD::ANY_EXTEND, DL, DstIntVT, IntV);
+
+  if (DstVT.isInteger())
+    return IntV;
+  return DAG.getNode(ISD::BITCAST, DL, DstVT, IntV);
+}
+
+// Convert a location-typed value coming from the ABI into the IR value type.
+static SDValue convertLocVTToValVT(SelectionDAG &DAG, SDValue V,
+                                   const CCValAssign &VA, const SDLoc &DL) {
+  EVT LocVT = VA.getLocVT();
+  EVT ValVT = VA.getValVT();
+
+  switch (VA.getLocInfo()) {
+  default:
+    llvm_unreachable("Unexpected CCValAssign::LocInfo");
+  case CCValAssign::Full:
+  case CCValAssign::Indirect:
+  case CCValAssign::BCvt:
+    return bitcastAndResizeToVT(DAG, V, ValVT, DL);
+  case CCValAssign::SExt:
+  case CCValAssign::ZExt:
+  case CCValAssign::AExt:
+    if (LocVT.isInteger() && ValVT.isInteger() &&
+        LocVT.getSizeInBits() > ValVT.getSizeInBits())
+      return DAG.getNode(ISD::TRUNCATE, DL, ValVT, V);
+    return bitcastAndResizeToVT(DAG, V, ValVT, DL);
+  }
+}
+
+// Convert an IR value into the ABI location type before call/return emission.
+static SDValue convertValVTToLocVT(SelectionDAG &DAG, SDValue V,
+                                   const CCValAssign &VA, const SDLoc &DL) {
+  EVT LocVT = VA.getLocVT();
+  EVT ValVT = VA.getValVT();
+
+  switch (VA.getLocInfo()) {
+  default:
+    llvm_unreachable("Unexpected CCValAssign::LocInfo");
+  case CCValAssign::Full:
+  case CCValAssign::Indirect:
+  case CCValAssign::BCvt:
+    return bitcastAndResizeToVT(DAG, V, LocVT, DL);
+  case CCValAssign::SExt:
+  case CCValAssign::ZExt:
+  case CCValAssign::AExt:
+    if (!(LocVT.isInteger() && ValVT.isInteger()))
+      return bitcastAndResizeToVT(DAG, V, LocVT, DL);
+    if (ValVT.getSizeInBits() > LocVT.getSizeInBits())
+      return DAG.getNode(ISD::TRUNCATE, DL, LocVT, V);
+    if (ValVT.getSizeInBits() < LocVT.getSizeInBits()) {
+      switch (VA.getLocInfo()) {
+      case CCValAssign::SExt:
+        return DAG.getNode(ISD::SIGN_EXTEND, DL, LocVT, V);
+      case CCValAssign::ZExt:
+        return DAG.getNode(ISD::ZERO_EXTEND, DL, LocVT, V);
+      case CCValAssign::AExt:
+        return DAG.getNode(ISD::ANY_EXTEND, DL, LocVT, V);
+      default:
+        llvm_unreachable("Unexpected CCValAssign::LocInfo");
+      }
+    }
+    return V;
+  }
 }
 
 SDValue LinxISATargetLowering::LowerFormalArguments(
@@ -1337,7 +1432,6 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
   for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
     const CCValAssign &VA = ArgLocs[i];
     MVT LocVT = VA.getLocVT();
-    MVT ValVT = VA.getValVT();
 
     SDValue V;
     if (VA.isRegLoc()) {
@@ -1358,7 +1452,7 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
       Chain = Load.getValue(1);
     }
 
-    V = convertLocVTToValVT(V, ValVT, DL, DAG);
+    V = convertLocVTToValVT(DAG, V, VA, DL);
     InVals.push_back(V);
   }
 
@@ -1397,14 +1491,13 @@ static SDValue lowerCallResult(SDValue Chain, SDValue InGlue,
 
   for (const CCValAssign &VA : RVLocs) {
     MVT LocVT = VA.getLocVT();
-    MVT ValVT = VA.getValVT();
 
     SDValue Copy = DAG.getCopyFromReg(Chain, DL, VA.getLocReg(), LocVT, InGlue);
     SDValue V = Copy.getValue(0);
     Chain = Copy.getValue(1);
     InGlue = Copy.getValue(2);
 
-    V = convertLocVTToValVT(V, ValVT, DL, DAG);
+    V = convertLocVTToValVT(DAG, V, VA, DL);
     InVals.push_back(V);
   }
 
@@ -1416,8 +1509,9 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
   SelectionDAG &DAG = CLI.DAG;
   SDLoc DL(CLI.DL);
 
-  // Bring-up: do not attempt tail call lowering.
-  CLI.IsTailCall = false;
+  const bool IsMustTail = CLI.IsTailCall && CLI.CB && CLI.CB->isMustTailCall();
+  // Tail-call rollout is musttail-first for Linx.
+  CLI.IsTailCall = IsMustTail;
 
   SDValue Chain = CLI.Chain;
   SDValue Callee = CLI.Callee;
@@ -1440,7 +1534,17 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
   unsigned NumBytes = CCInfo.getStackSize();
   // Keep the stack aligned at call boundaries.
   NumBytes = alignTo(NumBytes, 16u);
-  Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
+  const bool UseTailCall = CLI.IsTailCall;
+  if (UseTailCall) {
+    if (NumBytes != 0) {
+      report_fatal_error("Linx: musttail with stack arguments is not supported");
+    }
+    if (IsVarArg) {
+      report_fatal_error("Linx: musttail varargs calls are not supported");
+    }
+  } else {
+    Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
+  }
 
   SmallVector<std::pair<unsigned, SDValue>, 8> RegsToPass;
   SmallVector<SDValue, 16> MemOpChains;
@@ -1451,21 +1555,7 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
     const CCValAssign &VA = ArgLocs[i];
     SDValue Arg = CLI.OutVals[i];
 
-    switch (VA.getLocInfo()) {
-    case CCValAssign::Full:
-      break;
-    case CCValAssign::SExt:
-      Arg = DAG.getNode(ISD::SIGN_EXTEND, DL, VA.getLocVT(), Arg);
-      break;
-    case CCValAssign::ZExt:
-      Arg = DAG.getNode(ISD::ZERO_EXTEND, DL, VA.getLocVT(), Arg);
-      break;
-    case CCValAssign::AExt:
-      Arg = DAG.getNode(ISD::ANY_EXTEND, DL, VA.getLocVT(), Arg);
-      break;
-    default:
-      llvm_unreachable("Unexpected CCValAssign::LocInfo");
-    }
+    Arg = convertValVTToLocVT(DAG, Arg, VA, DL);
 
     if (VA.isRegLoc()) {
       RegsToPass.push_back({VA.getLocReg(), Arg});
@@ -1473,6 +1563,8 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
     }
 
     assert(VA.isMemLoc() && "Unknown call argument location");
+    if (UseTailCall)
+      report_fatal_error("Linx: musttail with memory argument location is not supported");
 
     if (!StackPtr.getNode())
       StackPtr = DAG.getCopyFromReg(Chain, DL, LinxISA::R1, PtrVT);
@@ -1523,9 +1615,15 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
   if (InGlue.getNode())
     Ops.push_back(InGlue);
 
-  MachineSDNode *Call = DAG.getMachineNode(LinxISA::PSEUDO_CALL, DL, NodeTys, Ops);
+  const unsigned CallOpc =
+      UseTailCall ? LinxISA::PSEUDO_TAILCALL : LinxISA::PSEUDO_CALL;
+  MachineSDNode *Call = DAG.getMachineNode(CallOpc, DL, NodeTys, Ops);
   Chain = SDValue(Call, 0);
   InGlue = SDValue(Call, 1);
+
+  if (UseTailCall) {
+    return Chain;
+  }
 
   Chain = DAG.getCALLSEQ_END(Chain, NumBytes, 0, InGlue, DL);
   InGlue = Chain.getValue(1);
@@ -1558,21 +1656,7 @@ SDValue LinxISATargetLowering::LowerReturn(
     const CCValAssign &VA = RVLocs[i];
     SDValue Val = OutVals[i];
 
-    switch (VA.getLocInfo()) {
-    case CCValAssign::Full:
-      break;
-    case CCValAssign::SExt:
-      Val = DAG.getNode(ISD::SIGN_EXTEND, DL, VA.getLocVT(), Val);
-      break;
-    case CCValAssign::ZExt:
-      Val = DAG.getNode(ISD::ZERO_EXTEND, DL, VA.getLocVT(), Val);
-      break;
-    case CCValAssign::AExt:
-      Val = DAG.getNode(ISD::ANY_EXTEND, DL, VA.getLocVT(), Val);
-      break;
-    default:
-      llvm_unreachable("Unexpected CCValAssign::LocInfo");
-    }
+    Val = convertValVTToLocVT(DAG, Val, VA, DL);
 
     Chain = DAG.getCopyToReg(Chain, DL, VA.getLocReg(), Val, Glue);
     Glue = Chain.getValue(1);

@@ -185,14 +185,16 @@ def CallTarget : Operand<iPTR> {
 let isCall = 1, hasSideEffects = 1, Size = 6, Uses = [R1], Defs = [R10] in
 def PSEUDO_CALL : Pseudo<(outs), (ins CallTarget:$dst), "# PSEUDO_CALL", []>;
 
-// Keep ABI return registers live at the return terminator so that MachineDCE
-// does not drop CopyToReg sequences emitted by LowerReturn.
-//
-// Bring-up note: we conservatively list both a0/a1 here, even for void
-// functions. This matches the current scalar ABI (single-reg returns in a0,
-// and potential multi-reg returns in a0/a1) and avoids intermittent return
-// register mis-compiles under optimization.
-let isReturn = 1, isTerminator = 1, Size = 4, Uses = [R10, R2, R3] in
+// Musttail-first lowering form: transfer control after frame teardown without
+// materializing a new return address in `ra`.
+let isCall = 1, isReturn = 1, isTerminator = 1, isBarrier = 1,
+    hasSideEffects = 1, Size = 6,
+    Uses = [R1, R10] in
+def PSEUDO_TAILCALL : Pseudo<(outs), (ins CallTarget:$dst), "# PSEUDO_TAILCALL", []>;
+
+// Return value registers are attached as explicit machine operands by
+// LowerReturn. Keep only `ra` as a static implicit use here.
+let isReturn = 1, isTerminator = 1, Size = 4, Uses = [R10] in
 def PSEUDO_RET : Pseudo<(outs), (ins), "# PSEUDO_RET", [(RetGlue)]>;
 
 def : Pat<(Call tglobaladdr:$dst), (PSEUDO_CALL tglobaladdr:$dst)>;

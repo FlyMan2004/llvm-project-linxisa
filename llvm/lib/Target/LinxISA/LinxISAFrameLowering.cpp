@@ -8,9 +8,9 @@
 //
 // This file contains the LinxISA implementation of TargetFrameLowering.
 // 
-// LinxISA uses FENTRY and FRET.STK instructions for function prologue/epilogue.
-// These are hardware macro instructions that expand to save/restore register
-// sequences. The register range [ra ~ sN] specifies which registers to save.
+// LinxISA uses FENTRY/FEXIT/FRET.STK frame-template instructions for
+// function prologue/epilogue and tail-transfer exits. These are hardware macro
+// instructions that expand to save/restore register sequences.
 //
 //===----------------------------------------------------------------------===//
 
@@ -158,6 +158,57 @@ void LinxISAFrameLowering::emitEpilogue(MachineFunction &MF,
       *static_cast<const LinxISAInstrInfo *>(MF.getSubtarget().getInstrInfo());
 
   auto [RegBeginEnc, RegEndEnc] = getFentryRangeEnc(MF);
+
+  MachineInstr *TailCallMI = nullptr;
+  for (MachineInstr &MI : llvm::reverse(MBB)) {
+    if (MI.isDebugInstr() || MI.isCFIInstruction())
+      continue;
+    if (MI.getOpcode() == LinxISA::PSEUDO_TAILCALL) {
+      TailCallMI = &MI;
+      break;
+    }
+    break;
+  }
+
+  if (TailCallMI) {
+    auto It = TailCallMI->getIterator();
+    ++It;
+    auto E = MBB.end();
+    for (; It != E; ++It) {
+      if (It->isDebugInstr() || It->isCFIInstruction())
+        continue;
+      if (It->getOpcode() == LinxISA::PSEUDO_RET)
+        continue;
+      report_fatal_error(
+          "Linx: musttail block contains non-return instructions after PSEUDO_TAILCALL");
+    }
+
+    MachineBasicBlock *FExitBB = MF.CreateMachineBasicBlock(MBB.getBasicBlock());
+    MachineBasicBlock *TailBB = MF.CreateMachineBasicBlock(MBB.getBasicBlock());
+    MF.insert(std::next(MBB.getIterator()), FExitBB);
+    MF.insert(std::next(FExitBB->getIterator()), TailBB);
+
+    TailBB->splice(TailBB->end(), &MBB, TailCallMI->getIterator(), MBB.end());
+    for (auto It = TailBB->begin(); It != TailBB->end();) {
+      if (It->getOpcode() == LinxISA::PSEUDO_RET) {
+        It = TailBB->erase(It);
+      } else {
+        ++It;
+      }
+    }
+
+    TailBB->transferSuccessorsAndUpdatePHIs(&MBB);
+    MBB.addSuccessor(FExitBB);
+    FExitBB->addSuccessor(TailBB);
+
+    BuildMI(*FExitBB, FExitBB->end(), DebugLoc(), TII.get(LinxISA::FEXIT))
+        .addImm(RegBeginEnc)
+        .addImm(RegEndEnc)
+        .addImm(StackSize);
+    FExitBB->addLiveIn(LinxISA::R1);
+    FExitBB->addLiveIn(LinxISA::R10);
+    return;
+  }
 
   MachineInstr *RetMI = nullptr;
   for (MachineInstr &MI : llvm::reverse(MBB)) {

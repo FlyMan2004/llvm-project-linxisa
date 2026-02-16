@@ -392,9 +392,8 @@ public:
       return TailBB;
     };
 
-    // Ensure PSEUDO_CALL ends a block. This matches BlockISA: the call is the
-    // block's outgoing control-flow (encoded in the BSTART header), and the
-    // return target is the next block (encoded via SETRET).
+    // Ensure call-transfer pseudos end a block. This matches BlockISA: call
+    // headers are block exits, and musttail transfer pseudos are terminators.
     SmallVector<MachineBasicBlock *, 32> CallSplitWorklist;
     CallSplitWorklist.reserve(MF.size());
     for (MachineBasicBlock &MBB : MF)
@@ -405,7 +404,8 @@ public:
       for (MachineInstr &MI : *MBB) {
         if (MI.isDebugInstr())
           continue;
-        if (MI.getOpcode() != LinxISA::PSEUDO_CALL)
+        if (MI.getOpcode() != LinxISA::PSEUDO_CALL &&
+            MI.getOpcode() != LinxISA::PSEUDO_TAILCALL)
           continue;
 
         auto Next = std::next(MI.getIterator());
@@ -485,8 +485,15 @@ public:
       case LinxISA::FEXIT:
       case LinxISA::FRET_RA:
       case LinxISA::FRET_STK: {
-        if (hasRealInstrAfter(*MacroMI))
-          report_fatal_error("Linx: frame macro must be the last instruction in its block");
+        if (hasRealInstrAfter(*MacroMI)) {
+          // Some late CFG cleanups may merge a standalone frame-macro block with
+          // its successor. Re-split instead of hard-failing.
+          MachineBasicBlock *ContBB = splitAfterInstr(*MBB, *MacroMI);
+          MacroSplitWorklist.push_back(ContBB);
+          MacroSplitWorklist.push_back(MBB);
+          Changed = true;
+          break;
+        }
         if (!hasRealInstrBefore(*MacroMI))
           continue;
         MachineBasicBlock *TailBB = splitBeforeInstr(*MBB, *MacroMI);
@@ -1850,8 +1857,7 @@ public:
 		                .addReg(LinxISA::R0)
 		                .addReg(OrigSrc)
 		                .getInstr();
-		        NewMI->getOperand(1).setTargetFlags(
-		            NewMI->getOperand(1).getTargetFlags() | LinxII::MO_SRCR_SW);
+		        (void)NewMI;
 
 		        auto NextIt = std::next(It);
 		        SetcMI.eraseFromParent();
@@ -1893,18 +1899,33 @@ public:
 	            Kind = ExitKind::Call;
 	          }
           /*
-           * Only emit SETRET (and thus a concrete return target) when the call
-           * has a real CFG successor representing the continuation block.
-           *
-           * For noreturn calls, LLVM can leave the block with no successors;
-           * in that case, fabricating a "next block" return target produces
-           * invalid/unemitted labels (e.g. when the next block is an internal
-           * EH_LABEL-only decoupled body stub).
+           * CALL/ICALL blocks must always carry an adjacent SETRET target under
+           * the strict call/ret contract. For no-successor (noreturn) blocks,
+           * prefer the physical next block; if that is unavailable (or points at
+           * the internal empty-body stub), fall back to this block's own label.
+           * A true noreturn callee should never consume the return target, but a
+           * concrete marker keeps the header encoding and emulator checks valid.
            */
           if (!MBB.succ_empty())
             ReturnBB = *MBB.succ_begin();
+          if (!ReturnBB)
+            ReturnBB = MBB.getNextNode();
           if (EmptyBodyBB && ReturnBB == EmptyBodyBB)
             ReturnBB = nullptr;
+          if (!ReturnBB)
+            ReturnBB = &MBB;
+          Last->eraseFromParent();
+          Changed = true;
+          break;
+        }
+        case LinxISA::PSEUDO_TAILCALL: {
+          CallTargetOp = Last->getOperand(0);
+          if (CallTargetOp->isReg()) {
+            Kind = ExitKind::Ind;
+            HeaderSetcTgtReg = CallTargetOp->getReg();
+          } else {
+            Kind = ExitKind::Direct;
+          }
           Last->eraseFromParent();
           Changed = true;
           break;
@@ -2206,13 +2227,12 @@ public:
 			                    (BrOpcForSetc == LinxISA::BEQ) ? LinxISA::SETC_EQ
 			                                                  : LinxISA::SETC_NE;
 			                auto SetcIt = findSetcInsertPt(MBB, *Prev, LinxISA::R0, OrigSrc);
-			                MachineInstr *NewMI =
-			                    BuildMI(MBB, SetcIt, DebugLoc(), TII.get(NewSetcOpc))
-			                        .addReg(LinxISA::R0)
-			                        .addReg(OrigSrc)
-			                        .getInstr();
-			                NewMI->getOperand(1).setTargetFlags(
-			                    NewMI->getOperand(1).getTargetFlags() | LinxII::MO_SRCR_UW);
+		                MachineInstr *NewMI =
+		                    BuildMI(MBB, SetcIt, DebugLoc(), TII.get(NewSetcOpc))
+		                        .addReg(LinxISA::R0)
+		                        .addReg(OrigSrc)
+		                        .getInstr();
+		                (void)NewMI;
 
 			                SrlMI->eraseFromParent();
 			                SllMI->eraseFromParent();
@@ -2562,13 +2582,12 @@ public:
 			                  (Last->getOpcode() == LinxISA::BEQ) ? LinxISA::SETC_EQ
 			                                                     : LinxISA::SETC_NE;
 			              auto SetcIt = findSetcInsertPt(MBB, *Last, LinxISA::R0, OrigSrc);
-			              MachineInstr *NewMI =
-			                  BuildMI(MBB, SetcIt, DebugLoc(), TII.get(NewSetcOpc))
-			                      .addReg(LinxISA::R0)
-			                      .addReg(OrigSrc)
-			                      .getInstr();
-			              NewMI->getOperand(1).setTargetFlags(
-			                  NewMI->getOperand(1).getTargetFlags() | LinxII::MO_SRCR_UW);
+				              MachineInstr *NewMI =
+				                  BuildMI(MBB, SetcIt, DebugLoc(), TII.get(NewSetcOpc))
+				                      .addReg(LinxISA::R0)
+				                      .addReg(OrigSrc)
+				                      .getInstr();
+				              (void)NewMI;
 
 			              SrlMI->eraseFromParent();
 			              SllMI->eraseFromParent();
@@ -2858,8 +2877,7 @@ public:
 		                .addReg(LinxISA::R0)
 		                .addReg(OrigSrc)
 		                .getInstr();
-		        NewMI->getOperand(1).setTargetFlags(
-		            NewMI->getOperand(1).getTargetFlags() | LinxII::MO_SRCR_UW);
+		        (void)NewMI;
 
 		        auto NextIt = std::next(It);
 		        MI.eraseFromParent();
@@ -2912,8 +2930,6 @@ public:
 
 		        MI.getOperand(1).setReg(LinxISA::R0);
 		        MI.getOperand(2).setReg(OrigSrc);
-		        MI.getOperand(2).setTargetFlags(
-		            MI.getOperand(2).getTargetFlags() | LinxII::MO_SRCR_UW);
 
 		        auto NextIt = std::next(It);
 		        SrlMI->eraseFromParent();
@@ -3539,12 +3555,20 @@ public:
                        .getInstr();
         break;
       case ExitKind::Direct:
-        if (TargetBB)
+        if (CallTargetOp) {
+          BStartMI = BuildMI(MBB, InsertBStart, DebugLoc(),
+                             TII.get(LinxISA::BSTART_STD_DIRECT))
+                         .add(*CallTargetOp)
+                         .getInstr();
+        } else {
+          if (!TargetBB)
+            report_fatal_error("Linx: missing direct branch target");
           TargetBB->setLabelMustBeEmitted();
-        BStartMI = BuildMI(MBB, InsertBStart, DebugLoc(),
-                           TII.get(LinxISA::BSTART_STD_DIRECT))
-                       .addMBB(TargetBB)
-                       .getInstr();
+          BStartMI = BuildMI(MBB, InsertBStart, DebugLoc(),
+                             TII.get(LinxISA::BSTART_STD_DIRECT))
+                         .addMBB(TargetBB)
+                         .getInstr();
+        }
         break;
       case ExitKind::Cond:
         if (TargetBB)
