@@ -1529,6 +1529,7 @@ static void readConfigs(Ctx &ctx, opt::InputArgList &args) {
   ctx.arg.printSymbolOrder = args.getLastArgValue(OPT_print_symbol_order);
   ctx.arg.rejectMismatch = !args.hasArg(OPT_no_warn_mismatch);
   ctx.arg.relax = args.hasFlag(OPT_relax, OPT_no_relax, true);
+  ctx.arg.linxRelaxSeqFusion = args.hasArg(OPT_linx_relax_seq_fusion);
   ctx.arg.relaxGP = args.hasFlag(OPT_relax_gp, OPT_no_relax_gp, false);
   ctx.arg.rpath = getRpath(args);
   ctx.arg.relocatable = args.hasArg(OPT_relocatable);

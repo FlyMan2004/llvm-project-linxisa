@@ -2818,13 +2818,16 @@ public:
 
             // Prefer using the already-laid-out next block as fallthrough.
             unsigned BrOpcForSetc = Prev->getOpcode();
+            MachineBasicBlock *CondFallthroughBB = nullptr;
             if (FallthroughBB == JumpTargetBB) {
               Kind = ExitKind::Cond;
               TargetBB = BrTargetBB;
+              CondFallthroughBB = JumpTargetBB;
               SetcOpc = pickSetc(BrOpcForSetc);
             } else if (FallthroughBB == BrTargetBB) {
               Kind = ExitKind::Cond;
               TargetBB = JumpTargetBB;
+              CondFallthroughBB = BrTargetBB;
               BrOpcForSetc = invertBranch(BrOpcForSetc);
               SetcOpc = pickSetc(BrOpcForSetc);
             } else {
@@ -2851,6 +2854,7 @@ public:
 
               Kind = ExitKind::Cond;
               TargetBB = BrTargetBB;
+              CondFallthroughBB = TrampBB;
               SetcOpc = pickSetc(BrOpcForSetc);
             }
 
@@ -2964,33 +2968,58 @@ public:
 			                EmittedImmSetc = true;
 			              }
 
-			              // Peephole: `and/or` feeding a nonzero branch against zero:
+			              // Peephole: `and/or` feeding a branch against zero:
 			              //   tmp = and/or x, y
-			              //   bne tmp, zero, label
+			              //   {bne,beq} tmp, zero, label
 			              // =>
-		              //   setc.and/or x, y
-		              //
-		              // and similarly for immediate ANDI/ORI:
-		              //   tmp = andi/ori x, imm
-		              //   bne tmp, zero, label
-		              // =>
-		              //   setc.andi/ori x, imm
-		              auto tryEmitLogicSetcNZ = [&]() -> bool {
-		                if (BrOpcForSetc != LinxISA::BNE)
+			              //   setc.and/or x, y
+			              //
+			              // and similarly for immediate ANDI/ORI:
+			              //   tmp = andi/ori x, imm
+			              //   {bne,beq} tmp, zero, label
+			              // =>
+			              //   setc.andi/ori x, imm
+		              auto tryEmitLogicSetcMask = [&]() -> bool {
+		                if (!linxEnableMaskSetcFold())
+		                  return false;
+		                if (BrOpcForSetc != LinxISA::BNE && BrOpcForSetc != LinxISA::BEQ)
 		                  return false;
 
-		                Register ZeroSide = Register();
 		                Register ValSide = Register();
-		                if (LHSReg == LinxISA::R0 && RHSReg != LinxISA::R0) {
-		                  ZeroSide = LHSReg;
+		                MachineInstr *ZeroDefMI = nullptr;
+		                if (LHSReg == LinxISA::R0 && RHSReg != LinxISA::R0)
 		                  ValSide = RHSReg;
-		                } else if (RHSReg == LinxISA::R0 && LHSReg != LinxISA::R0) {
-		                  ZeroSide = RHSReg;
+		                else if (RHSReg == LinxISA::R0 && LHSReg != LinxISA::R0)
 		                  ValSide = LHSReg;
-		                } else {
-		                  return false;
+		                else {
+		                  auto isZeroFromR0 = [&](Register Reg,
+		                                          MachineInstr *&DefMIOut) -> bool {
+		                    if (!Reg)
+		                      return false;
+		                    if (auto Imm =
+		                            getSingleUseImmFromZero(*Prev, Reg, DefMIOut))
+		                      return *Imm == 0;
+		                    return false;
+		                  };
+
+		                  MachineInstr *LZeroDefMI = nullptr;
+		                  MachineInstr *RZeroDefMI = nullptr;
+		                  const bool LZero = isZeroFromR0(LHSReg, LZeroDefMI);
+		                  const bool RZero = isZeroFromR0(RHSReg, RZeroDefMI);
+		                  if (LZero == RZero)
+		                    return false;
+		                  if (LZero) {
+		                    ValSide = RHSReg;
+		                    ZeroDefMI = LZeroDefMI;
+		                  } else {
+		                    ValSide = LHSReg;
+		                    ZeroDefMI = RZeroDefMI;
+		                  }
 		                }
-		                (void)ZeroSide;
+
+		                const bool NeedsInvert = (BrOpcForSetc == LinxISA::BEQ);
+		                if (NeedsInvert && !CondFallthroughBB)
+		                  return false;
 
 		                // Find defining instruction of ValSide (nearest preceding def).
 		                MachineInstr *DefMI = nullptr;
@@ -3066,6 +3095,12 @@ public:
 		                if (!hasSingleNonDbgUseInMBB(ValSide, Prev, DefMI))
 		                  return false;
 
+		                if (NeedsInvert) {
+		                  BrOpcForSetc = LinxISA::BNE;
+		                  SetcOpc = pickSetc(BrOpcForSetc);
+		                  TargetBB = CondFallthroughBB;
+		                }
+
 		                auto SetcIt = findSetcInsertPt(MBB, *Prev, SrcA, IsImm ? Register() : SrcB);
 		                if (IsImm) {
 		                  BuildMI(MBB, SetcIt, DebugLoc(), TII.get(NewSetcOpc))
@@ -3076,12 +3111,14 @@ public:
 		                      .addReg(SrcA)
 		                      .addReg(SrcB);
 		                }
+		                if (ZeroDefMI)
+		                  ZeroDefMI->eraseFromParent();
 		                DefMI->eraseFromParent();
 		                EmittedImmSetc = true;
 		                return true;
 		              };
 
-			              if (!EmittedImmSetc && !tryEmitLogicSetcNZ()) {
+			              if (!EmittedImmSetc && !tryEmitLogicSetcMask()) {
 			                auto SetcIt = findSetcInsertPt(MBB, *Prev, LHSReg, RHSReg);
 			                BuildMI(MBB, SetcIt, DebugLoc(), TII.get(SetcOpc))
 			                    .addReg(LHSReg)
@@ -3318,17 +3355,42 @@ public:
 			            if (tryEmitZextWSetcUW())
 			              EmittedImmSetc = true;
 
-			            auto tryEmitLogicSetcNZ = [&]() -> bool {
-			              if (Last->getOpcode() != LinxISA::BNE)
+			            auto tryEmitLogicSetcMask = [&]() -> bool {
+		              if (!linxEnableMaskSetcFold())
+			                return false;
+		              if (Last->getOpcode() != LinxISA::BNE)
 			                return false;
 
 		              Register ValSide = Register();
+		              MachineInstr *ZeroDefMI = nullptr;
 		              if (LHSReg == LinxISA::R0 && RHSReg != LinxISA::R0)
 		                ValSide = RHSReg;
 		              else if (RHSReg == LinxISA::R0 && LHSReg != LinxISA::R0)
 		                ValSide = LHSReg;
-		              else
-		                return false;
+		              else {
+		                auto isZeroFromR0 = [&](Register Reg,
+		                                        MachineInstr *&DefMIOut) -> bool {
+		                  if (!Reg)
+		                    return false;
+		                  if (auto Imm =
+		                          getSingleUseImmFromZero(*Last, Reg, DefMIOut))
+		                    return *Imm == 0;
+		                  return false;
+		                };
+		                MachineInstr *LZeroDefMI = nullptr;
+		                MachineInstr *RZeroDefMI = nullptr;
+		                const bool LZero = isZeroFromR0(LHSReg, LZeroDefMI);
+		                const bool RZero = isZeroFromR0(RHSReg, RZeroDefMI);
+		                if (LZero == RZero)
+		                  return false;
+		                if (LZero) {
+		                  ValSide = RHSReg;
+		                  ZeroDefMI = LZeroDefMI;
+		                } else {
+		                  ValSide = LHSReg;
+		                  ZeroDefMI = RZeroDefMI;
+		                }
+		              }
 
 		              MachineInstr *DefMI = nullptr;
 		              for (auto It = Last->getIterator(); It != MBB.begin();) {
@@ -3409,11 +3471,13 @@ public:
 		                    .addReg(SrcA)
 		                    .addReg(SrcB);
 		              }
+		              if (ZeroDefMI)
+		                ZeroDefMI->eraseFromParent();
 		              DefMI->eraseFromParent();
 		              return true;
 		            };
 
-			            if (!EmittedImmSetc && !tryEmitLogicSetcNZ()) {
+			            if (!EmittedImmSetc && !tryEmitLogicSetcMask()) {
 			              auto SetcIt = findSetcInsertPt(MBB, *Last, LHSReg, RHSReg);
 			              BuildMI(MBB, SetcIt, DebugLoc(), TII.get(SetcOpc))
 			                  .addReg(LHSReg)
@@ -4540,6 +4604,146 @@ public:
           Changed = true;
         }
 
+        if (linxEnableT1Motion()) {
+          auto isPureSingleDefCandidate = [&](const MachineInstr &MI) -> bool {
+            if (MI.isDebugInstr() || isMarkerInstr(MI) || MI.isCFIInstruction())
+              return false;
+            if (MI.isInlineAsm() || MI.isCall() || MI.isTerminator())
+              return false;
+            if (MI.mayLoadOrStore() || MI.hasUnmodeledSideEffects())
+              return false;
+
+            switch (MI.getOpcode()) {
+            case LinxISA::ADDrr:
+            case LinxISA::SUBrr:
+            case LinxISA::ANDrr:
+            case LinxISA::ORrr:
+            case LinxISA::XORrr:
+            case LinxISA::ADDWrr:
+            case LinxISA::SUBWrr:
+            case LinxISA::ANDWrr:
+            case LinxISA::ORWrr:
+            case LinxISA::XORWrr:
+            case LinxISA::ADDIri:
+            case LinxISA::SUBIri:
+            case LinxISA::ANDIri:
+            case LinxISA::ORIri:
+            case LinxISA::XORIri:
+            case LinxISA::ADDIWri:
+            case LinxISA::SUBIWri:
+            case LinxISA::ANDIWri:
+            case LinxISA::ORIWri:
+            case LinxISA::XORIWri:
+            case LinxISA::SLLIri:
+            case LinxISA::SRLIri:
+            case LinxISA::SRAIri:
+            case LinxISA::SLLIWri:
+            case LinxISA::SRLIWri:
+            case LinxISA::SRAIWri:
+              return true;
+            default:
+              return false;
+            }
+          };
+
+          auto getSingleDefReg = [&](MachineInstr &MI) -> Register {
+            Register DefReg;
+            for (const MachineOperand &MO : MI.operands()) {
+              if (!MO.isReg() || MO.isImplicit() || !MO.isDef())
+                continue;
+              if (!MO.getReg().isPhysical())
+                return Register();
+              if (DefReg)
+                return Register();
+              DefReg = MO.getReg();
+            }
+            return DefReg;
+          };
+
+          auto findSingleUseMI = [&](MachineInstr &DefMI,
+                                     Register DefReg) -> MachineInstr * {
+            MachineInstr *UseMI = nullptr;
+            for (auto UI = std::next(DefMI.getIterator()), UE = MBB.instr_end();
+                 UI != UE; ++UI) {
+              MachineInstr &MI = *UI;
+              if (MI.isDebugInstr() || isMarkerInstr(MI))
+                continue;
+              for (const MachineOperand &MO : MI.operands()) {
+                if (!MO.isReg() || MO.isImplicit() || MO.isDef())
+                  continue;
+                if (MO.getReg() != DefReg)
+                  continue;
+                if (UseMI && UseMI != &MI)
+                  return nullptr;
+                UseMI = &MI;
+                break;
+              }
+            }
+            return UseMI;
+          };
+
+          auto canSinkBeforeUse = [&](MachineInstr &DefMI, MachineInstr &UseMI,
+                                      Register DefReg) -> bool {
+            if (&DefMI == &UseMI)
+              return false;
+            if (!hasSingleNonDbgUseInMBB(DefReg, &UseMI, &DefMI))
+              return false;
+            if (isPhysRegLiveOutOfBlock(DefReg))
+              return false;
+
+            SmallVector<Register, 4> SrcRegs;
+            for (const MachineOperand &MO : DefMI.operands()) {
+              if (!MO.isReg() || MO.isImplicit() || MO.isDef())
+                continue;
+              Register R = MO.getReg();
+              if (R)
+                SrcRegs.push_back(R);
+            }
+
+            for (auto It = std::next(DefMI.getIterator()); &*It != &UseMI; ++It) {
+              MachineInstr &Mid = *It;
+              if (Mid.isDebugInstr() || Mid.isCFIInstruction())
+                continue;
+              if (isMarkerInstr(Mid))
+                return false;
+              if (Mid.isInlineAsm() || Mid.isCall() || Mid.isTerminator())
+                return false;
+              if (Mid.mayLoadOrStore() || Mid.hasUnmodeledSideEffects())
+                return false;
+              if (Mid.readsRegister(DefReg, &TRI) || Mid.definesRegister(DefReg, &TRI))
+                return false;
+              for (Register SrcReg : SrcRegs)
+                if (SrcReg && Mid.definesRegister(SrcReg, &TRI))
+                  return false;
+            }
+            return true;
+          };
+
+          SmallPtrSet<MachineInstr *, 8> BlockedUseMIs;
+          for (auto It = MBB.begin(), E = MBB.end(); It != E;) {
+            MachineInstr &MI = *It;
+            ++It;
+            if (!isPureSingleDefCandidate(MI))
+              continue;
+
+            Register DefReg = getSingleDefReg(MI);
+            if (!DefReg)
+              continue;
+
+            MachineInstr *UseMI = findSingleUseMI(MI, DefReg);
+            if (!UseMI || std::next(MI.getIterator()) == UseMI->getIterator())
+              continue;
+            if (BlockedUseMIs.contains(UseMI))
+              continue;
+            if (!canSinkBeforeUse(MI, *UseMI, DefReg))
+              continue;
+
+            MI.moveBefore(UseMI);
+            BlockedUseMIs.insert(UseMI);
+            Changed = true;
+          }
+        }
+
 		      auto isCandidatePhysReg = [&](Register Reg) -> bool {
 		        if (!Reg || !Reg.isPhysical())
 		          return false;
@@ -4670,6 +4874,13 @@ public:
               return isInt<5>(MI.getOperand(2).getImm());
             return false;
           }
+          case LinxISA::SLLIri:
+          case LinxISA::SRLIri:
+            if (!linxEnableCShift16())
+              return false;
+            if (MI.getNumOperands() >= 3 && MI.getOperand(2).isImm())
+              return isUInt<5>(MI.getOperand(2).getImm());
+            return false;
           default:
             return false;
           }

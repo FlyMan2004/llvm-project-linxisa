@@ -2807,10 +2807,10 @@ char LinxISASIMTAutoVectorize::ID = 0;
 
 } // namespace
 
-INITIALIZE_PASS_BEGIN(LinxISASIMTAutoVectorize, "linx-simt-autovec",
+INITIALIZE_PASS_BEGIN(LinxISASIMTAutoVectorize, "linx-simt-autovec-pass",
                       "Linx SIMT AutoVectorize", false, false)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
-INITIALIZE_PASS_END(LinxISASIMTAutoVectorize, "linx-simt-autovec",
+INITIALIZE_PASS_END(LinxISASIMTAutoVectorize, "linx-simt-autovec-pass",
                     "Linx SIMT AutoVectorize", false, false)
 
 bool llvm::linxSIMTAutoVectorizeEnabled() { return LinxSIMTAutoVec; }
