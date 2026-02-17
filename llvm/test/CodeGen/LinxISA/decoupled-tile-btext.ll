@@ -1,16 +1,18 @@
 ; RUN: llc -mtriple=linx64 -O2 < %s | FileCheck %s
 
-declare <1024 x i32> @llvm.linx.tma.tload(ptr, i32)
-declare void @llvm.linx.tma.tstore(ptr, <1024 x i32>, i32)
+%linx.tile = type target("linx.tile")
+
+declare %linx.tile @llvm.linx.tile.tload(ptr, i32, i32, i64, i64, i64, i64)
+declare void @llvm.linx.tile.tstore(ptr, %linx.tile, i32, i32, i64, i64, i64, i64)
 
 define void @tload_store(ptr %src, ptr %dst) {
 entry:
-  %t = call <1024 x i32> @llvm.linx.tma.tload(ptr %src, i32 8)
-  call void @llvm.linx.tma.tstore(ptr %dst, <1024 x i32> %t, i32 8)
+  %t = call %linx.tile @llvm.linx.tile.tload(ptr %src, i32 8, i32 0, i64 0, i64 8, i64 8, i64 0)
+  call void @llvm.linx.tile.tstore(ptr %dst, %linx.tile %t, i32 8, i32 0, i64 0, i64 8, i64 8, i64 0)
   ret void
 }
 
 ; CHECK-LABEL: tload_store:
-; CHECK:      BSTART.TMA{{[[:space:]]+}}TLOAD,
-; CHECK:      BSTART.TMA{{[[:space:]]+}}TSTORE,
+; CHECK:      BSTART.TLOAD{{[[:space:]]+}}
+; CHECK:      BSTART.TSTORE{{[[:space:]]+}}
 ; CHECK-NOT:  B.TEXT

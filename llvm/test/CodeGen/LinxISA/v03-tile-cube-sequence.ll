@@ -1,21 +1,23 @@
 ; RUN: llc -mtriple=linx64 -O2 < %s | FileCheck %s
 
-declare <1024 x i32> @llvm.linx.tma.tload(ptr, i32)
-declare void @llvm.linx.tma.tstore(ptr, <1024 x i32>, i32)
-declare <1024 x i32> @llvm.linx.cube.mamulb(<1024 x i32>, <1024 x i32>, i32, i32, i32)
+%linx.tile = type target("linx.tile")
+
+declare %linx.tile @llvm.linx.tile.tload(ptr, i32, i32, i64, i64, i64, i64)
+declare void @llvm.linx.tile.tstore(ptr, %linx.tile, i32, i32, i64, i64, i64, i64)
+declare %linx.tile @llvm.linx.cube.mamulb(%linx.tile, %linx.tile, i32, i32, i32)
 
 define void @cube_tile(ptr %a, ptr %b, ptr %dst) {
 entry:
-  %ta = call <1024 x i32> @llvm.linx.tma.tload(ptr %a, i32 8)
-  %tb = call <1024 x i32> @llvm.linx.tma.tload(ptr %b, i32 8)
-  %out = call <1024 x i32> @llvm.linx.cube.mamulb(<1024 x i32> %ta, <1024 x i32> %tb, i32 4, i32 4, i32 4)
-  call void @llvm.linx.tma.tstore(ptr %dst, <1024 x i32> %out, i32 8)
+  %ta = call %linx.tile @llvm.linx.tile.tload(ptr %a, i32 8, i32 0, i64 0, i64 8, i64 8, i64 0)
+  %tb = call %linx.tile @llvm.linx.tile.tload(ptr %b, i32 8, i32 0, i64 0, i64 8, i64 8, i64 0)
+  %out = call %linx.tile @llvm.linx.cube.mamulb(%linx.tile %ta, %linx.tile %tb, i32 4, i32 4, i32 4)
+  call void @llvm.linx.tile.tstore(ptr %dst, %linx.tile %out, i32 8, i32 0, i64 0, i64 8, i64 8, i64 0)
   ret void
 }
 
 ; CHECK-LABEL: cube_tile:
-; CHECK: BSTART.TMA{{[[:space:]]+}}TLOAD,
-; CHECK: BSTART.TMA{{[[:space:]]+}}TLOAD,
-; CHECK: BSTART.CUBE{{[[:space:]]+}}MAMULB,
-; CHECK: BSTART.CUBE{{[[:space:]]+}}ACCCVT,
-; CHECK: BSTART.TMA{{[[:space:]]+}}TSTORE,
+; CHECK: BSTART.TLOAD{{[[:space:]]+}}
+; CHECK: BSTART.TLOAD{{[[:space:]]+}}
+; CHECK: BSTART.TMATMUL{{[[:space:]]+}}
+; CHECK: BSTART.ACCCVT{{[[:space:]]+}}
+; CHECK: BSTART.TSTORE{{[[:space:]]+}}

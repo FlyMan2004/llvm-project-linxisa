@@ -110,6 +110,8 @@ static StringRef parTileOpName(unsigned TileOp10) {
     return "TLOAD";
   case 65:
     return "TSTORE";
+  case 34:
+    return "TMOV";
   case 66:
     return "MAMULB.ACC";
   case 258:
@@ -119,7 +121,117 @@ static StringRef parTileOpName(unsigned TileOp10) {
   }
 }
 
-static bool isCubeTileOp(unsigned TileOp10) {
+static StringRef tmaAliasMnemonic(unsigned Func) {
+  switch (Func & 0x1fu) {
+  case 0:
+    return "BSTART.TLOAD";
+  case 1:
+    return "BSTART.TSTORE";
+  case 2:
+    return "BSTART.TMOV";
+  default:
+    return StringRef();
+  }
+}
+
+static StringRef cubeAliasMnemonic(unsigned Func) {
+  switch (Func & 0x1fu) {
+  case 0:
+    return "BSTART.TMATMUL";
+  case 2:
+    return "BSTART.TMATMUL.ACC";
+  case 8:
+    return "BSTART.ACCCVT";
+  default:
+    return StringRef();
+  }
+}
+
+static StringRef legacyPackedAliasMnemonic(unsigned TileOp10) {
+  switch (TileOp10 & 0x3ffu) {
+  case 33:
+    return tmaAliasMnemonic(0);
+  case 65:
+    return tmaAliasMnemonic(1);
+  case 34:
+    return tmaAliasMnemonic(2);
+  case 2:
+    return cubeAliasMnemonic(0);
+  case 66:
+    return cubeAliasMnemonic(2);
+  case 258:
+    return cubeAliasMnemonic(8);
+  default:
+    return StringRef();
+  }
+}
+
+static StringRef teplAliasMnemonic(unsigned TileOp10) {
+  switch (TileOp10 & 0x3ffu) {
+  case 0x000:
+    return "BSTART.TADD";
+  case 0x001:
+    return "BSTART.TSUB";
+  case 0x002:
+    return "BSTART.TMUL";
+  case 0x003:
+    return "BSTART.TDIV";
+  case 0x004:
+    return "BSTART.TMAX";
+  case 0x005:
+    return "BSTART.TMIN";
+  case 0x006:
+    return "BSTART.TAND";
+  case 0x007:
+    return "BSTART.TOR";
+  case 0x008:
+    return "BSTART.TXOR";
+  case 0x009:
+    return "BSTART.TSHL";
+  case 0x00a:
+    return "BSTART.TSHR";
+  case 0x00d:
+    return "BSTART.TRELU";
+  case 0x00e:
+    return "BSTART.TPRELU";
+  case 0x00f:
+    return "BSTART.TCVT";
+  case 0x020:
+    return "BSTART.TROWMAX";
+  case 0x021:
+    return "BSTART.TROWMIN";
+  case 0x022:
+    return "BSTART.TROWSUM";
+  case 0x024:
+    return "BSTART.TCOLMAX";
+  case 0x025:
+    return "BSTART.TCOLMIN";
+  case 0x026:
+    return "BSTART.TCOLSUM";
+  case 0x040:
+    return "BSTART.TEXP";
+  case 0x041:
+    return "BSTART.TLOG";
+  case 0x042:
+    return "BSTART.TSQRT";
+  case 0x043:
+    return "BSTART.TRSQRT";
+  case 0x044:
+    return "BSTART.TRECIP";
+  case 0x060:
+    return "BSTART.TGATHER";
+  case 0x061:
+    return "BSTART.TSCATTER";
+  case 0x062:
+    return "BSTART.TRESHAPE";
+  case 0x063:
+    return "BSTART.TTRANSPOSE";
+  default:
+    return StringRef();
+  }
+}
+
+static bool isLegacyCubeTileOp(unsigned TileOp10) {
   switch (TileOp10 & 0x3ffu) {
   case 2:
   case 66:
@@ -127,6 +239,30 @@ static bool isCubeTileOp(unsigned TileOp10) {
     return true;
   default:
     return false;
+  }
+}
+
+static unsigned legacyParOpFromTMAFunction(unsigned Func) {
+  switch (Func & 0x1fu) {
+  case 0:
+    return 33u;
+  case 1:
+    return 65u;
+  default:
+    return 32u + (Func & 0x1fu);
+  }
+}
+
+static unsigned legacyParOpFromCubeFunction(unsigned Func) {
+  switch (Func & 0x1fu) {
+  case 0:
+    return 2u;
+  case 2:
+    return 66u;
+  case 8:
+    return 258u;
+  default:
+    return Func & 0x1fu;
   }
 }
 
@@ -672,50 +808,88 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
 
   // Special-case: accelerator/tile block-start instructions.
   //
-  // v0.3-facing disassembly is typed (`BSTART.TMA` / `BSTART.CUBE`).
+  // v0.3-facing disassembly is typed (`BSTART.TMA` / `BSTART.CUBE` /
+  // `BSTART.TEPL`).
   static constexpr StringLiteral LegacyPackedStart = "BSTART." "PAR";
   const bool IsLegacyPacked = AsmFmt.starts_with(LegacyPackedStart);
   const bool IsTypedTMA = AsmFmt.starts_with("BSTART.TMA");
   const bool IsTypedCUBE = AsmFmt.starts_with("BSTART.CUBE");
-  if (IsLegacyPacked || IsTypedTMA || IsTypedCUBE) {
+  const bool IsTypedTEPL = AsmFmt.starts_with("BSTART.TEPL");
+  if (IsLegacyPacked || IsTypedTMA || IsTypedCUBE || IsTypedTEPL) {
     const unsigned DT =
         static_cast<unsigned>(findFieldImm("DataType").value_or(0)) & 0x1fu;
 
-    unsigned TileOp10 = 0;
-    if (IsLegacyPacked) {
-      TileOp10 = static_cast<unsigned>(findFieldImm("TileOp10").value_or(0)) &
-                 0x3ffu;
-    } else {
+    auto printDataType = [&]() {
+      if (StringRef DTName = dtypeName(DT); !DTName.empty())
+        OS << DTName;
+      else
+        OS << "DT" << utostr(DT);
+    };
+
+    unsigned ParStateOp = 0u;
+
+    if (IsTypedTMA || IsTypedCUBE) {
       const unsigned Func =
           static_cast<unsigned>(findFieldImm("Function").value_or(0)) & 0x1fu;
       if (IsTypedTMA) {
-        TileOp10 = (Func == 0) ? 33u : (Func == 1) ? 65u : (32u + Func);
+        ParStateOp = legacyParOpFromTMAFunction(Func);
+        if (StringRef Alias = tmaAliasMnemonic(Func); !Alias.empty()) {
+          OS << Alias << "\t";
+          printDataType();
+        } else {
+          OS << "BSTART.TMA\t" << utostr(Func) << ", ";
+          printDataType();
+        }
       } else {
-        TileOp10 = Func;
-        if (Func == 0) {
-          TileOp10 = 2u;
-        } else if (Func == 2) {
-          TileOp10 = 66u;
-        } else if (Func == 8) {
-          TileOp10 = 258u;
+        ParStateOp = legacyParOpFromCubeFunction(Func);
+        if (StringRef Alias = cubeAliasMnemonic(Func); !Alias.empty()) {
+          OS << Alias << "\t";
+          printDataType();
+        } else {
+          OS << "BSTART.CUBE\t" << utostr(Func) << ", ";
+          printDataType();
         }
       }
+
+      LastParTileOp = ParStateOp;
+      LastParTileOpValid = true;
+      printAnnotation(OS, Annot);
+      return;
     }
 
-    const char *TypedPrefix = isCubeTileOp(TileOp10) ? "BSTART.CUBE" : "BSTART.TMA";
-    OS << TypedPrefix << "\t";
-    if (StringRef N = parTileOpName(TileOp10); !N.empty()) {
-      OS << N;
+    const unsigned TileOp10 =
+        static_cast<unsigned>(findFieldImm("TileOp10").value_or(0)) & 0x3ffu;
+    ParStateOp = TileOp10;
+
+    StringRef Alias;
+    if (IsTypedTEPL) {
+      Alias = teplAliasMnemonic(TileOp10);
     } else {
-      OS << utostr(TileOp10);
+      // Legacy packed PAR encodes both TEPL and TMA/CUBE families; prefer
+      // canonical typed aliases.
+      Alias = legacyPackedAliasMnemonic(TileOp10);
+      if (Alias.empty())
+        Alias = teplAliasMnemonic(TileOp10);
     }
-    OS << ", ";
-    if (StringRef DTName = dtypeName(DT); !DTName.empty()) {
-      OS << DTName;
+
+    if (!Alias.empty()) {
+      OS << Alias << "\t";
+      printDataType();
     } else {
-      OS << "DT" << utostr(DT);
+      const char *TypedPrefix =
+          IsLegacyPacked
+              ? (isLegacyCubeTileOp(TileOp10) ? "BSTART.CUBE" : "BSTART.TEPL")
+              : "BSTART.TEPL";
+      OS << TypedPrefix << "\t";
+      if (StringRef N = parTileOpName(TileOp10); !N.empty())
+        OS << N;
+      else
+        OS << utostr(TileOp10);
+      OS << ", ";
+      printDataType();
     }
-    LastParTileOp = TileOp10;
+
+    LastParTileOp = ParStateOp;
     LastParTileOpValid = true;
     printAnnotation(OS, Annot);
     return;

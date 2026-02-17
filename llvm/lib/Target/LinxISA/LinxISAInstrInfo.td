@@ -138,6 +138,10 @@ def uimm6 : Operand<i64>, PatLeaf<(i64 imm), [{ return isUInt<6>(N->getZExtValue
   let ParserMatchClass = ImmAsmOperand;
 }
 
+def uimm10 : Operand<i64>, PatLeaf<(i64 imm), [{ return isUInt<10>(N->getZExtValue()); }]> {
+  let ParserMatchClass = ImmAsmOperand;
+}
+
 def uimm2 : Operand<i64>, PatLeaf<(i64 imm), [{ return isUInt<2>(N->getZExtValue()); }]> {
   let ParserMatchClass = ImmAsmOperand;
 }
@@ -428,8 +432,10 @@ def PSEUDO_TMA_TLOAD_ANY : Pseudo<(outs TILE:$dst), (ins GPR_Arch:$base, i64imm:
 
 let hasSideEffects = 1, isBarrier = 1, mayLoad = 1, Size = 4 in
 def PSEUDO_TMA_TLOAD_DESC : Pseudo<(outs TILE_TU:$dst),
-                                   (ins GPR_Arch:$base, i64imm:$layout, i64imm:$lb0,
-                                        i64imm:$lb1, i64imm:$size),
+                                   (ins GPR_Arch:$base, i64imm:$dtype,
+                                        i64imm:$layout, i64imm:$lb0,
+                                        i64imm:$lb1, i64imm:$size,
+                                        i64imm:$stride_bytes),
                                    "# PSEUDO_TMA_TLOAD_DESC", []>;
 
 let hasSideEffects = 1, isBarrier = 1, mayStore = 1, Size = 4 in
@@ -438,9 +444,29 @@ def PSEUDO_TMA_TSTORE : Pseudo<(outs), (ins GPR_Arch:$base, TILE:$src, i64imm:$s
 
 let hasSideEffects = 1, isBarrier = 1, mayStore = 1, Size = 4 in
 def PSEUDO_TMA_TSTORE_DESC : Pseudo<(outs),
-                                    (ins GPR_Arch:$base, TILE:$src, i64imm:$layout,
-                                         i64imm:$lb0, i64imm:$lb1, i64imm:$size),
+                                    (ins GPR_Arch:$base, TILE:$src,
+                                         i64imm:$dtype, i64imm:$layout,
+                                         i64imm:$lb0, i64imm:$lb1,
+                                         i64imm:$size, i64imm:$stride_bytes),
                                     "# PSEUDO_TMA_TSTORE_DESC", []>;
+
+// Compiler-inserted tile SSA edge balancing pseudo.
+//
+// Operand contract:
+//   dst/src       : tile destination/source values
+//   size          : SizeCode propagated from source tile metadata
+//   dtype         : DataType (0 when unknown; strict mismatch checking happens
+//                   in LinxISATileSSABalance before this pseudo is emitted)
+//   layout        : layout payload (valid when has_layout=1)
+//   has_layout    : 0/1 bit
+//   mode          : TMOV mode (PR2 defaults to V2V=0)
+//   src_reuse     : 0/1 bit derived from COPY kill semantics
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_TMA_TMOV : Pseudo<(outs TILE:$dst),
+                             (ins TILE:$src, i64imm:$size, i64imm:$dtype,
+                                  i64imm:$layout, i64imm:$has_layout,
+                                  i64imm:$mode, i64imm:$src_reuse),
+                             "# PSEUDO_TMA_TMOV", []>;
 
 let hasSideEffects = 1, isBarrier = 1, Size = 4 in
 def PSEUDO_CUBE_MAMULB : Pseudo<(outs TILE_MN:$dst),
@@ -453,6 +479,27 @@ def PSEUDO_CUBE_MAMULB_ACC : Pseudo<(outs TILE_MN:$dst),
                                     (ins TILE:$acc, TILE:$srcA, TILE:$srcB,
                                          i64imm:$m, i64imm:$n, i64imm:$k),
                                     "# PSEUDO_CUBE_MAMULB_ACC", []>;
+
+// PR5 roadmap stub: explicit CUBE ACCCVT stage for frontend intrinsic use.
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_CUBE_ACCCVT : Pseudo<(outs TILE_MN:$dst),
+                                (ins TILE:$acc,
+                                     i64imm:$size, i64imm:$dtype,
+                                     i64imm:$qarg0, i64imm:$qarg1),
+                                "# PSEUDO_CUBE_ACCCVT", []>;
+
+// PR5 TEPL template-op dispatch pseudos.
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_TEPL_UNARY : Pseudo<(outs TILE:$dst),
+                               (ins TILE:$src, i64imm:$tileop,
+                                    i64imm:$size, i64imm:$dtype),
+                               "# PSEUDO_TEPL_UNARY", []>;
+
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_TEPL_BINARY : Pseudo<(outs TILE:$dst),
+                                (ins TILE:$srcA, TILE:$srcB, i64imm:$tileop,
+                                     i64imm:$size, i64imm:$dtype),
+                                "# PSEUDO_TEPL_BINARY", []>;
 
 // Vector decoupled blocks (bring-up): lowered late into BSTART.VSEQ/VPAR headers
 // with B.TEXT + B.DIM descriptors and a per-function empty body stub.
@@ -595,6 +642,7 @@ def PSEUDO_V_J : Pseudo<(outs), (ins BrTarget:$target), "# PSEUDO_V_J", []>;
 let hasSideEffects = 1, isBarrier = 1, Size = 4 in {
   def BSTART_TMA  : LinxISAInst<(outs), (ins uimm5:$dtype, uimm5:$func), "", []>;
   def BSTART_CUBE : LinxISAInst<(outs), (ins uimm5:$dtype, uimm5:$func), "", []>;
+  def BSTART_TEPL : LinxISAInst<(outs), (ins uimm5:$dtype, uimm10:$tileop), "", []>;
 
   // Vector block start markers (decoupled headers).
   //

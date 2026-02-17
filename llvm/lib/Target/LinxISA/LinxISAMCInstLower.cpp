@@ -355,7 +355,7 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     const int64_t DataType = I(0) & 0x1f;
     const int64_t Func = I(1) & 0x1f;
     OutMI.setOpcode(
-        getSpecOpcodeByAsmFmt("BSTART.TMA TileOp, DataType", /*LengthBits=*/32));
+        getSpecOpcodeByAsmFmt("BSTART.TMA Function, DataType", /*LengthBits=*/32));
     OutMI.addOperand(MCOperand::createImm(DataType));
     OutMI.addOperand(MCOperand::createImm(Func));
     return;
@@ -364,9 +364,19 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     const int64_t DataType = I(0) & 0x1f;
     const int64_t Func = I(1) & 0x1f;
     OutMI.setOpcode(
-        getSpecOpcodeByAsmFmt("BSTART.CUBE TileOP, DataType", /*LengthBits=*/32));
+        getSpecOpcodeByAsmFmt("BSTART.CUBE Function, DataType",
+                              /*LengthBits=*/32));
     OutMI.addOperand(MCOperand::createImm(DataType));
     OutMI.addOperand(MCOperand::createImm(Func));
+    return;
+  }
+  case LinxISA::BSTART_TEPL: {
+    const int64_t DataType = I(0) & 0x1f;
+    const int64_t TileOp10 = I(1) & 0x3ff;
+    OutMI.setOpcode(getSpecOpcodeByAsmFmt("BSTART.TEPL TileOp10, DataType",
+                                          /*LengthBits=*/32));
+    OutMI.addOperand(MCOperand::createImm(DataType));
+    OutMI.addOperand(MCOperand::createImm(TileOp10));
     return;
   }
 

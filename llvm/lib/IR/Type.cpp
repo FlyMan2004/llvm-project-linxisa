@@ -945,6 +945,11 @@ Expected<TargetExtType *> TargetExtType::checkParams(TargetExtType *TTy) {
     return createStringError(
         "target extension type aarch64.svcount should have no parameters");
 
+  if (TTy->Name == "linx.tile" &&
+      (TTy->getNumTypeParameters() != 0 || TTy->getNumIntParameters() != 0))
+    return createStringError(
+        "target extension type linx.tile should have no parameters");
+
   // Opaque types in the RISC-V name space.
   if (TTy->Name == "riscv.vector.tuple" &&
       (TTy->getNumTypeParameters() != 1 || TTy->getNumIntParameters() != 1))
@@ -1019,6 +1024,11 @@ static TargetTypeInfo getTargetTypeInfo(const TargetExtType *Ty) {
   // Opaque types in the AArch64 name space.
   if (Name == "aarch64.svcount")
     return TargetTypeInfo(ScalableVectorType::get(Type::getInt1Ty(C), 16),
+                          TargetExtType::HasZeroInit,
+                          TargetExtType::CanBeLocal);
+
+  if (Name == "linx.tile")
+    return TargetTypeInfo(ArrayType::get(Type::getInt8Ty(C), 4096),
                           TargetExtType::HasZeroInit,
                           TargetExtType::CanBeLocal);
 

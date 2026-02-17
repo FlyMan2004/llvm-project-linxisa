@@ -6029,7 +6029,7 @@ const linxisa_inst_form linxisa_inst_forms[] = {
   { .id = "bstart_32_7eb93b649748", .mnemonic = "BSTART", .asm_fmt = "BSTART {DIRECT, CALL}, <label>", .length_bits = 32, .mask = 0x000000000000007fULL, .match = 0x0000000000000011ULL, .field_start = 135, .field_count = 1 },
   { .id = "bstart_32_e11e678a32ac", .mnemonic = "BSTART", .asm_fmt = "BSTART COND, <label>", .length_bits = 32, .mask = 0x000000000000007fULL, .match = 0x0000000000000021ULL, .field_start = 136, .field_count = 1 },
   { .id = "bstart_call_32_9404418d1ae5", .mnemonic = "BSTART CALL", .asm_fmt = "BSTART.CALL, <br_label>, <rt_label>, -> ra", .length_bits = 32, .mask = 0x00000000f83f000fULL, .match = 0x0000000050160002ULL, .field_start = 137, .field_count = 2 },
-  { .id = "bstart_cube_32_bd3f337acb9d", .mnemonic = "BSTART.CUBE", .asm_fmt = "BSTART.CUBE TileOP, DataType", .length_bits = 32, .mask = 0x00000000060fffffULL, .match = 0x0000000000031181ULL, .field_start = 139, .field_count = 2 },
+  { .id = "bstart_cube_32_bd3f337acb9d", .mnemonic = "BSTART.CUBE", .asm_fmt = "BSTART.CUBE Function, DataType", .length_bits = 32, .mask = 0x00000000060fffffULL, .match = 0x0000000000031181ULL, .field_start = 139, .field_count = 2 },
   { .id = "bstart_fixp_32_3b0ae11126a6", .mnemonic = "BSTART.FIXP", .asm_fmt = "BSTART.FIXP TileOp, DataType", .length_bits = 32, .mask = 0x00000000060fffffULL, .match = 0x0000000000039181ULL, .field_start = 141, .field_count = 2 },
   { .id = "bstart_fp_32_2fbcd8fd8e97", .mnemonic = "BSTART.FP", .asm_fmt = "BSTART.FP RET", .length_bits = 32, .mask = 0x0000000000007fffULL, .match = 0x0000000000007101ULL, .field_start = 143, .field_count = 1 },
   { .id = "bstart_fp_32_49b15de09969", .mnemonic = "BSTART.FP", .asm_fmt = "BSTART.FP IND", .length_bits = 32, .mask = 0x0000000000007fffULL, .match = 0x0000000000005101ULL, .field_start = 144, .field_count = 1 },
@@ -6040,7 +6040,7 @@ const linxisa_inst_form linxisa_inst_forms[] = {
   { .id = "bstart_fp_32_face4f238d84", .mnemonic = "BSTART.FP", .asm_fmt = "BSTART.FP FALL<, fixup_label>", .length_bits = 32, .mask = 0x0000000000007fffULL, .match = 0x0000000000001101ULL, .field_start = 149, .field_count = 1 },
   { .id = "bstart_mpar_32_2d163417c615", .mnemonic = "BSTART.MPAR", .asm_fmt = "BSTART.MPAR <VS8, VS16>", .length_bits = 32, .mask = 0x00000000f9ffffffULL, .match = 0x0000000000001181ULL, .field_start = 150, .field_count = 1 },
   { .id = "bstart_mseq_32_39343a456ec5", .mnemonic = "BSTART.MSEQ", .asm_fmt = "BSTART.MSEQ <VS8, VS16>", .length_bits = 32, .mask = 0x00000000f9ffffffULL, .match = 0x0000000000009181ULL, .field_start = 151, .field_count = 1 },
-  { .id = "bstart_par_32_49c201a27bd2", .mnemonic = "BSTART.PAR", .asm_fmt = "BSTART.PAR TileOp, DataType", .length_bits = 32, .mask = 0x0000000006007fffULL, .match = 0x0000000002001181ULL, .field_start = 152, .field_count = 2 },
+  { .id = "bstart_par_32_49c201a27bd2", .mnemonic = "BSTART.PAR", .asm_fmt = "BSTART.PAR TileOp10, DataType", .length_bits = 32, .mask = 0x0000000006007fffULL, .match = 0x0000000002001181ULL, .field_start = 152, .field_count = 2 },
   { .id = "bstart_std_32_1ef99c4cedcb", .mnemonic = "BSTART.STD", .asm_fmt = "BSTART.STD COND, <label>", .length_bits = 32, .mask = 0x0000000000007fffULL, .match = 0x0000000000003001ULL, .field_start = 154, .field_count = 1 },
   { .id = "bstart_std_32_1fc0f7bd871b", .mnemonic = "BSTART.STD", .asm_fmt = "BSTART.STD RET", .length_bits = 32, .mask = 0x0000000000007fffULL, .match = 0x0000000000007001ULL, .field_start = 155, .field_count = 1 },
   { .id = "bstart_std_32_441ad677fffe", .mnemonic = "BSTART.STD", .asm_fmt = "BSTART.STD FALL<, fixup_label>", .length_bits = 32, .mask = 0x0000000000007fffULL, .match = 0x0000000000001001ULL, .field_start = 156, .field_count = 1 },
@@ -6049,8 +6049,8 @@ const linxisa_inst_form linxisa_inst_forms[] = {
   { .id = "bstart_std_32_b36b111a7134", .mnemonic = "BSTART.STD", .asm_fmt = "BSTART.STD IND", .length_bits = 32, .mask = 0x0000000000007fffULL, .match = 0x0000000000005001ULL, .field_start = 159, .field_count = 1 },
   { .id = "bstart_std_32_c1de85e06878", .mnemonic = "BSTART.STD", .asm_fmt = "BSTART.STD DIRECT, <label>", .length_bits = 32, .mask = 0x0000000000007fffULL, .match = 0x0000000000002001ULL, .field_start = 160, .field_count = 1 },
   { .id = "bstart_sys_32_762d9d84a6d8", .mnemonic = "BSTART.SYS", .asm_fmt = "BSTART.SYS FALL<, fixup_label>", .length_bits = 32, .mask = 0x0000000000007fffULL, .match = 0x0000000000001081ULL, .field_start = 161, .field_count = 1 },
-  { .id = "bstart_tepl_32_2299f6725e2a", .mnemonic = "BSTART.TEPL", .asm_fmt = "BSTART.TEPL TileOp, DataType", .length_bits = 32, .mask = 0x0000000006007fffULL, .match = 0x0000000002001181ULL, .field_start = 162, .field_count = 2 },
-  { .id = "bstart_tma_32_f949c94c39c7", .mnemonic = "BSTART.TMA", .asm_fmt = "BSTART.TMA TileOp, DataType", .length_bits = 32, .mask = 0x00000000060fffffULL, .match = 0x0000000000011181ULL, .field_start = 164, .field_count = 2 },
+  { .id = "bstart_tepl_32_2299f6725e2a", .mnemonic = "BSTART.TEPL", .asm_fmt = "BSTART.TEPL TileOp10, DataType", .length_bits = 32, .mask = 0x0000000006007fffULL, .match = 0x0000000002001181ULL, .field_start = 162, .field_count = 2 },
+  { .id = "bstart_tma_32_f949c94c39c7", .mnemonic = "BSTART.TMA", .asm_fmt = "BSTART.TMA Function, DataType", .length_bits = 32, .mask = 0x00000000060fffffULL, .match = 0x0000000000011181ULL, .field_start = 164, .field_count = 2 },
   { .id = "bstart_vpar_32_8998d3fa51f8", .mnemonic = "BSTART.VPAR", .asm_fmt = "BSTART.VPAR <VS8, VS16>", .length_bits = 32, .mask = 0x00000000f9ffffffULL, .match = 0x0000000000021181ULL, .field_start = 166, .field_count = 1 },
   { .id = "bstart_vseq_32_9324064902ae", .mnemonic = "BSTART.VSEQ", .asm_fmt = "BSTART.VSEQ <VS8, VS16>", .length_bits = 32, .mask = 0x00000000f9ffffffULL, .match = 0x0000000000029181ULL, .field_start = 167, .field_count = 1 },
   { .id = "bstop_32_d25b09fdd59c", .mnemonic = "BSTOP", .asm_fmt = "BSTOP", .length_bits = 32, .mask = 0x00000000ffffffffULL, .match = 0x0000000000000001ULL, .field_start = 168, .field_count = 0 },
@@ -6717,4 +6717,3 @@ const linxisa_inst_form linxisa_inst_forms[] = {
   { .id = "xorw_32_32282566e32d", .mnemonic = "XORW", .asm_fmt = "xorw SrcL, SrcR<{.sw,.uw,.not}><<<shamt>, ->{t, u, Rd}", .length_bits = 32, .mask = 0x000000000000707fULL, .match = 0x0000000000004025ULL, .field_start = 2614, .field_count = 5 },
 };
 const size_t linxisa_inst_forms_count = 734;
-

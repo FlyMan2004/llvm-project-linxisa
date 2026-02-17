@@ -27,6 +27,7 @@ LLVMInitializeLinxISATarget() {
 
   PassRegistry &PR = *PassRegistry::getPassRegistry();
   initializeLinxISAAsmPrinterPass(PR);
+  initializeLinxISATileSSABalancePass(PR);
   initializeLinxISABlockifyPass(PR);
   initializeLinxISASIMTAutoVectorizePass(PR);
   initializeLinxISADAGToDAGISelLegacyPass(PR);
@@ -96,7 +97,14 @@ public:
     return false;
   }
 
-  void addPreEmitPass() override { addPass(createLinxISABlockifyPass()); }
+  // Run once before ExpandPostRA so tile PHI/COPY traffic is materialized as
+  // target pseudos and never reaches generic reg-to-reg COPY expansion.
+  void addPostRegAlloc() override { addPass(createLinxISATileSSABalancePass()); }
+
+  void addPreEmitPass() override {
+    addPass(createLinxISATileSSABalancePass());
+    addPass(createLinxISABlockifyPass());
+  }
 };
 
 } // namespace
