@@ -587,115 +587,24 @@ void LinxISA::writePlt(uint8_t *buf, const Symbol &sym,
 }
 
 bool LinxISA::relaxOnce(int pass) const {
-  if (!ctx.arg.relax)
-    return false;
-  if (pass == 0)
-    initSymbolAnchors(ctx);
-
-  SmallVector<InputSection *, 0> storage;
-  bool changed = false;
-  for (OutputSection *osec : ctx.outputSections) {
-    if (!(osec->flags & SHF_EXECINSTR))
-      continue;
-    for (InputSection *sec : getInputSections(*osec, storage))
-      changed |= ::relax(ctx, *sec);
-  }
-  return changed;
+  (void)pass;
+  /*
+   * Runtime-stability mode: keep Linx relaxation disabled.
+   *
+   * Current Linx relaxation shrinks instruction streams based on relocations.
+   * Some intra-section BSTART/CALL encodings are resolved by the assembler and
+   * carry no relocation records; shrinking code before those instructions can
+   * leave stale immediates that jump to the wrong block target at runtime.
+   *
+   * Until non-relocated intra-section control-flow encodings are rewritten or
+   * represented with relocations, disabling relaxation is safer than producing
+   * silently misdirected branch/call targets.
+   */
+  return false;
 }
 
 void LinxISA::finalizeRelax(int passes) const {
-  if (!ctx.arg.relax)
-    return;
-  Log(ctx) << "relaxation passes: " << passes;
-
-  SmallVector<InputSection *, 0> storage;
-  for (OutputSection *osec : ctx.outputSections) {
-    if (!(osec->flags & SHF_EXECINSTR))
-      continue;
-
-    for (InputSection *sec : getInputSections(*osec, storage)) {
-      RelaxAux &aux = *sec->relaxAux;
-      if (!aux.relocDeltas)
-        continue;
-
-      MutableArrayRef<Relocation> rels = sec->relocs();
-      if (rels.empty())
-        continue;
-
-      ArrayRef<uint8_t> old = sec->content();
-      const size_t newSize = old.size() - aux.relocDeltas[rels.size() - 1];
-      uint8_t *buf = ctx.bAlloc.Allocate<uint8_t>(newSize);
-      uint8_t *p = buf;
-      size_t writesIdx = 0;
-      uint64_t offset = 0;
-      uint64_t delta = 0;
-      sec->content_ = buf;
-      sec->size = newSize;
-      sec->bytesDropped = 0;
-
-      for (size_t i = 0, e = rels.size(); i != e; ++i) {
-        uint32_t remove = aux.relocDeltas[i] - delta;
-        delta = aux.relocDeltas[i];
-        if (remove == 0 && aux.relocTypes[i] == R_LINX_NONE)
-          continue;
-
-        Relocation &r = rels[i];
-        const uint64_t size = r.offset - offset;
-        memcpy(p, old.data() + offset, size);
-        p += size;
-
-        uint32_t emitted = 0;
-        if (RelType newType = aux.relocTypes[i]) {
-          if (newType.v == INTERNAL_R_LINX_REMOVE.v) {
-            emitted = 0;
-          } else {
-            switch (newType.v) {
-            case R_LINX_PCR17_LOAD:
-            case R_LINX_PCR17_STORE:
-            case R_LINX_B17_PCREL:
-            case R_LINX_B17_PLT:
-            case R_LINX_SETRET20_PCREL: {
-              uint32_t word = aux.writes[writesIdx++];
-              write32le(p, word);
-              emitted = 4;
-              break;
-            }
-            case R_LINX_CSETRET5_PCREL: {
-              uint32_t word = aux.writes[writesIdx++];
-              write16le(p, static_cast<uint16_t>(word));
-              emitted = 2;
-              break;
-            }
-            default:
-              llvm_unreachable("unsupported Linx relaxation rewrite type");
-            }
-          }
-        }
-
-        p += emitted;
-        offset = r.offset + emitted + remove;
-      }
-      memcpy(p, old.data() + offset, old.size() - offset);
-
-      // Decrease relocation offsets by the cumulative bytes removed before each
-      // relocation and switch to the relaxed relocation type where applicable.
-      delta = 0;
-      for (size_t i = 0, e = rels.size(); i != e;) {
-        const uint64_t cur = rels[i].offset;
-        do {
-          rels[i].offset -= delta;
-          if (aux.relocTypes[i] == INTERNAL_R_LINX_REMOVE)
-            rels[i].type = R_LINX_NONE;
-          else if (aux.relocTypes[i] != R_LINX_NONE) {
-            rels[i].type = aux.relocTypes[i];
-            if (rels[i].sym)
-              rels[i].expr = getRelExpr(rels[i].type, *rels[i].sym, nullptr);
-          }
-        } while (++i != e && rels[i].offset == cur);
-        delta = aux.relocDeltas[i - 1];
-      }
-    }
-  }
+  (void)passes;
 }
 
 void LinxISA::relocate(uint8_t *loc, const Relocation &rel,
