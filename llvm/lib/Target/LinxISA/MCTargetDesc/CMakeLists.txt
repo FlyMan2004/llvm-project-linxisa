@@ -13,6 +13,7 @@ add_llvm_component_library(LLVMLinxISADesc
 
   LINK_COMPONENTS
   MC
+  MCDisassembler
   MCParser
   Support
   LinxISAInfo

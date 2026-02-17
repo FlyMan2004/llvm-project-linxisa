@@ -176,6 +176,28 @@ static bool hasUnsupportedCalls(Loop *L) {
   return false;
 }
 
+static bool hasLinxTileIntrinsicCalls(Loop *L) {
+  for (BasicBlock *BB : L->blocks()) {
+    for (Instruction &I : *BB) {
+      const auto *CB = dyn_cast<CallBase>(&I);
+      if (!CB)
+        continue;
+      const Function *Callee = CB->getCalledFunction();
+      if (!Callee || !Callee->isIntrinsic())
+        continue;
+      StringRef Name = Callee->getName();
+      if (Name.starts_with("llvm.linx.tile.") ||
+          Name.starts_with("llvm.linx.tepl.") ||
+          Name.starts_with("llvm.linx.cube.") ||
+          Name.starts_with("llvm.linx.tma.") ||
+          Name.starts_with("llvm.linx.vpar.") ||
+          Name.starts_with("llvm.linx.vseq."))
+        return true;
+    }
+  }
+  return false;
+}
+
 static bool hasStores(Loop *L) {
   for (BasicBlock *BB : L->blocks()) {
     for (Instruction &I : *BB) {
@@ -627,6 +649,7 @@ public:
       const bool HasStore = hasStores(L);
       const bool HasExtraPhi = hasLoopCarriedPhi(L, IsInnermost && IsCounted);
       const bool HasCalls = hasUnsupportedCalls(L);
+      const bool HasLinxTileIntrinsicCalls = hasLinxTileIntrinsicCalls(L);
       const bool HasInnerCF = hasInnerControlFlow(L);
       const bool HasParallelHint = hasParallelLoopHint(L);
       const bool IsAffine = true; // validated during lowering via SCEV binding
@@ -673,6 +696,12 @@ public:
         }
         if (!L->isInnermost()) {
           reject("not_innermost_loop");
+          return false;
+        }
+        if (HasLinxTileIntrinsicCalls) {
+          // Tile/CUBE/TEPL semantics are explicitly modeled by Linx intrinsics;
+          // do not remap those loops through generic SIMT autovec.
+          reject("linx_tile_intrinsic_loop");
           return false;
         }
         if (HasCalls) {
@@ -724,8 +753,13 @@ public:
         }
         const SCEV *TripCountExpr =
             SE.getAddExpr(BackedgeTaken, SE.getOne(BackedgeTaken->getType()));
-        Value *TripCountV =
-            Exp.expandCodeFor(TripCountExpr, I64Ty, Preheader->getTerminator());
+        Type *TripCountTy = TripCountExpr->getType();
+        if (!TripCountTy->isIntegerTy()) {
+          reject("tripcount_non_integer");
+          return false;
+        }
+        Value *TripCountV = Exp.expandCodeFor(TripCountExpr, TripCountTy,
+                                              Preheader->getTerminator());
         if (!TripCountV) {
           reject("tripcount_expand_failed");
           return false;
@@ -1051,7 +1085,19 @@ public:
           }
           llvm_unreachable("invalid reduction kind");
         };
+        auto isMulLikeValue = [](const Value *V) -> bool {
+          const auto *BO = dyn_cast_or_null<BinaryOperator>(V);
+          if (!BO)
+            return false;
+          return BO->getOpcode() == Instruction::Mul ||
+                 BO->getOpcode() == Instruction::FMul;
+        };
         for (const ReductionPlan &Plan : ReductionPlans) {
+          if ((Plan.LaneMulL && Plan.LaneMulR) ||
+              isMulLikeValue(Plan.LaneValue)) {
+            reject("matmul_requires_cube_intrinsic");
+            return false;
+          }
           if (!isSupportedReductionKind(Plan.Kind)) {
             reject("unsupported_reduction_kind");
             return false;
@@ -1272,13 +1318,20 @@ public:
           const SCEV *Start = AddRec->getStart();
           Value *StartV = ExpandedStarts.lookup(Start);
           if (!StartV) {
-            StartV = Exp.expandCodeFor(Start, Ptr->getType(),
+            StartV = Exp.expandCodeFor(Start, Start->getType(),
                                        Preheader->getTerminator());
             if (!StartV)
               return std::nullopt;
             ExpandedStarts[Start] = StartV;
           }
-          Value *BaseI64 = PB.CreatePtrToInt(StartV, I64Ty);
+          Value *BaseI64 = nullptr;
+          if (StartV->getType()->isPointerTy()) {
+            BaseI64 = PB.CreatePtrToInt(StartV, I64Ty);
+          } else if (StartV->getType()->isIntegerTy()) {
+            BaseI64 = PB.CreateZExtOrTrunc(StartV, I64Ty);
+          } else {
+            return std::nullopt;
+          }
           auto BaseOpt = bindI64(BaseI64);
           if (!BaseOpt)
             return std::nullopt;

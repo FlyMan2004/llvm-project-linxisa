@@ -225,6 +225,123 @@ static std::optional<unsigned> parseTileRef(StringRef Name, bool &Reuse) {
   return (Hand << 3) | ((Depth - 1u) & 0x7u);
 }
 
+static std::optional<unsigned> parseDataTypeKeyword(StringRef Name) {
+  const std::string Up = toUpperStr(Name.trim());
+  return StringSwitch<std::optional<unsigned>>(Up)
+      .Case("INT32", 0u)
+      .Case("FP32", 1u)
+      .Case("FP16", 4u)
+      .Case("BF16", 6u)
+      .Default(std::nullopt);
+}
+
+static std::optional<unsigned> parseTMAFunctionKeyword(StringRef Name) {
+  const std::string Up = toUpperStr(Name.trim());
+  return StringSwitch<std::optional<unsigned>>(Up)
+      .Case("TLOAD", 0u)
+      .Case("TSTORE", 1u)
+      .Case("TMOV", 2u)
+      .Default(std::nullopt);
+}
+
+static std::optional<unsigned> parseCubeFunctionKeyword(StringRef Name) {
+  const std::string Up = toUpperStr(Name.trim());
+  return StringSwitch<std::optional<unsigned>>(Up)
+      .Case("MAMULB", 0u)
+      .Case("TMATMUL", 0u)
+      .Case("MAMULB.ACC", 2u)
+      .Case("TMATMUL.ACC", 2u)
+      .Case("ACCCVT", 8u)
+      .Default(std::nullopt);
+}
+
+static std::optional<unsigned> parseTEPLTileOpKeyword(StringRef Name) {
+  const std::string Up = toUpperStr(Name.trim());
+  return StringSwitch<std::optional<unsigned>>(Up)
+      // Elementwise/base PTO vec ops.
+      .Case("TADD", 0x000u)
+      .Case("TSUB", 0x001u)
+      .Case("TMUL", 0x002u)
+      .Case("TDIV", 0x003u)
+      .Case("TMAX", 0x004u)
+      .Case("TMIN", 0x005u)
+      .Case("TAND", 0x006u)
+      .Case("TOR", 0x007u)
+      .Case("TXOR", 0x008u)
+      .Case("TSHL", 0x009u)
+      .Case("TSHR", 0x00au)
+      .Case("TRELU", 0x00du)
+      .Case("TPRELU", 0x00eu)
+      .Case("TCVT", 0x00fu)
+      // Row/column reductions.
+      .Case("TROWMAX", 0x020u)
+      .Case("TROWMIN", 0x021u)
+      .Case("TROWSUM", 0x022u)
+      .Case("TCOLMAX", 0x024u)
+      .Case("TCOLMIN", 0x025u)
+      .Case("TCOLSUM", 0x026u)
+      // Math transforms.
+      .Case("TEXP", 0x040u)
+      .Case("TLOG", 0x041u)
+      .Case("TSQRT", 0x042u)
+      .Case("TRSQRT", 0x043u)
+      .Case("TRECIP", 0x044u)
+      // Data movement/shape helpers.
+      .Case("TGATHER", 0x060u)
+      .Case("TSCATTER", 0x061u)
+      .Case("TRESHAPE", 0x062u)
+      .Case("TTRANSPOSE", 0x063u)
+      .Default(std::nullopt);
+}
+
+struct TileBlockAlias {
+  const char *CanonicalMnemonic;
+  unsigned OpSel;
+};
+
+static std::optional<TileBlockAlias> parseTileBlockAliasMnemonic(StringRef Name) {
+  const std::string Up = toUpperStr(Name.trim());
+  return StringSwitch<std::optional<TileBlockAlias>>(Up)
+      .Case("BSTART.TLOAD", TileBlockAlias{"BSTART.TMA", 0u})
+      .Case("BSTART.TSTORE", TileBlockAlias{"BSTART.TMA", 1u})
+      .Case("BSTART.TMOV", TileBlockAlias{"BSTART.TMA", 2u})
+      .Case("BSTART.MAMULB", TileBlockAlias{"BSTART.CUBE", 0u})
+      .Case("BSTART.TMATMUL", TileBlockAlias{"BSTART.CUBE", 0u})
+      .Case("BSTART.MAMULB.ACC", TileBlockAlias{"BSTART.CUBE", 2u})
+      .Case("BSTART.TMATMUL.ACC", TileBlockAlias{"BSTART.CUBE", 2u})
+      .Case("BSTART.ACCCVT", TileBlockAlias{"BSTART.CUBE", 8u})
+      .Case("BSTART.TADD", TileBlockAlias{"BSTART.TEPL", 0x000u})
+      .Case("BSTART.TSUB", TileBlockAlias{"BSTART.TEPL", 0x001u})
+      .Case("BSTART.TMUL", TileBlockAlias{"BSTART.TEPL", 0x002u})
+      .Case("BSTART.TDIV", TileBlockAlias{"BSTART.TEPL", 0x003u})
+      .Case("BSTART.TMAX", TileBlockAlias{"BSTART.TEPL", 0x004u})
+      .Case("BSTART.TMIN", TileBlockAlias{"BSTART.TEPL", 0x005u})
+      .Case("BSTART.TAND", TileBlockAlias{"BSTART.TEPL", 0x006u})
+      .Case("BSTART.TOR", TileBlockAlias{"BSTART.TEPL", 0x007u})
+      .Case("BSTART.TXOR", TileBlockAlias{"BSTART.TEPL", 0x008u})
+      .Case("BSTART.TSHL", TileBlockAlias{"BSTART.TEPL", 0x009u})
+      .Case("BSTART.TSHR", TileBlockAlias{"BSTART.TEPL", 0x00au})
+      .Case("BSTART.TRELU", TileBlockAlias{"BSTART.TEPL", 0x00du})
+      .Case("BSTART.TPRELU", TileBlockAlias{"BSTART.TEPL", 0x00eu})
+      .Case("BSTART.TCVT", TileBlockAlias{"BSTART.TEPL", 0x00fu})
+      .Case("BSTART.TROWMAX", TileBlockAlias{"BSTART.TEPL", 0x020u})
+      .Case("BSTART.TROWMIN", TileBlockAlias{"BSTART.TEPL", 0x021u})
+      .Case("BSTART.TROWSUM", TileBlockAlias{"BSTART.TEPL", 0x022u})
+      .Case("BSTART.TCOLMAX", TileBlockAlias{"BSTART.TEPL", 0x024u})
+      .Case("BSTART.TCOLMIN", TileBlockAlias{"BSTART.TEPL", 0x025u})
+      .Case("BSTART.TCOLSUM", TileBlockAlias{"BSTART.TEPL", 0x026u})
+      .Case("BSTART.TEXP", TileBlockAlias{"BSTART.TEPL", 0x040u})
+      .Case("BSTART.TLOG", TileBlockAlias{"BSTART.TEPL", 0x041u})
+      .Case("BSTART.TSQRT", TileBlockAlias{"BSTART.TEPL", 0x042u})
+      .Case("BSTART.TRSQRT", TileBlockAlias{"BSTART.TEPL", 0x043u})
+      .Case("BSTART.TRECIP", TileBlockAlias{"BSTART.TEPL", 0x044u})
+      .Case("BSTART.TGATHER", TileBlockAlias{"BSTART.TEPL", 0x060u})
+      .Case("BSTART.TSCATTER", TileBlockAlias{"BSTART.TEPL", 0x061u})
+      .Case("BSTART.TRESHAPE", TileBlockAlias{"BSTART.TEPL", 0x062u})
+      .Case("BSTART.TTRANSPOSE", TileBlockAlias{"BSTART.TEPL", 0x063u})
+      .Default(std::nullopt);
+}
+
 static std::optional<uint32_t> parseSSRIdName(StringRef Name) {
   std::string Up = toUpperStr(Name.trim());
 
@@ -1020,6 +1137,12 @@ bool LinxISAAsmParser::parseArrowDestOperand(ParsedReg &OutDest) {
         return Error(getTok().getLoc(),
                      "size must be power-of-two bytes and >=16B");
       SizeCode = *Code;
+    }
+
+    // strict-v0.3 policy: tile descriptor sizes are limited to 512B..4KB.
+    if (SizeCode < 5u || SizeCode > 8u) {
+      return Error(getTok().getLoc(),
+                   "tile size must be in strict range 512B..4KB");
     }
 
     if (parseToken(AsmToken::Greater, "expected '>' to close size suffix"))
@@ -1997,6 +2120,121 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
   if (!require(!PI.Mem.has_value(), "unexpected memory operand"))
     return false;
 
+  // Tile block headers are canonically "<selector>, DataType" in strict v0.3:
+  // Function for TMA/CUBE, TileOp10 for TEPL.
+  //
+  // The encoded field order remains DataType/Function|TileOp10, so parse in
+  // canonical source order here and emit in field order below.
+  const bool IsBStartTMA = AsmFmt.starts_with("BSTART.TMA");
+  const bool IsBStartCUBE = AsmFmt.starts_with("BSTART.CUBE");
+  const bool IsBStartTEPL = AsmFmt.starts_with("BSTART.TEPL");
+  if (IsBStartTMA || IsBStartCUBE || IsBStartTEPL) {
+    const char *Kind = IsBStartTMA
+                           ? "BSTART.TMA"
+                           : (IsBStartCUBE ? "BSTART.CUBE" : "BSTART.TEPL");
+    if (!require(PI.Regs.empty() && PI.Keywords.empty() && !PI.ArrowDest &&
+                     !PI.SetRetTarget,
+                 (Twine("unexpected operands for ") + Kind)))
+      return false;
+    const char *Selector = IsBStartTEPL ? "TileOp10" : "Function";
+    if (!require(
+            PI.Imms.size() == 2,
+            (Twine("expected operands '") + Selector + ", DataType' for " + Kind)))
+      return false;
+
+    auto decodeNamedImm = [&](const MCExpr *E, StringRef FieldName)
+        -> std::optional<int64_t> {
+      int64_t V = 0;
+      if (isConstExpr(E, V))
+        return V;
+      if (const auto *S = dyn_cast<MCSymbolRefExpr>(E)) {
+        StringRef Sym = S->getSymbol().getName();
+        if (FieldName == "DataType") {
+          if (auto DT = parseDataTypeKeyword(Sym))
+            return static_cast<int64_t>(*DT);
+          return std::nullopt;
+        }
+        if (FieldName == "Function") {
+          if (IsBStartTMA) {
+            if (auto Fn = parseTMAFunctionKeyword(Sym))
+              return static_cast<int64_t>(*Fn);
+          } else if (IsBStartCUBE) {
+            if (auto Fn = parseCubeFunctionKeyword(Sym))
+              return static_cast<int64_t>(*Fn);
+          } else if (IsBStartTEPL) {
+            if (auto Op = parseTEPLTileOpKeyword(Sym))
+              return static_cast<int64_t>(*Op);
+          }
+          return std::nullopt;
+        }
+        if (FieldName == "TileOp10") {
+          if (auto Op = parseTEPLTileOpKeyword(Sym))
+            return static_cast<int64_t>(*Op);
+          return std::nullopt;
+        }
+      }
+      return std::nullopt;
+    };
+
+    std::optional<int64_t> FuncVal =
+        decodeNamedImm(PI.Imms[0].Expr, IsBStartTEPL ? "TileOp10" : "Function");
+    std::optional<int64_t> DataTypeVal =
+        decodeNamedImm(PI.Imms[1].Expr, "DataType");
+
+    if (IsBStartTMA) {
+      if (!require(FuncVal.has_value(),
+                   "Function must be a constant or one of {TLOAD,TSTORE,TMOV}"))
+        return false;
+    } else if (IsBStartCUBE) {
+      if (!require(FuncVal.has_value(),
+                   "Function must be a constant or one of "
+                   "{MAMULB,TMATMUL,MAMULB.ACC,TMATMUL.ACC,ACCCVT}"))
+        return false;
+    } else {
+      if (!require(FuncVal.has_value(),
+                   "TileOp10 must be a constant or one of "
+                   "{TADD,TSUB,TMUL,TDIV,TMAX,TMIN,TROWMAX,TROWMIN,TROWSUM,"
+                   "TCOLMAX,TCOLMIN,TCOLSUM,...}"))
+        return false;
+    }
+    if (!require(DataTypeVal.has_value(),
+                 "DataType must be a constant or one of "
+                 "{INT32,FP32,FP16,BF16}"))
+      return false;
+    if (IsBStartTMA)
+      if (!require(*FuncVal >= 0 && *FuncVal <= 2,
+                   "BSTART.TMA Function must be in range 0..2 in minimal "
+                   "v0.3 mode"))
+        return false;
+    if (IsBStartTEPL)
+      if (!require(*FuncVal >= 0 && *FuncVal <= 0x3ff,
+                   "BSTART.TEPL TileOp10 must be in range 0..1023"))
+        return false;
+    if (!require(*DataTypeVal >= 0 && *DataTypeVal <= 31,
+                 (Twine(Kind) + " DataType out of range")))
+      return false;
+
+    for (unsigned i = 0; i < Form.field_count; ++i) {
+      const linxisa_field &Field = linxisa_fields[Form.field_start + i];
+      StringRef FN(Field.name);
+      if (FN == "DataType") {
+        emitFieldImm(*DataTypeVal);
+        continue;
+      }
+      if (FN == "Function") {
+        emitFieldImm(*FuncVal);
+        continue;
+      }
+      if (FN == "TileOp10") {
+        emitFieldImm(*FuncVal);
+        continue;
+      }
+      Err = (Twine("unsupported ") + Kind + " field: " + FN).str();
+      return false;
+    }
+    return true;
+  }
+
   unsigned RegIdx = 0;
   unsigned ImmIdx = 0;
   std::optional<ParsedReg> SrcROp;
@@ -2186,6 +2424,10 @@ bool LinxISAAsmParser::matchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
     Key.resize(Key.size() - StringRef(".LOCAL").size());
   }
 
+  std::optional<TileBlockAlias> TileAlias = parseTileBlockAliasMnemonic(Key);
+  if (TileAlias)
+    Key = TileAlias->CanonicalMnemonic;
+
   const auto &Map = getMnemonicMap();
   auto It = Map.find(Key);
   if (It == Map.end())
@@ -2194,6 +2436,23 @@ bool LinxISAAsmParser::matchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
   ParsedInst PI;
   buildParsedInst(Operands, PI);
   PI.LocalBit = LocalBit;
+
+  if (TileAlias) {
+    if (!PI.Regs.empty() || !PI.Keywords.empty() || PI.Mem.has_value() ||
+        PI.ArrowDest.has_value() || PI.SetRetTarget.has_value())
+      return Error(IDLoc, "tile alias expects only a DataType operand");
+    if (PI.Imms.size() != 1)
+      return Error(IDLoc, "tile alias expects exactly one DataType operand");
+
+    ParsedImm FuncImm;
+    FuncImm.Expr = MCConstantExpr::create(TileAlias->OpSel, getContext());
+    FuncImm.Loc = IDLoc;
+    ParsedImm DataTypeImm = PI.Imms[0];
+
+    PI.Imms.clear();
+    PI.Imms.push_back(FuncImm);
+    PI.Imms.push_back(DataTypeImm);
+  }
 
   // Fused syntax: `BSTART CALL, <target>, ra=<return>`.
   if (PI.SetRetTarget.has_value()) {

@@ -80,20 +80,19 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   addRegisterClass(MVT::i32, &LinxISA::GPRRegClass);
   addRegisterClass(MVT::f64, &LinxISA::GPRRegClass);
   addRegisterClass(MVT::f32, &LinxISA::GPRRegClass);
-  // Tile registers (TAU): model hardware tiles as an opaque vector payload.
+  // Tile registers (TAU): model hardware tiles as an opaque tile payload.
   //
   // Bring-up rule: tile values are expected to be produced/consumed only by
-  // Linx tile intrinsics (e.g. llvm.linx.tma.* / llvm.linx.cube.*). Keep all
+  // Linx tile intrinsics (e.g. llvm.linx.tile.* / llvm.linx.cube.*). Keep all
   // generic vector ops expanded/custom so the backend does not accidentally
-  // start treating <1024 x i32> as a general SIMD type. A small allowlist of
-  // elementwise operations is lowered into VPAR decoupled blocks to support
-  // normal C/C++ vector arithmetic on tiles during bring-up.
-  addRegisterClass(MVT::v1024i32, &LinxISA::TILERegClass);
+  // start treating tiles as a general SIMD type. A small allowlist of
+  // elementwise operations is lowered into VPAR decoupled blocks.
+  addRegisterClass(MVT::linxtile, &LinxISA::TILERegClass);
 
   // Bring-up: support elementwise add/sub on tile values (selected late into
   // decoupled VPAR blocks). Other generic vector ops remain expanded.
-  setOperationAction(ISD::ADD, MVT::v1024i32, Legal);
-  setOperationAction(ISD::SUB, MVT::v1024i32, Legal);
+  setOperationAction(ISD::ADD, MVT::linxtile, Legal);
+  setOperationAction(ISD::SUB, MVT::linxtile, Legal);
 
   computeRegisterProperties(STI.getRegisterInfo());
   setStackPointerRegisterToSaveRestore(LinxISA::R1);

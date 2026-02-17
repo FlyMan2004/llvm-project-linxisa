@@ -258,6 +258,9 @@ DecodeIITType(unsigned &NextElt, ArrayRef<unsigned char> Infos,
   case IIT_AARCH64_SVCOUNT:
     OutputTable.push_back(IITDescriptor::get(IITDescriptor::AArch64Svcount, 0));
     return;
+  case IIT_LINX_TILE:
+    OutputTable.push_back(IITDescriptor::get(IITDescriptor::LinxTile, 0));
+    return;
   case IIT_I8:
     OutputTable.push_back(IITDescriptor::get(IITDescriptor::Integer, 8));
     return;
@@ -505,6 +508,8 @@ static Type *DecodeFixedType(ArrayRef<Intrinsic::IITDescriptor> &Infos,
     return Type::getPPC_FP128Ty(Context);
   case IITDescriptor::AArch64Svcount:
     return TargetExtType::get(Context, "aarch64.svcount");
+  case IITDescriptor::LinxTile:
+    return TargetExtType::get(Context, "linx.tile");
 
   case IITDescriptor::Integer:
     return IntegerType::get(Context, D.Integer_Width);
@@ -890,6 +895,9 @@ matchIntrinsicType(Type *Ty, ArrayRef<Intrinsic::IITDescriptor> &Infos,
   case IITDescriptor::AArch64Svcount:
     return !isa<TargetExtType>(Ty) ||
            cast<TargetExtType>(Ty)->getName() != "aarch64.svcount";
+  case IITDescriptor::LinxTile:
+    return !isa<TargetExtType>(Ty) ||
+           cast<TargetExtType>(Ty)->getName() != "linx.tile";
   case IITDescriptor::Vector: {
     VectorType *VT = dyn_cast<VectorType>(Ty);
     return !VT || VT->getElementCount() != D.Vector_Width ||

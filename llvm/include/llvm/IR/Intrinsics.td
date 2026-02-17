@@ -372,6 +372,7 @@ def IIT_V6 : IIT_Vec<6, 50>;
 def IIT_V10 : IIT_Vec<10, 51>;
 def IIT_V2048 : IIT_Vec<2048, 52>;
 def IIT_V4096 : IIT_Vec<4096, 53>;
+def IIT_LINX_TILE : IIT_VT<linxtile, 54>;
 }
 
 defvar IIT_all_FixedTypes = !filter(iit, IIT_all,
@@ -549,6 +550,7 @@ def llvm_x86mmx_ty     : LLVMType<x86mmx>;
 def llvm_aarch64_svcount_ty : LLVMType<aarch64svcount>;
 
 def llvm_x86amx_ty     : LLVMType<x86amx>;
+def llvm_linx_tile_ty  : LLVMType<linxtile>;
 
 def llvm_v2i1_ty       : LLVMType<v2i1>;     //   2 x i1
 def llvm_v4i1_ty       : LLVMType<v4i1>;     //   4 x i1
