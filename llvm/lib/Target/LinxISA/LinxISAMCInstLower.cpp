@@ -1468,6 +1468,19 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
 
     const MachineOperand &Op2 = MI->getOperand(2);
     if (Op2.isImm()) {
+      const Register DstReg = MI->getOperand(0).getReg();
+      const Register SrcReg = MI->getOperand(1).getReg();
+      const int64_t Imm = I(2);
+      if (linxEnableCShift16() && DstReg == LinxISA::U4 &&
+          SrcReg == LinxISA::T1 && isUInt<5>(Imm) &&
+          (Opc == LinxISA::SLLIri || Opc == LinxISA::SRLIri)) {
+        const StringRef Cmnem =
+            (Opc == LinxISA::SLLIri) ? "C.SLLI" : "C.SRLI";
+        OutMI.setOpcode(getSpecOpcode(Cmnem, /*LengthBits=*/16, /*Fields=*/1));
+        OutMI.addOperand(MCOperand::createImm(Imm)); // uimm5
+        return;
+      }
+
       OutMI.setOpcode(getSpecOpcode(Mnem, /*LengthBits=*/32, /*Fields=*/3));
       OutMI.addOperand(MCOperand::createImm(R(0))); // RegDst
       OutMI.addOperand(MCOperand::createImm(R(1))); // SrcL

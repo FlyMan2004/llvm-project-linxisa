@@ -1,0 +1,55 @@
+# RUN: llc -mtriple=linx64 -run-pass=linx-blockify --linx-enable-t1-motion -o - %s | FileCheck %s
+
+# CHECK-LABEL: name: t1_motion
+# CHECK: bb.0:
+# CHECK: {{\$[a-z0-9#]+}} = ADDIri $r0, 42
+# CHECK-NEXT: {{\$[a-z0-9#]+}} = ADDIri killed $r2, 1
+
+--- |
+  define i64 @t1_motion(i64 %x) {
+  entry:
+    ret i64 0
+  }
+...
+---
+name:            t1_motion
+alignment:       2
+legalized:       false
+regBankSelected: false
+selected:        false
+failedISel:      false
+tracksRegLiveness: true
+isSSA:           false
+noVRegs:         true
+liveins:
+  - { reg: '$r2', virtual-reg: '' }
+frameInfo:
+  stackSize:       0
+  adjustsStack:    false
+  hasCalls:        false
+  isCalleeSavedInfoValid: true
+fixedStack:      []
+stack:           []
+body:             |
+  bb.0:
+    successors: %bb.1(0x40000000), %bb.2(0x40000000)
+    liveins: $r2
+
+    $r5 = ADDIri killed $r2, 1
+    $r6 = ADDIri $r0, 42
+    $r7 = ANDrr $r5, $r6
+    BNE $r7, $r0, %bb.1
+    JUMP %bb.2
+
+  bb.1:
+    liveins: $r3
+
+    $r2 = ADDIri $r0, 1
+    PSEUDO_RET implicit $r10, implicit $r2, implicit $r3
+
+  bb.2:
+    liveins: $r3
+
+    $r2 = ADDIri $r0, 0
+    PSEUDO_RET implicit $r10, implicit $r2, implicit $r3
+...

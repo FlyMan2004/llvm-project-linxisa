@@ -11,6 +11,7 @@
 #include "LinxISATargetMachine.h"
 #include "MCTargetDesc/LinxISAMCTargetDesc.h"
 #include "llvm/CodeGen/SelectionDAGISel.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsLinx.h"
 #include "llvm/Support/Debug.h"
@@ -412,6 +413,86 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
   case ISD::SUB: {
     SDLoc DL(N);
     EVT VT = N->getValueType(0);
+    if (linxEnableNegImmCanon() && (VT == MVT::i64 || VT == MVT::i32)) {
+      auto allowHLImmediate = [&](bool ReplacesAtLeastOneInsn) -> bool {
+        const LinxCodeSizeBalanceMode Mode = linxCodeSizeBalanceMode();
+        if (Mode == LinxCodeSizeBalanceMode::Off)
+          return true;
+        if (!ReplacesAtLeastOneInsn)
+          return false;
+        if (Mode == LinxCodeSizeBalanceMode::StaticFirst ||
+            Mode == LinxCodeSizeBalanceMode::DynamicFirst)
+          return true;
+
+        // Balanced mode is conservative in the initial rollout: only apply the
+        // wider immediate form when the function is already size-oriented.
+        const Function &F = CurDAG->getMachineFunction().getFunction();
+        return F.hasOptSize() || F.hasMinSize();
+      };
+
+      auto emitImmArith = [&](unsigned NewOpc, SDValue Base,
+                              uint64_t AbsImm) -> bool {
+        if (!isUInt<24>(AbsImm))
+          return false;
+        unsigned Opc = NewOpc;
+        if ((NewOpc == LinxISA::ADDIri || NewOpc == LinxISA::SUBIri ||
+             NewOpc == LinxISA::ADDIWri || NewOpc == LinxISA::SUBIWri) &&
+            !isUInt<12>(AbsImm)) {
+          if (!allowHLImmediate(/*ReplacesAtLeastOneInsn=*/true))
+            return false;
+          switch (NewOpc) {
+          case LinxISA::ADDIri:
+            Opc = LinxISA::HLADDIri;
+            break;
+          case LinxISA::SUBIri:
+            Opc = LinxISA::HLSUBIri;
+            break;
+          case LinxISA::ADDIWri:
+            Opc = LinxISA::HLADDIWri;
+            break;
+          case LinxISA::SUBIWri:
+            Opc = LinxISA::HLSUBIWri;
+            break;
+          default:
+            break;
+          }
+        }
+
+        SDValue Imm = CurDAG->getTargetConstant(
+            static_cast<int64_t>(AbsImm), DL, VT == MVT::i64 ? MVT::i64 : MVT::i32);
+        ReplaceNode(N, CurDAG->getMachineNode(Opc, DL, VT, Base, Imm));
+        return true;
+      };
+
+      auto tryCanonicalizeNegImm = [&](SDValue Base, SDValue Const,
+                                       unsigned PosOpc) -> bool {
+        auto *CN = dyn_cast<ConstantSDNode>(Const);
+        if (!CN)
+          return false;
+        APInt CVal = CN->getAPIntValue().sextOrTrunc(VT.getSizeInBits());
+        if (!CVal.isNegative())
+          return false;
+
+        const uint64_t AbsImm = (-CVal).getZExtValue();
+        if (AbsImm == 0)
+          return false;
+        return emitImmArith(PosOpc, Base, AbsImm);
+      };
+
+      const bool IsW = (VT == MVT::i32);
+      if (Opcode == ISD::ADD) {
+        if (tryCanonicalizeNegImm(N->getOperand(0), N->getOperand(1),
+                                  IsW ? LinxISA::SUBIWri : LinxISA::SUBIri) ||
+            tryCanonicalizeNegImm(N->getOperand(1), N->getOperand(0),
+                                  IsW ? LinxISA::SUBIWri : LinxISA::SUBIri)) {
+          return;
+        }
+      } else {
+        if (tryCanonicalizeNegImm(N->getOperand(0), N->getOperand(1),
+                                  IsW ? LinxISA::ADDIWri : LinxISA::ADDIri))
+          return;
+      }
+    }
     if (VT == MVT::v1024i32) {
       SDValue A = N->getOperand(0);
       SDValue B = N->getOperand(1);
@@ -520,6 +601,24 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
     SDValue ZeroImm = CurDAG->getTargetConstant(0, DL, MVT::i64);
     ReplaceNode(N, CurDAG->getMachineNode(LinxISA::ADDIri, DL, VT, TFI, ZeroImm));
     return;
+  }
+
+  case ISD::INTRINSIC_WO_CHAIN: {
+    auto *C = dyn_cast<ConstantSDNode>(N->getOperand(0));
+    if (!C)
+      break;
+
+    const unsigned IntrID = C->getZExtValue();
+    if (IntrID == Intrinsic::thread_pointer) {
+      // Bring-up fallback: lower llvm.thread.pointer to zero so hosted
+      // runtimes can compile while TLS ABI/register plumbing is still in flight.
+      SDLoc DL(N);
+      EVT VT = N->getValueType(0);
+      SDValue Zero = CurDAG->getRegister(LinxISA::R0, VT);
+      ReplaceNode(N, CurDAG->getMachineNode(TargetOpcode::COPY, DL, VT, Zero));
+      return;
+    }
+    break;
   }
 
   case ISD::INTRINSIC_W_CHAIN: {
