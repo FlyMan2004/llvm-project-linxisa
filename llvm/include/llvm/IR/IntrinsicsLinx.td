@@ -30,7 +30,6 @@ let TargetPrefix = "linx" in {
   // - size_code in [5, 8] (512B..4KB)
   // - dtype in u5
   // - layout/lb0/lb1/stride are immediate scalar descriptor fields
-  // - current lowering requires immStrideBytes == 0
   def int_linx_tile_tload :
       Intrinsic<[llvm_linx_tile_ty],
                 [llvm_ptr_ty, llvm_i32_ty, llvm_i32_ty, llvm_i64_ty,
@@ -85,9 +84,10 @@ let TargetPrefix = "linx" in {
   //                                      %linx.tile a, %linx.tile b,
   //                                      i32 immM, i32 immN, i32 immK)
   //
-  // Bring-up model: this updates an implicit accumulator state (as modeled by
-  // the Linx emulator). The explicit acc operand is kept to preserve SSA
-  // dependencies for scheduling and to match PTO's TMATMUL_ACC intent.
+  // Strict-v0.3 model:
+  // - CUBE matmul writes a singleton implicit accumulator (ACC) state.
+  // - The explicit acc operand is SSA dependency only (no encoded ACC tile id).
+  // - Frontends must chain from cube.mamulb / cube.mamulb.acc producers.
   def int_linx_cube_mamulb_acc :
       Intrinsic<[llvm_linx_tile_ty],
                 [llvm_linx_tile_ty, llvm_linx_tile_ty, llvm_linx_tile_ty,
@@ -98,8 +98,9 @@ let TargetPrefix = "linx" in {
   // %linx.tile @llvm.linx.cube.acccvt(%linx.tile acc, i32 immSizeCode,
   //                                   i32 immDType, i64 immQArg0, i64 immQArg1)
   //
-  // PR5 roadmap stub: expose ACCCVT as a dedicated intrinsic surface.
   // Strict-v0.3 legality (enforced in Linx backend):
+  // - acc operand is SSA dependency only (no encoded ACC tile id)
+  // - acc must chain from cube.mamulb / cube.mamulb.acc producer
   // - size_code in [5, 8] (512B..4KB)
   // - dtype in u5
   // - quantization args are immediate scalars; current lowering requires both
@@ -137,6 +138,34 @@ let TargetPrefix = "linx" in {
                 [IntrNoMem, IntrHasSideEffects,
                  ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>,
                  ImmArg<ArgIndex<4>>]>;
+
+  // %linx.tile @llvm.linx.tepl.binary.scalar(%linx.tile a, i64 scalar,
+  //                                          i32 immTileOp10, i32 immSizeCode,
+  //                                          i32 immDType, i32 immMode)
+  //
+  // Scalar TEPL mode extension for strict-v0.3:
+  // - mode 1 = VS (tile,scalar)
+  def int_linx_tepl_binary_scalar :
+      Intrinsic<[llvm_linx_tile_ty],
+                [llvm_linx_tile_ty, llvm_i64_ty, llvm_i32_ty,
+                 llvm_i32_ty, llvm_i32_ty, llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects,
+                 ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>,
+                 ImmArg<ArgIndex<4>>, ImmArg<ArgIndex<5>>]>;
+
+  // %linx.tile @llvm.linx.tepl.splat(i64 scalar, i32 immTileOp10,
+  //                                  i32 immSizeCode, i32 immDType,
+  //                                  i32 immMode)
+  //
+  // Scalar TEPL mode extension for strict-v0.3:
+  // - mode 2 = SV (scalar->tile splat)
+  def int_linx_tepl_splat :
+      Intrinsic<[llvm_linx_tile_ty],
+                [llvm_i64_ty, llvm_i32_ty, llvm_i32_ty,
+                 llvm_i32_ty, llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects,
+                 ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<2>>,
+                 ImmArg<ArgIndex<3>>, ImmArg<ArgIndex<4>>]>;
 
   // Typed TEPL wrappers (PR5 follow-on):
   // - map to fixed TileOp10 values while keeping explicit size/dtype controls.
@@ -223,5 +252,104 @@ let TargetPrefix = "linx" in {
   def int_linx_vpar_tsub :
       Intrinsic<[llvm_linx_tile_ty],
                 [llvm_linx_tile_ty, llvm_linx_tile_ty, llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects, ImmArg<ArgIndex<2>>]>;
+
+  // -------------------------------------------------------------------------
+  // Legacy vector bridge intrinsics (clang builtin compatibility).
+  //
+  // These keep the C/C++ builtin surface usable while the frontend migrates
+  // away from `_Vector<1024, int>` tile placeholders.
+  // -------------------------------------------------------------------------
+
+  // Legacy TMA descriptor forms (internal clang bridge only).
+  def int_linx_tma_tload_desc :
+      Intrinsic<[llvm_anyvector_ty],
+                [llvm_ptr_ty, llvm_i32_ty, llvm_i32_ty, llvm_i32_ty,
+                 llvm_i32_ty, llvm_i32_ty, llvm_i64_ty],
+                [IntrReadMem, IntrArgMemOnly,
+                 NoCapture<ArgIndex<0>>, ImmArg<ArgIndex<1>>,
+                 ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>,
+                 ImmArg<ArgIndex<4>>, ImmArg<ArgIndex<5>>,
+                 ImmArg<ArgIndex<6>>]>;
+  def int_linx_tma_tstore_desc :
+      Intrinsic<[],
+                [llvm_ptr_ty, llvm_anyvector_ty, llvm_i32_ty, llvm_i32_ty,
+                 llvm_i32_ty, llvm_i32_ty, llvm_i32_ty, llvm_i64_ty],
+                [IntrWriteMem, IntrArgMemOnly,
+                 NoCapture<ArgIndex<0>>, ImmArg<ArgIndex<2>>,
+                 ImmArg<ArgIndex<3>>, ImmArg<ArgIndex<4>>,
+                 ImmArg<ArgIndex<5>>, ImmArg<ArgIndex<6>>,
+                 ImmArg<ArgIndex<7>>]>;
+
+  // Legacy vector TMOV bridge.
+  def int_linx_tile_tmov_legacy :
+      Intrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, llvm_i32_ty, llvm_i32_ty, llvm_i32_ty,
+                 llvm_i64_ty, llvm_i1_ty],
+                [IntrNoMem, IntrHasSideEffects,
+                 ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<2>>,
+                 ImmArg<ArgIndex<3>>, ImmArg<ArgIndex<4>>,
+                 ImmArg<ArgIndex<5>>]>;
+
+  // Legacy CUBE forms.
+  def int_linx_cube_mamulb_legacy :
+      Intrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, LLVMMatchType<0>, llvm_i32_ty, llvm_i32_ty,
+                 llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects,
+                 ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>,
+                 ImmArg<ArgIndex<4>>]>;
+  def int_linx_cube_mamulb_acc_legacy :
+      Intrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>,
+                 llvm_i32_ty, llvm_i32_ty, llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects,
+                 ImmArg<ArgIndex<3>>, ImmArg<ArgIndex<4>>,
+                 ImmArg<ArgIndex<5>>]>;
+  def int_linx_cube_acccvt_legacy :
+      Intrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, llvm_i32_ty, llvm_i32_ty, llvm_i64_ty,
+                 llvm_i64_ty],
+                [IntrNoMem, IntrHasSideEffects,
+                 ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<2>>,
+                 ImmArg<ArgIndex<3>>, ImmArg<ArgIndex<4>>]>;
+
+  // Legacy TEPL forms.
+  def int_linx_tepl_unary_legacy :
+      Intrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, llvm_i32_ty, llvm_i32_ty, llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects,
+                 ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<2>>,
+                 ImmArg<ArgIndex<3>>]>;
+  def int_linx_tepl_binary_legacy :
+      Intrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, LLVMMatchType<0>, llvm_i32_ty, llvm_i32_ty,
+                 llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects,
+                 ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>,
+                 ImmArg<ArgIndex<4>>]>;
+  def int_linx_tepl_binary_scalar_legacy :
+      Intrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, llvm_i64_ty, llvm_i32_ty, llvm_i32_ty,
+                 llvm_i32_ty, llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects,
+                 ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<3>>,
+                 ImmArg<ArgIndex<4>>, ImmArg<ArgIndex<5>>]>;
+  def int_linx_tepl_splat_legacy :
+      Intrinsic<[llvm_anyvector_ty],
+                [llvm_i64_ty, llvm_i32_ty, llvm_i32_ty, llvm_i32_ty,
+                 llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects,
+                 ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<2>>,
+                 ImmArg<ArgIndex<3>>, ImmArg<ArgIndex<4>>]>;
+
+  // Legacy vector VPAR forms.
+  def int_linx_vpar_tadd_legacy :
+      Intrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, LLVMMatchType<0>, llvm_i32_ty],
+                [IntrNoMem, IntrHasSideEffects, ImmArg<ArgIndex<2>>]>;
+  def int_linx_vpar_tsub_legacy :
+      Intrinsic<[llvm_anyvector_ty],
+                [LLVMMatchType<0>, LLVMMatchType<0>, llvm_i32_ty],
                 [IntrNoMem, IntrHasSideEffects, ImmArg<ArgIndex<2>>]>;
 }

@@ -228,10 +228,34 @@ static std::optional<unsigned> parseTileRef(StringRef Name, bool &Reuse) {
 static std::optional<unsigned> parseDataTypeKeyword(StringRef Name) {
   const std::string Up = toUpperStr(Name.trim());
   return StringSwitch<std::optional<unsigned>>(Up)
-      .Case("INT32", 0u)
+      .Case("FP64", 0u)
       .Case("FP32", 1u)
-      .Case("FP16", 4u)
+      .Case("FP16", 2u)
+      .Case("FP8", 3u)
       .Case("BF16", 6u)
+      .Case("FPL8", 7u)
+      .Case("FP4", 11u)
+      .Case("FPL4", 12u)
+      .Case("INT64", 16u)
+      .Case("S64", 16u)
+      .Case("INT32", 17u)
+      .Case("S32", 17u)
+      .Case("INT16", 18u)
+      .Case("S16", 18u)
+      .Case("INT8", 19u)
+      .Case("S8", 19u)
+      .Case("INT4", 20u)
+      .Case("S4", 20u)
+      .Case("UINT64", 24u)
+      .Case("U64", 24u)
+      .Case("UINT32", 25u)
+      .Case("U32", 25u)
+      .Case("UINT16", 26u)
+      .Case("U16", 26u)
+      .Case("UINT8", 27u)
+      .Case("U8", 27u)
+      .Case("UINT4", 28u)
+      .Case("U4", 28u)
       .Default(std::nullopt);
 }
 
@@ -280,12 +304,14 @@ static std::optional<unsigned> parseTEPLTileOpKeyword(StringRef Name) {
       .Case("TCOLMAX", 0x024u)
       .Case("TCOLMIN", 0x025u)
       .Case("TCOLSUM", 0x026u)
+      .Case("TCOLEXPAND", 0x027u)
       // Math transforms.
       .Case("TEXP", 0x040u)
       .Case("TLOG", 0x041u)
       .Case("TSQRT", 0x042u)
       .Case("TRSQRT", 0x043u)
       .Case("TRECIP", 0x044u)
+      .Case("TEXPANDS", 0x045u)
       // Data movement/shape helpers.
       .Case("TGATHER", 0x060u)
       .Case("TSCATTER", 0x061u)
@@ -330,11 +356,13 @@ static std::optional<TileBlockAlias> parseTileBlockAliasMnemonic(StringRef Name)
       .Case("BSTART.TCOLMAX", TileBlockAlias{"BSTART.TEPL", 0x024u})
       .Case("BSTART.TCOLMIN", TileBlockAlias{"BSTART.TEPL", 0x025u})
       .Case("BSTART.TCOLSUM", TileBlockAlias{"BSTART.TEPL", 0x026u})
+      .Case("BSTART.TCOLEXPAND", TileBlockAlias{"BSTART.TEPL", 0x027u})
       .Case("BSTART.TEXP", TileBlockAlias{"BSTART.TEPL", 0x040u})
       .Case("BSTART.TLOG", TileBlockAlias{"BSTART.TEPL", 0x041u})
       .Case("BSTART.TSQRT", TileBlockAlias{"BSTART.TEPL", 0x042u})
       .Case("BSTART.TRSQRT", TileBlockAlias{"BSTART.TEPL", 0x043u})
       .Case("BSTART.TRECIP", TileBlockAlias{"BSTART.TEPL", 0x044u})
+      .Case("BSTART.TEXPANDS", TileBlockAlias{"BSTART.TEPL", 0x045u})
       .Case("BSTART.TGATHER", TileBlockAlias{"BSTART.TEPL", 0x060u})
       .Case("BSTART.TSCATTER", TileBlockAlias{"BSTART.TEPL", 0x061u})
       .Case("BSTART.TRESHAPE", TileBlockAlias{"BSTART.TEPL", 0x062u})
@@ -654,6 +682,8 @@ struct ParsedReg {
   bool HasExplicitShift = false;
   bool HasAngleSize = false;
   unsigned AngleSize = 0;
+  bool HasAngleReg = false;
+  unsigned AngleReg = 0;
   SMLoc Loc;
 };
 
@@ -1028,7 +1058,9 @@ bool LinxISAAsmParser::parseArrowDestOperand(ParsedReg &OutDest) {
 
   Lex();
 
-  // Optional tile-descriptor angle suffix: `->t<Size>` / `->acc<Size>`.
+  // Optional tile-descriptor angle suffix:
+  //   - `->t<Size>` / `->acc<Size>` (B.IOTI)
+  //   - `->t<RegSrc>` / `->acc<RegSrc>` (B.IOT)
   // This syntax is used by B.IOT/B.IOTI and is not a normal register operand.
   if (getTok().is(AsmToken::Less)) {
     std::string Up = toUpperStr(Base);
@@ -1050,7 +1082,22 @@ bool LinxISAAsmParser::parseArrowDestOperand(ParsedReg &OutDest) {
     D.Code = Kind;
     Lex(); // '<'
 
-    // Parse: <SizeCode> or <N KB> or <N B>
+    if (getTok().is(AsmToken::Identifier)) {
+      if (auto Reg = parseRegCode(getTok().getString())) {
+        if (*Reg >= 32u)
+          return Error(getTok().getLoc(),
+                       "B.IOT RegSrc must be a scalar 5-bit register");
+        D.HasAngleReg = true;
+        D.AngleReg = *Reg & 0x1fu;
+        Lex();
+        if (parseToken(AsmToken::Greater, "expected '>' to close reg suffix"))
+          return true;
+        OutDest = D;
+        return false;
+      }
+    }
+
+    // Parse size form: <SizeCode> or <N KB> or <N B>
     if (!getTok().is(AsmToken::Integer) && !getTok().is(AsmToken::Identifier))
       return Error(getTok().getLoc(),
                    "expected size code or <N KB>/<N B> after '<'");
@@ -1923,6 +1970,8 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
     unsigned Fmt = 0;
     if (Up == "NORM.NORMAL")
       Fmt = 0;
+    else if (Up == "ND2NZ.NORMAL")
+      Fmt = 2;
     else if (Up == "ND2ZN.NORMAL")
       Fmt = 3;
     else if (Up == "DN2ZN.NORMAL")
@@ -1931,9 +1980,19 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
       Fmt = 9;
     else if (Up == "NZ2DN.CANON")
       Fmt = 28;
+    else if (Up == "V2V")
+      Fmt = 0;
+    else if (Up == "A2V")
+      Fmt = 1;
+    else if (Up == "VV")
+      Fmt = 0;
+    else if (Up == "VS")
+      Fmt = 1;
+    else if (Up == "SV")
+      Fmt = 2;
     else
       return require(false,
-                     "unknown B.ARG layout name (use format=<imm> for raw values)");
+                     "unknown B.ARG name (use format=<imm> for raw values)");
 
     emitFieldImm(Fmt);
     return true;
@@ -1983,6 +2042,11 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
       return false;
     }
     return true;
+  }
+
+  if (AsmFmt.starts_with("B.IOD")) {
+    Err = "B.IOD is deprecated in strict-v0.3; use B.IOR/B.IOT/B.IOTI";
+    return false;
   }
 
   // Special-case: GPR descriptor binding (B.IOR).
@@ -2038,12 +2102,14 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
                  "group/last marker does not match encoding"))
       return false;
 
-    if (!require(PI.ArrowDest.has_value() && PI.ArrowDest->HasAngleSize,
-                 "expected tile destination + size suffix '->t<Size>'"))
+    if (!require(PI.ArrowDest.has_value(),
+                 "expected tile destination suffix (for example '->t<1KB>' or "
+                 "'->t<a0>')"))
       return false;
 
     const unsigned DstTile = PI.ArrowDest->Code & 0x7u;
     const unsigned SizeCode = PI.ArrowDest->AngleSize & 0x1fu;
+    const unsigned RegSrc = PI.ArrowDest->AngleReg & 0x1fu;
 
     if (!require(PI.Imms.size() <= 2,
                  "B.IOT/B.IOTI supports at most 2 SrcTile operands"))
@@ -2104,12 +2170,15 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
     emitFieldImm(Src1);
 
     if (IsIOTI) {
+      if (!require(PI.ArrowDest->HasAngleSize && !PI.ArrowDest->HasAngleReg,
+                   "B.IOTI expects size suffix '->t<Size>'"))
+        return false;
       emitFieldImm(SizeCode);
     } else {
-      // B.IOT (non-immediate) uses an in-angle RegSrc selector.
-      // v0.3 bring-up: not implemented in assembler yet.
-      Err = "B.IOT is not supported in assembler bring-up; use B.IOTI";
-      return false;
+      if (!require(PI.ArrowDest->HasAngleReg && !PI.ArrowDest->HasAngleSize,
+                   "B.IOT expects register suffix '->t<RegSrc>'"))
+        return false;
+      emitFieldImm(RegSrc);
     }
 
     return true;
@@ -2199,7 +2268,9 @@ bool LinxISAAsmParser::buildMCInstForForm(unsigned FormIndex, const ParsedInst &
     }
     if (!require(DataTypeVal.has_value(),
                  "DataType must be a constant or one of "
-                 "{INT32,FP32,FP16,BF16}"))
+                 "{FP64,FP32,FP16,FP8,BF16,FPL8,FP4,FPL4,"
+                 "INT64,INT32,INT16,INT8,INT4,"
+                 "UINT64,UINT32,UINT16,UINT8,UINT4}"))
       return false;
     if (IsBStartTMA)
       if (!require(*FuncVal >= 0 && *FuncVal <= 2,

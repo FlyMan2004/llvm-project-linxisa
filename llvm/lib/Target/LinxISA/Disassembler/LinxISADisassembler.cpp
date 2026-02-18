@@ -74,6 +74,16 @@ static const linxisa_inst_form *findMatch(uint64_t Insn, unsigned Bits,
       continue;
     if ((Insn & F.mask) != F.match)
       continue;
+
+    // Disambiguate packed tile/par headers from MSEQ/MPAR:
+    // in the v0.3 bit patterns, MSEQ/MPAR require bit[25]=0.
+    // Some generated masks are currently under-constrained and can otherwise
+    // steal TEPL/TMA/CUBE headers during disassembly.
+    StringRef Mnem(F.mnemonic ? F.mnemonic : "");
+    if ((Mnem == "BSTART.MSEQ" || Mnem == "BSTART.MPAR") &&
+        (((Insn >> 25) & 0x1ULL) != 0ULL))
+      continue;
+
     unsigned Fixed = llvm::popcount(static_cast<uint64_t>(F.mask));
     if (Best == ~0U || Fixed > BestFixed) {
       Best = i;
@@ -217,6 +227,10 @@ MCDisassembler::DecodeStatus LinxISADisassembler::getInstruction(
       SymValue = static_cast<int64_t>(Address) + (V << 1);
     } else if ((FieldName == "simm17" || FieldName == "simm25") &&
                Mnem.starts_with("BSTART.")) {
+      WantsSym = true;
+      IsBranchLike = true;
+      SymValue = static_cast<int64_t>(Address) + (V << 1);
+    } else if (FieldName == "simm25" && Mnem == "B.TEXT") {
       WantsSym = true;
       IsBranchLike = true;
       SymValue = static_cast<int64_t>(Address) + (V << 1);

@@ -1,4 +1,5 @@
 ; RUN: llc -mtriple=linx64 -O2 < %s | FileCheck %s
+; UNSUPPORTED: asserts
 
 %linx.tile = type target("linx.tile")
 

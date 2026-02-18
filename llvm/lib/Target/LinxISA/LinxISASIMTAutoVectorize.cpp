@@ -753,15 +753,16 @@ public:
         }
         const SCEV *TripCountExpr =
             SE.getAddExpr(BackedgeTaken, SE.getOne(BackedgeTaken->getType()));
-        Type *TripCountTy = TripCountExpr->getType();
-        if (!TripCountTy->isIntegerTy()) {
-          reject("tripcount_non_integer");
-          return false;
-        }
-        Value *TripCountV = Exp.expandCodeFor(TripCountExpr, TripCountTy,
-                                              Preheader->getTerminator());
+        Type *TripExprTy = TripCountExpr->getType();
+        Value *TripCountV =
+            Exp.expandCodeFor(TripCountExpr, TripExprTy,
+                              Preheader->getTerminator());
         if (!TripCountV) {
           reject("tripcount_expand_failed");
+          return false;
+        }
+        if (!TripCountV->getType()->isIntegerTy()) {
+          reject("tripcount_non_integer");
           return false;
         }
         if (TripCountV->getType() != I64Ty) {

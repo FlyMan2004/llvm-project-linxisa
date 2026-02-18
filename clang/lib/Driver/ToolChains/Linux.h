@@ -45,6 +45,7 @@ public:
   void addOffloadRTLibs(unsigned ActiveKinds, const llvm::opt::ArgList &Args,
                         llvm::opt::ArgStringList &CmdArgs) const override;
   RuntimeLibType GetDefaultRuntimeLibType() const override;
+  UnwindLibType GetUnwindLibType(const llvm::opt::ArgList &Args) const override;
   unsigned GetDefaultDwarfVersion() const override;
   CXXStdlibType GetDefaultCXXStdlibType() const override;
   bool

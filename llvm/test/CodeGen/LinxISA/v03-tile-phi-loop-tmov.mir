@@ -2,9 +2,9 @@
 
 # CHECK-LABEL: name: tile_phi_loop
 # CHECK: bb.0:
-# CHECK: $tile2 = PSEUDO_TMA_TMOV killed $tile0, 8, 0, 0, 0, 0, 0
+# CHECK: $tile2 = PSEUDO_TMA_TMOV killed $tile0, 8, 17, 0, 0, 0, 0
 # CHECK: bb.2:
-# CHECK: $tile2 = PSEUDO_TMA_TMOV killed $tile1, 8, 0, 0, 0, 0, 0
+# CHECK: $tile2 = PSEUDO_TMA_TMOV killed $tile1, 8, 17, 0, 0, 0, 0
 # CHECK-NOT: = COPY
 
 --- |

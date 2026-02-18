@@ -15,5 +15,5 @@ test_v03_tma_function_canonical:
 # CHECK: BSTART.TLOAD{{[[:space:]]+}}FP16
 # CHECK: BSTART.TSTORE{{[[:space:]]+}}FP16
 # CHECK: BSTART.TMOV{{[[:space:]]+}}FP16
-# CHECK: BSTART.TMOV{{[[:space:]]+}}FP16
+# CHECK: BSTART.TMOV{{[[:space:]]+}}DT4
 # CHECK: C.BSTOP

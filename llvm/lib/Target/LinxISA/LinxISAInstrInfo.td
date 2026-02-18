@@ -189,15 +189,9 @@ def CallTarget : Operand<iPTR> {
 let isCall = 1, hasSideEffects = 1, Size = 6, Uses = [R1], Defs = [R10] in
 def PSEUDO_CALL : Pseudo<(outs), (ins CallTarget:$dst), "# PSEUDO_CALL", []>;
 
-// Musttail-first lowering form: transfer control after frame teardown without
-// materializing a new return address in `ra`.
-let isCall = 1, isReturn = 1, isTerminator = 1, isBarrier = 1,
-    hasSideEffects = 1, Size = 6,
-    Uses = [R1, R10] in
-def PSEUDO_TAILCALL : Pseudo<(outs), (ins CallTarget:$dst), "# PSEUDO_TAILCALL", []>;
-
-// Return value registers are attached as explicit machine operands by
-// LowerReturn. Keep only `ra` as a static implicit use here.
+// Keep RA live at return. Return value registers are attached explicitly by
+// LowerReturn as operands on each PSEUDO_RET instance, so they must not be
+// hard-wired here (void returns would otherwise require undefined a0/a1).
 let isReturn = 1, isTerminator = 1, Size = 4, Uses = [R10] in
 def PSEUDO_RET : Pseudo<(outs), (ins), "# PSEUDO_RET", [(RetGlue)]>;
 
@@ -435,7 +429,7 @@ def PSEUDO_TMA_TLOAD_DESC : Pseudo<(outs TILE_TU:$dst),
                                    (ins GPR_Arch:$base, i64imm:$dtype,
                                         i64imm:$layout, i64imm:$lb0,
                                         i64imm:$lb1, i64imm:$size,
-                                        i64imm:$stride_bytes),
+                                        GPR_Arch:$stride_bytes),
                                    "# PSEUDO_TMA_TLOAD_DESC", []>;
 
 let hasSideEffects = 1, isBarrier = 1, mayStore = 1, Size = 4 in
@@ -447,7 +441,7 @@ def PSEUDO_TMA_TSTORE_DESC : Pseudo<(outs),
                                     (ins GPR_Arch:$base, TILE:$src,
                                          i64imm:$dtype, i64imm:$layout,
                                          i64imm:$lb0, i64imm:$lb1,
-                                         i64imm:$size, i64imm:$stride_bytes),
+                                         i64imm:$size, GPR_Arch:$stride_bytes),
                                     "# PSEUDO_TMA_TSTORE_DESC", []>;
 
 // Compiler-inserted tile SSA edge balancing pseudo.
@@ -501,9 +495,23 @@ def PSEUDO_TEPL_BINARY : Pseudo<(outs TILE:$dst),
                                      i64imm:$size, i64imm:$dtype),
                                 "# PSEUDO_TEPL_BINARY", []>;
 
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_TEPL_BINARY_SCALAR : Pseudo<(outs TILE:$dst),
+                                       (ins TILE:$srcA, GPR_Arch:$srcS,
+                                            i64imm:$tileop, i64imm:$size,
+                                            i64imm:$dtype, i64imm:$mode),
+                                       "# PSEUDO_TEPL_BINARY_SCALAR", []>;
+
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_TEPL_SPLAT : Pseudo<(outs TILE:$dst),
+                               (ins GPR_Arch:$srcS, i64imm:$tileop,
+                                    i64imm:$size, i64imm:$dtype,
+                                    i64imm:$mode),
+                               "# PSEUDO_TEPL_SPLAT", []>;
+
 // Vector decoupled blocks (bring-up): lowered late into BSTART.VSEQ/VPAR headers
 // with B.TEXT + B.DIM descriptors and a per-function empty body stub.
-let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+let hasSideEffects = 1, Size = 4 in
 def PSEUDO_VBLOCK_LAUNCH : Pseudo<(outs),
                                   (ins i64imm:$vkind, i64imm:$dim0, i64imm:$dim1,
                                        i64imm:$dim2, i64imm:$attr_bits,
@@ -513,7 +521,7 @@ def PSEUDO_VBLOCK_LAUNCH : Pseudo<(outs),
                                   "# PSEUDO_VBLOCK_LAUNCH", []>;
 
 // Dynamic-dimension variant used when Dim1 (group count) is runtime-varying.
-let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+let hasSideEffects = 1, Size = 4 in
 def PSEUDO_VBLOCK_LAUNCH_DYN1 : Pseudo<(outs),
                                        (ins i64imm:$vkind, i64imm:$dim0,
                                             GPR_Arch:$dim1,
@@ -657,6 +665,14 @@ let hasSideEffects = 1, isBarrier = 1, Size = 4 in {
   def B_TEXT : LinxISAInst<(outs), (ins BrTarget:$dst), "", []>;
 
   def B_ARG : LinxISAInst<(outs), (ins i64imm:$format), "", []>;
+
+  // Full B.ATTR descriptor (strict-v0.3):
+  // {C, DR, DataLayout, DataType, PadValue, T, aq, atom, far, rl}
+  def B_ATTR : LinxISAInst<(outs), (ins i64imm:$c, i64imm:$dr,
+                                       i64imm:$layout, i64imm:$dtype,
+                                       i64imm:$pad, i64imm:$t,
+                                       i64imm:$aq, i64imm:$atom,
+                                       i64imm:$far, i64imm:$rl), "", []>;
 
   def B_DIM_LB0 : LinxISAInst<(outs), (ins GPR_Arch:$reg, i64imm:$imm), "", []>;
   def B_DIM_LB1 : LinxISAInst<(outs), (ins GPR_Arch:$reg, i64imm:$imm), "", []>;

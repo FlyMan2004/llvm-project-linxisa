@@ -31,5 +31,5 @@ entry:
 ; CHECK-LABEL: tile_intrinsics_a2v:
 ; CHECK: BSTART.TLOAD
 ; CHECK: BSTART.TMOV
-; CHECK: B.ARG {{.*1}}
+; CHECK: B.ARG A2V
 ; CHECK: BSTART.TSTORE

@@ -38,6 +38,7 @@ void initializeLinxISASIMTAutoVectorizePass(PassRegistry &);
 
 bool linxEnableNegImmCanon();
 bool linxEnableMaskSetcFold();
+bool linxEnableSetcSrcRTypeFlags();
 bool linxEnableCShift16();
 bool linxEnableT1Motion();
 LinxCodeSizeBalanceMode linxCodeSizeBalanceMode();

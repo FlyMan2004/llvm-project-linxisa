@@ -10,4 +10,4 @@ entry:
   ret void
 }
 
-; CHECK: Linx: tile.tload requires stride_bytes=0 in strict-v0.3
+; CHECK: Linx: tile.tload stride_bytes must be element-aligned and >= lb0*elem_bytes

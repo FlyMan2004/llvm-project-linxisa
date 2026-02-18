@@ -88,11 +88,15 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   // start treating tiles as a general SIMD type. A small allowlist of
   // elementwise operations is lowered into VPAR decoupled blocks.
   addRegisterClass(MVT::linxtile, &LinxISA::TILERegClass);
+  // Transitional bridge for legacy clang tile builtins.
+  addRegisterClass(MVT::v1024i32, &LinxISA::TILERegClass);
 
   // Bring-up: support elementwise add/sub on tile values (selected late into
   // decoupled VPAR blocks). Other generic vector ops remain expanded.
   setOperationAction(ISD::ADD, MVT::linxtile, Legal);
   setOperationAction(ISD::SUB, MVT::linxtile, Legal);
+  setOperationAction(ISD::ADD, MVT::v1024i32, Legal);
+  setOperationAction(ISD::SUB, MVT::v1024i32, Legal);
 
   computeRegisterProperties(STI.getRegisterInfo());
   setStackPointerRegisterToSaveRestore(LinxISA::R1);
@@ -178,19 +182,6 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   setOperationAction({ISD::VAARG, ISD::VACOPY, ISD::VAEND}, MVT::Other, Expand);
   setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i64, Expand);
   setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i32, Expand);
-  setOperationAction(ISD::STACKSAVE, MVT::Other, Expand);
-  setOperationAction(ISD::STACKRESTORE, MVT::Other, Expand);
-
-  // Dynamic stack allocations (VLAs/alloca with runtime size).
-  //
-  // Without explicit legalization, SelectionDAG may leave
-  // ISD::DYNAMIC_STACKALLOC in the DAG and instruction selection crashes on
-  // functions such as musl's getcwd() that use runtime-sized stack objects.
-  setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i64, Expand);
-  setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i32, Expand);
-  // Likewise expand stack save/restore until dedicated lowering exists.
-  // These nodes are keyed on the chain type (MVT::Other), not pointer width.
-  // musl locale code can otherwise fail with "Cannot select ... stacksave".
   setOperationAction(ISD::STACKSAVE, MVT::Other, Expand);
   setOperationAction(ISD::STACKRESTORE, MVT::Other, Expand);
 
@@ -1322,93 +1313,215 @@ SDValue LinxISATargetLowering::LowerVASTART(SDValue Op,
                       MachinePointerInfo(SV));
 }
 
-static SDValue bitcastAndResizeToVT(SelectionDAG &DAG, SDValue V, EVT DstVT,
-                                    const SDLoc &DL) {
-  EVT SrcVT = V.getValueType();
-  if (SrcVT == DstVT)
-    return V;
-
-  auto toInt = [&](SDValue X) -> SDValue {
-    EVT XVT = X.getValueType();
-    if (XVT.isInteger())
-      return X;
-    EVT IntVT = EVT::getIntegerVT(*DAG.getContext(), XVT.getSizeInBits());
-    return DAG.getNode(ISD::BITCAST, DL, IntVT, X);
-  };
-
-  SDValue IntV = toInt(V);
-  EVT DstIntVT =
-      DstVT.isInteger() ? DstVT
-                        : EVT::getIntegerVT(*DAG.getContext(), DstVT.getSizeInBits());
-  unsigned SrcBits = IntV.getValueType().getSizeInBits();
-  unsigned DstBits = DstIntVT.getSizeInBits();
-  if (SrcBits > DstBits)
-    IntV = DAG.getNode(ISD::TRUNCATE, DL, DstIntVT, IntV);
-  else if (SrcBits < DstBits)
-    IntV = DAG.getNode(ISD::ANY_EXTEND, DL, DstIntVT, IntV);
-
-  if (DstVT.isInteger())
-    return IntV;
-  return DAG.getNode(ISD::BITCAST, DL, DstVT, IntV);
-}
-
-// Convert a location-typed value coming from the ABI into the IR value type.
-static SDValue convertLocVTToValVT(SelectionDAG &DAG, SDValue V,
-                                   const CCValAssign &VA, const SDLoc &DL) {
-  EVT LocVT = VA.getLocVT();
-  EVT ValVT = VA.getValVT();
-
-  switch (VA.getLocInfo()) {
-  default:
-    llvm_unreachable("Unexpected CCValAssign::LocInfo");
-  case CCValAssign::Full:
-  case CCValAssign::Indirect:
-  case CCValAssign::BCvt:
-    return bitcastAndResizeToVT(DAG, V, ValVT, DL);
-  case CCValAssign::SExt:
-  case CCValAssign::ZExt:
-  case CCValAssign::AExt:
-    if (LocVT.isInteger() && ValVT.isInteger() &&
-        LocVT.getSizeInBits() > ValVT.getSizeInBits())
-      return DAG.getNode(ISD::TRUNCATE, DL, ValVT, V);
-    return bitcastAndResizeToVT(DAG, V, ValVT, DL);
-  }
-}
-
-// Convert an IR value into the ABI location type before call/return emission.
-static SDValue convertValVTToLocVT(SelectionDAG &DAG, SDValue V,
-                                   const CCValAssign &VA, const SDLoc &DL) {
-  EVT LocVT = VA.getLocVT();
-  EVT ValVT = VA.getValVT();
-
-  switch (VA.getLocInfo()) {
-  default:
-    llvm_unreachable("Unexpected CCValAssign::LocInfo");
-  case CCValAssign::Full:
-  case CCValAssign::Indirect:
-  case CCValAssign::BCvt:
-    return bitcastAndResizeToVT(DAG, V, LocVT, DL);
-  case CCValAssign::SExt:
-  case CCValAssign::ZExt:
-  case CCValAssign::AExt:
-    if (!(LocVT.isInteger() && ValVT.isInteger()))
-      return bitcastAndResizeToVT(DAG, V, LocVT, DL);
-    if (ValVT.getSizeInBits() > LocVT.getSizeInBits())
-      return DAG.getNode(ISD::TRUNCATE, DL, LocVT, V);
-    if (ValVT.getSizeInBits() < LocVT.getSizeInBits()) {
-      switch (VA.getLocInfo()) {
-      case CCValAssign::SExt:
-        return DAG.getNode(ISD::SIGN_EXTEND, DL, LocVT, V);
-      case CCValAssign::ZExt:
-        return DAG.getNode(ISD::ZERO_EXTEND, DL, LocVT, V);
-      case CCValAssign::AExt:
-        return DAG.getNode(ISD::ANY_EXTEND, DL, LocVT, V);
-      default:
-        llvm_unreachable("Unexpected CCValAssign::LocInfo");
+static SDValue convertLocVTToValVT(SDValue V, MVT ValVT,
+                                   CCValAssign::LocInfo LocInfo,
+                                   const SDLoc &DL, SelectionDAG &DAG) {
+  MVT SrcVT = V.getSimpleValueType();
+  auto castToValVT = [&](SDValue In, MVT DstVT, bool SignExt) {
+    MVT CurVT = In.getSimpleValueType();
+    if (CurVT == DstVT)
+      return In;
+    if (CurVT.isFloatingPoint() || DstVT.isFloatingPoint()) {
+      if (CurVT.isFloatingPoint() && DstVT.isFloatingPoint()) {
+        if (CurVT.getSizeInBits() < DstVT.getSizeInBits())
+          return DAG.getNode(ISD::FP_EXTEND, DL, DstVT, In);
+        return DAG.getNode(ISD::FP_ROUND, DL, DstVT, In,
+                           DAG.getConstant(0, DL, MVT::i32));
+      }
+      if (CurVT.isFloatingPoint() && DstVT.isInteger()) {
+        EVT CurIntVT = EVT::getIntegerVT(*DAG.getContext(), CurVT.getSizeInBits());
+        SDValue Bits = DAG.getNode(ISD::BITCAST, DL, CurIntVT, In);
+        if (Bits.getValueType() == DstVT)
+          return Bits;
+        if (Bits.getValueType().bitsGT(DstVT))
+          return DAG.getNode(ISD::TRUNCATE, DL, DstVT, Bits);
+        if (SignExt)
+          return DAG.getNode(ISD::SIGN_EXTEND, DL, DstVT, Bits);
+        return DAG.getNode(ISD::ZERO_EXTEND, DL, DstVT, Bits);
+      }
+      if (CurVT.isInteger() && DstVT.isFloatingPoint()) {
+        EVT DstIntVT = EVT::getIntegerVT(*DAG.getContext(), DstVT.getSizeInBits());
+        SDValue Bits = In;
+        if (Bits.getValueType().bitsGT(DstIntVT))
+          Bits = DAG.getNode(ISD::TRUNCATE, DL, DstIntVT, Bits);
+        else if (Bits.getValueType().bitsLT(DstIntVT))
+          Bits = DAG.getNode(SignExt ? ISD::SIGN_EXTEND : ISD::ZERO_EXTEND, DL,
+                             DstIntVT, Bits);
+        else if (Bits.getValueType() != DstIntVT)
+          Bits = DAG.getNode(ISD::BITCAST, DL, DstIntVT, Bits);
+        return DAG.getNode(ISD::BITCAST, DL, DstVT, Bits);
       }
     }
-    return V;
+    if (CurVT.getSizeInBits() == DstVT.getSizeInBits())
+      return DAG.getNode(ISD::BITCAST, DL, DstVT, In);
+    if (CurVT.getSizeInBits() > DstVT.getSizeInBits())
+      return DAG.getNode(ISD::TRUNCATE, DL, DstVT, In);
+    if (SignExt)
+      return DAG.getNode(ISD::SIGN_EXTEND, DL, DstVT, In);
+    return DAG.getNode(ISD::ZERO_EXTEND, DL, DstVT, In);
+  };
+
+  switch (LocInfo) {
+  case CCValAssign::Full:
+    return castToValVT(V, ValVT, false);
+  case CCValAssign::SExt:
+    return castToValVT(V, ValVT, true);
+  case CCValAssign::ZExt:
+  case CCValAssign::AExt:
+    return castToValVT(V, ValVT, false);
+  case CCValAssign::BCvt:
+    if (SrcVT == ValVT)
+      return V;
+    if (SrcVT.getSizeInBits() != ValVT.getSizeInBits())
+      report_fatal_error("Linx: BCvt requires matching source/destination width");
+    return DAG.getNode(ISD::BITCAST, DL, ValVT, V);
+  case CCValAssign::Trunc:
+    if (SrcVT == ValVT)
+      return V;
+    return DAG.getNode(ISD::TRUNCATE, DL, ValVT, V);
+  case CCValAssign::FPExt:
+    if (SrcVT == ValVT)
+      return V;
+    return DAG.getNode(ISD::FP_EXTEND, DL, ValVT, V);
+  case CCValAssign::SExtUpper:
+  case CCValAssign::ZExtUpper:
+  case CCValAssign::AExtUpper: {
+    if (SrcVT.getSizeInBits() < ValVT.getSizeInBits())
+      return castToValVT(V, ValVT, LocInfo == CCValAssign::SExtUpper);
+    unsigned Shift = SrcVT.getSizeInBits() - ValVT.getSizeInBits();
+    if (Shift) {
+      unsigned ShiftOpc = (LocInfo == CCValAssign::SExtUpper) ? ISD::SRA : ISD::SRL;
+      V = DAG.getNode(ShiftOpc, DL, SrcVT, V,
+                      DAG.getConstant(Shift, DL, SrcVT));
+    }
+    return castToValVT(V, ValVT, LocInfo == CCValAssign::SExtUpper);
   }
+  case CCValAssign::VExt:
+  case CCValAssign::Indirect:
+    report_fatal_error("Linx: unsupported incoming call/arg LocInfo");
+  }
+  llvm_unreachable("unhandled incoming call/arg LocInfo");
+}
+
+static SDValue convertValVTToLocVT(SDValue V, MVT LocVT,
+                                   CCValAssign::LocInfo LocInfo,
+                                   const SDLoc &DL, SelectionDAG &DAG) {
+  MVT SrcVT = V.getSimpleValueType();
+  auto castToLocVT = [&](SDValue In, MVT DstVT, CCValAssign::LocInfo LI) {
+    MVT CurVT = In.getSimpleValueType();
+    if (CurVT == DstVT)
+      return In;
+    if (CurVT.isFloatingPoint() || DstVT.isFloatingPoint()) {
+      if (CurVT.isFloatingPoint() && DstVT.isFloatingPoint()) {
+        if (CurVT.getSizeInBits() < DstVT.getSizeInBits())
+          return DAG.getNode(ISD::FP_EXTEND, DL, DstVT, In);
+        return DAG.getNode(ISD::FP_ROUND, DL, DstVT, In,
+                           DAG.getConstant(0, DL, MVT::i32));
+      }
+      if (CurVT.isFloatingPoint() && DstVT.isInteger()) {
+        EVT CurIntVT = EVT::getIntegerVT(*DAG.getContext(), CurVT.getSizeInBits());
+        SDValue Bits = DAG.getNode(ISD::BITCAST, DL, CurIntVT, In);
+        if (Bits.getValueType() == DstVT)
+          return Bits;
+        if (Bits.getValueType().bitsGT(DstVT))
+          return DAG.getNode(ISD::TRUNCATE, DL, DstVT, Bits);
+        switch (LI) {
+        case CCValAssign::SExt:
+        case CCValAssign::SExtUpper:
+          return DAG.getNode(ISD::SIGN_EXTEND, DL, DstVT, Bits);
+        case CCValAssign::ZExt:
+        case CCValAssign::ZExtUpper:
+          return DAG.getNode(ISD::ZERO_EXTEND, DL, DstVT, Bits);
+        case CCValAssign::AExt:
+        case CCValAssign::AExtUpper:
+          return DAG.getNode(ISD::ANY_EXTEND, DL, DstVT, Bits);
+        default:
+          return DAG.getNode(ISD::ZERO_EXTEND, DL, DstVT, Bits);
+        }
+      }
+      if (CurVT.isInteger() && DstVT.isFloatingPoint()) {
+        EVT DstIntVT = EVT::getIntegerVT(*DAG.getContext(), DstVT.getSizeInBits());
+        SDValue Bits = In;
+        if (Bits.getValueType().bitsGT(DstIntVT))
+          Bits = DAG.getNode(ISD::TRUNCATE, DL, DstIntVT, Bits);
+        else if (Bits.getValueType().bitsLT(DstIntVT)) {
+          switch (LI) {
+          case CCValAssign::SExt:
+          case CCValAssign::SExtUpper:
+            Bits = DAG.getNode(ISD::SIGN_EXTEND, DL, DstIntVT, Bits);
+            break;
+          case CCValAssign::AExt:
+          case CCValAssign::AExtUpper:
+            Bits = DAG.getNode(ISD::ANY_EXTEND, DL, DstIntVT, Bits);
+            break;
+          default:
+            Bits = DAG.getNode(ISD::ZERO_EXTEND, DL, DstIntVT, Bits);
+            break;
+          }
+        } else if (Bits.getValueType() != DstIntVT) {
+          Bits = DAG.getNode(ISD::BITCAST, DL, DstIntVT, Bits);
+        }
+        return DAG.getNode(ISD::BITCAST, DL, DstVT, Bits);
+      }
+    }
+    if (CurVT.getSizeInBits() == DstVT.getSizeInBits())
+      return DAG.getNode(ISD::BITCAST, DL, DstVT, In);
+    if (CurVT.getSizeInBits() > DstVT.getSizeInBits())
+      return DAG.getNode(ISD::TRUNCATE, DL, DstVT, In);
+    switch (LI) {
+    case CCValAssign::SExt:
+    case CCValAssign::SExtUpper:
+      return DAG.getNode(ISD::SIGN_EXTEND, DL, DstVT, In);
+    case CCValAssign::ZExt:
+    case CCValAssign::ZExtUpper:
+      return DAG.getNode(ISD::ZERO_EXTEND, DL, DstVT, In);
+    case CCValAssign::AExt:
+    case CCValAssign::AExtUpper:
+      return DAG.getNode(ISD::ANY_EXTEND, DL, DstVT, In);
+    case CCValAssign::FPExt:
+      return DAG.getNode(ISD::FP_EXTEND, DL, DstVT, In);
+    default:
+      return DAG.getNode(ISD::ANY_EXTEND, DL, DstVT, In);
+    }
+  };
+
+  switch (LocInfo) {
+  case CCValAssign::Full:
+  case CCValAssign::SExt:
+  case CCValAssign::ZExt:
+  case CCValAssign::AExt:
+    return castToLocVT(V, LocVT, LocInfo);
+  case CCValAssign::BCvt:
+    if (SrcVT == LocVT)
+      return V;
+    if (SrcVT.getSizeInBits() != LocVT.getSizeInBits())
+      report_fatal_error("Linx: BCvt requires matching source/destination width");
+    return DAG.getNode(ISD::BITCAST, DL, LocVT, V);
+  case CCValAssign::Trunc:
+    if (SrcVT == LocVT)
+      return V;
+    return DAG.getNode(ISD::TRUNCATE, DL, LocVT, V);
+  case CCValAssign::FPExt:
+    if (SrcVT == LocVT)
+      return V;
+    return DAG.getNode(ISD::FP_EXTEND, DL, LocVT, V);
+  case CCValAssign::SExtUpper:
+  case CCValAssign::ZExtUpper:
+  case CCValAssign::AExtUpper: {
+    SDValue E = castToLocVT(V, LocVT, LocInfo);
+    unsigned SrcBits = SrcVT.getSizeInBits();
+    unsigned DstBits = LocVT.getSizeInBits();
+    if (DstBits > SrcBits) {
+      unsigned Shift = DstBits - SrcBits;
+      E = DAG.getNode(ISD::SHL, DL, LocVT, E, DAG.getConstant(Shift, DL, LocVT));
+    }
+    return E;
+  }
+  case CCValAssign::VExt:
+  case CCValAssign::Indirect:
+    report_fatal_error("Linx: unsupported outgoing call/ret LocInfo");
+  }
+  llvm_unreachable("unhandled outgoing call/ret LocInfo");
 }
 
 SDValue LinxISATargetLowering::LowerFormalArguments(
@@ -1461,7 +1574,7 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
       Chain = Load.getValue(1);
     }
 
-    V = convertLocVTToValVT(DAG, V, VA, DL);
+    V = convertLocVTToValVT(V, ValVT, VA.getLocInfo(), DL, DAG);
     InVals.push_back(V);
   }
 
@@ -1506,7 +1619,7 @@ static SDValue lowerCallResult(SDValue Chain, SDValue InGlue,
     Chain = Copy.getValue(1);
     InGlue = Copy.getValue(2);
 
-    V = convertLocVTToValVT(DAG, V, VA, DL);
+    V = convertLocVTToValVT(V, ValVT, VA.getLocInfo(), DL, DAG);
     InVals.push_back(V);
   }
 
@@ -1564,7 +1677,7 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
     const CCValAssign &VA = ArgLocs[i];
     SDValue Arg = CLI.OutVals[i];
 
-    Arg = convertValVTToLocVT(DAG, Arg, VA, DL);
+    Arg = convertValVTToLocVT(Arg, VA.getLocVT(), VA.getLocInfo(), DL, DAG);
 
     if (VA.isRegLoc()) {
       RegsToPass.push_back({VA.getLocReg(), Arg});
@@ -1665,7 +1778,7 @@ SDValue LinxISATargetLowering::LowerReturn(
     const CCValAssign &VA = RVLocs[i];
     SDValue Val = OutVals[i];
 
-    Val = convertValVTToLocVT(DAG, Val, VA, DL);
+    Val = convertValVTToLocVT(Val, VA.getLocVT(), VA.getLocInfo(), DL, DAG);
 
     Chain = DAG.getCopyToReg(Chain, DL, VA.getLocReg(), Val, Glue);
     Glue = Chain.getValue(1);

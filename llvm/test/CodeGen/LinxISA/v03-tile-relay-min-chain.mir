@@ -2,7 +2,7 @@
 
 # CHECK-LABEL: name: tile_relay_chain
 # CHECK: bb.0:
-# CHECK: $tile2 = PSEUDO_TMA_TMOV $tile0, 8, 0, 0, 0, 0, 1
+# CHECK: $tile2 = PSEUDO_TMA_TMOV $tile0, 8, 17, 0, 0, 0, 1
 # CHECK-NOT: $tile1 = PSEUDO_TMA_TMOV
 # CHECK-NOT: = COPY
 

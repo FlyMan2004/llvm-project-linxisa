@@ -38,27 +38,27 @@ test_v03_par_snippet:
 	.size	test_v03_par_snippet, .-test_v03_par_snippet
 
 # CHECK-LABEL: <test_v03_par_snippet>:
-# CHECK: BSTART.TLOAD{{[[:space:]]+}}FP16
+# CHECK: BSTART.TLOAD{{[[:space:]]+}}DT4
 # CHECK: B.ARG{{[[:space:]]+}}ND2ZN.normal, FP16, Null
 # CHECK: B.IOTI{{[[:space:]]+\[\], last[[:space:]]+}}->t<
 # CHECK: B.IOR{{[[:space:]]+\[a6,s0\],\[\]}}
 # CHECK: C.B.DIMI{{[[:space:]]+}}64,{{[[:space:]]+}}->lb0
 # CHECK: C.B.DIMI{{[[:space:]]+}}64,{{[[:space:]]+}}->lb1
 # CHECK: C.B.DIMI{{[[:space:]]+}}64,{{[[:space:]]+}}->lb2
-# CHECK: BSTART.TMATMUL{{[[:space:]]+}}FP16
+# CHECK: BSTART.TMATMUL{{[[:space:]]+}}DT4
 # CHECK: B.IOTI{{[[:space:]]+\[t#1, t#3\.reuse\], last[[:space:]]+}}->acc<
 # CHECK: C.BSTART.STD
-# CHECK: BSTART.TEPL{{[[:space:]]+}}163, FP16
+# CHECK: BSTART.TEPL{{[[:space:]]+}}163, DT4
 # CHECK: B.ARG{{[[:space:]]+}}DN2NZ.normal, FP32, Null
 # CHECK: B.IOTI{{[[:space:]]+\[u#3\], last[[:space:]]+}}->t<
 # CHECK: C.B.DIMI{{[[:space:]]+}}64,{{[[:space:]]+}}->lb0
 # CHECK: C.B.DIMI{{[[:space:]]+}}64,{{[[:space:]]+}}->lb1
-# CHECK: BSTART.TMATMUL{{[[:space:]]+}}FP16
+# CHECK: BSTART.TMATMUL{{[[:space:]]+}}DT4
 # CHECK: B.IOTI{{[[:space:]]+\[t#1, t#3\.reuse\], last[[:space:]]+}}->acc<
 # CHECK: C.B.DIMI{{[[:space:]]+}}64,{{[[:space:]]+}}->lb2
 # CHECK: C.BSTART.STD
-# CHECK: BSTART.TEPL{{[[:space:]]+}}163, FP16
+# CHECK: BSTART.TEPL{{[[:space:]]+}}163, DT4
 # CHECK: B.ARG{{[[:space:]]+}}DN2NZ.normal, FP32, Null
 # CHECK: B.IOTI{{[[:space:]]+\[u#2\], last[[:space:]]+}}->t<
-# CHECK: BSTART.TMATMUL.ACC{{[[:space:]]+}}FP16
+# CHECK: BSTART.TMATMUL.ACC{{[[:space:]]+}}DT4
 # CHECK: B.IOTI{{[[:space:]]+\[t#1, t#3\.reuse\], last[[:space:]]+}}->acc<

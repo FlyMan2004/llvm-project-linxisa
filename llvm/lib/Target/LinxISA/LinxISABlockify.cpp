@@ -71,7 +71,7 @@ struct TileRelRef {
 
 struct TileMeta {
   uint8_t SizeCode = 0;
-  uint8_t DataType = 0;
+  uint8_t DataType = 17;
   int64_t Layout = 0;
   bool HasLayout = false;
 };
@@ -79,6 +79,12 @@ struct TileMeta {
 enum class TMovMode : uint8_t {
   V2V = 0,
   A2V = 1,
+};
+
+enum class TEPLMode : uint8_t {
+  VV = 0,
+  VS = 1,
+  SV = 2,
 };
 
 static std::optional<uint64_t> tileSizeCodeToBytes(unsigned SizeCode) {
@@ -106,11 +112,166 @@ static void validateTileOp10(int64_t TileOp10, StringRef Context) {
                        " requires TileOp10 in range 0..1023");
 }
 
+static bool isWhitelistedTEPLTileOp10(int64_t TileOp10) {
+  switch (TileOp10 & 0x3ff) {
+  case 0x000:
+  case 0x001:
+  case 0x002:
+  case 0x003:
+  case 0x004:
+  case 0x005:
+  case 0x006:
+  case 0x007:
+  case 0x008:
+  case 0x009:
+  case 0x00a:
+  case 0x00d:
+  case 0x00e:
+  case 0x00f:
+  case 0x020:
+  case 0x021:
+  case 0x022:
+  case 0x024:
+  case 0x025:
+  case 0x026:
+  case 0x027:
+  case 0x040:
+  case 0x041:
+  case 0x042:
+  case 0x043:
+  case 0x044:
+  case 0x045:
+  case 0x060:
+  case 0x061:
+  case 0x062:
+  case 0x063:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static void validateWhitelistedTEPLTileOp10(int64_t TileOp10,
+                                            StringRef Context) {
+  validateTileOp10(TileOp10, Context);
+  if (!isWhitelistedTEPLTileOp10(TileOp10))
+    report_fatal_error(Twine("Linx: ") + Context +
+                       " uses TileOp10 outside strict-v0.3 whitelist");
+}
+
 static void validateCubeDimImm(int64_t Dim, StringRef DimName,
                                StringRef Context) {
   if (Dim < 0 || Dim > 131071)
     report_fatal_error(Twine("Linx: ") + Context + " requires " + DimName +
                        " in range 0..131071");
+}
+
+static uint64_t dtypeElementBitsForTileCheck(int64_t DType) {
+  switch (DType & 0x1f) {
+  case 0:  // FP64
+  case 16: // INT64
+  case 24: // UINT64
+    return 64u;
+  case 1:  // FP32
+  case 17: // INT32
+  case 25: // UINT32
+    return 32u;
+  case 2:  // FP16
+  case 6:  // BF16
+  case 18: // INT16
+  case 26: // UINT16
+    return 16u;
+  case 3:  // FP8
+  case 7:  // FPL8
+  case 19: // INT8
+  case 27: // UINT8
+    return 8u;
+  case 11: // FP4
+  case 12: // FPL4
+  case 20: // INT4
+  case 28: // UINT4
+    return 4u;
+  default:
+    // Keep bring-up compatibility for unknown dtype encodings and apply a
+    // conservative 32-bit element width for strict byte-budget checks.
+    return 32u;
+  }
+}
+
+static uint64_t requirePositiveDimImm(int64_t Dim, StringRef DimName,
+                                      StringRef Context) {
+  if (Dim <= 0)
+    report_fatal_error(Twine("Linx: ") + Context + " requires " + DimName +
+                       " > 0 for tile-byte validation (got " + Twine(Dim) +
+                       ")");
+  return static_cast<uint64_t>(Dim);
+}
+
+static uint64_t computeTileBytesOrDie(StringRef Context, uint64_t Dim0,
+                                      uint64_t Dim1, uint64_t Dim2,
+                                      uint64_t ElemBits) {
+  auto MulOverflowU64 = [](uint64_t A, uint64_t B, uint64_t &Out) {
+    if (A == 0 || B == 0) {
+      Out = 0;
+      return false;
+    }
+    if (A > (std::numeric_limits<uint64_t>::max() / B))
+      return true;
+    Out = A * B;
+    return false;
+  };
+
+  uint64_t ElemCount = 0;
+  uint64_t Tmp = 0;
+  if (MulOverflowU64(Dim0, Dim1, Tmp) || MulOverflowU64(Tmp, Dim2, ElemCount) ||
+      MulOverflowU64(ElemCount, ElemBits, Tmp)) {
+    report_fatal_error(Twine("Linx: ") + Context +
+                       " tile-byte check overflow while evaluating "
+                       "dim0*dim1*dim2*elem_bits");
+  }
+  if (Tmp > std::numeric_limits<uint64_t>::max() - 7u) {
+    report_fatal_error(Twine("Linx: ") + Context +
+                       " tile-byte check overflow while rounding bits to bytes");
+  }
+  return (Tmp + 7u) / 8u;
+}
+
+static void validateTileByteBudget(StringRef Context, uint64_t Dim0,
+                                   uint64_t Dim1, uint64_t Dim2,
+                                   uint64_t ElemBits,
+                                   std::optional<uint64_t> SizeCode) {
+  const uint64_t Bytes =
+      computeTileBytesOrDie(Context, Dim0, Dim1, Dim2, ElemBits);
+  constexpr uint64_t StrictMaxBytes = 4096u;
+  if (Bytes > StrictMaxBytes) {
+    report_fatal_error(Twine("Linx: ") + Context +
+                       " tile-byte check failed: bytes=" + Twine(Bytes) +
+                       "B (dim0=" + Twine(Dim0) + ", dim1=" + Twine(Dim1) +
+                       ", dim2=" + Twine(Dim2) +
+                       ", elem_bits=" + Twine(ElemBits) +
+                       ") exceeds strict max 4096B. Shrink dimensions or "
+                       "element width.");
+  }
+
+  if (SizeCode) {
+    std::optional<uint64_t> LimitBytes = tileSizeCodeToBytes(*SizeCode);
+    if (!LimitBytes) {
+      report_fatal_error(Twine("Linx: ") + Context +
+                         " internal error: invalid SizeCode while checking "
+                         "tile-byte budget");
+    }
+    if (Bytes > *LimitBytes) {
+      report_fatal_error(Twine("Linx: ") + Context +
+                         " tile-byte check failed: bytes=" + Twine(Bytes) +
+                         "B (dim0=" + Twine(Dim0) + ", dim1=" + Twine(Dim1) +
+                         ", dim2=" + Twine(Dim2) +
+                         ", elem_bits=" + Twine(ElemBits) +
+                         ") exceeds descriptor limit " + Twine(*LimitBytes) +
+                         "B (SizeCode=" + Twine(*SizeCode) +
+                         "). Shrink dimensions/element width or increase "
+                         "SizeCode.");
+    }
+  }
 }
 
 static unsigned tileHandBase(TileHand Hand) {
@@ -203,6 +364,38 @@ static bool isMarkerInstr(const MachineInstr &MI) {
   }
 }
 
+static bool isSimtBodyHeaderOpcode(unsigned Opc) {
+  switch (Opc) {
+  case LinxISA::BSTART_MPAR:
+  case LinxISA::BSTART_MSEQ:
+  case LinxISA::BSTART_VPAR:
+  case LinxISA::BSTART_VSEQ:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool isHeaderDescriptorOpcode(unsigned Opc) {
+  switch (Opc) {
+  case LinxISA::B_TEXT:
+  case LinxISA::B_ARG:
+  case LinxISA::B_ATTR:
+  case LinxISA::B_DIM_LB0:
+  case LinxISA::B_DIM_LB1:
+  case LinxISA::B_DIM_LB2:
+  case LinxISA::C_B_DIMI:
+  case LinxISA::B_IOR:
+  case LinxISA::B_IOT_G0:
+  case LinxISA::B_IOT_G1:
+  case LinxISA::B_IOTI_G0:
+  case LinxISA::B_IOTI_G1:
+    return true;
+  default:
+    return false;
+  }
+}
+
 static bool isFrameMacroInstr(const MachineInstr &MI) {
   switch (MI.getOpcode()) {
   case LinxISA::FENTRY:
@@ -230,6 +423,8 @@ static bool isTilePseudoInstr(const MachineInstr &MI) {
   case LinxISA::PSEUDO_CUBE_ACCCVT:
   case LinxISA::PSEUDO_TEPL_UNARY:
   case LinxISA::PSEUDO_TEPL_BINARY:
+  case LinxISA::PSEUDO_TEPL_BINARY_SCALAR:
+  case LinxISA::PSEUDO_TEPL_SPLAT:
   case LinxISA::PSEUDO_VPAR_TADD:
   case LinxISA::PSEUDO_VPAR_TSUB:
   case LinxISA::PSEUDO_VTILE_ADD:
@@ -1447,7 +1642,7 @@ public:
         break;
       }
 
-      constexpr unsigned DType_I32 = 0;
+      constexpr unsigned DType_I32 = 17;
       constexpr unsigned TMA_TLOAD = 0;
       constexpr unsigned TMA_TSTORE = 1;
       constexpr unsigned TMA_TMOV = 2;
@@ -1578,13 +1773,17 @@ public:
         const int64_t LB0 = PseudoMI->getOperand(4).getImm();
         const int64_t LB1 = PseudoMI->getOperand(5).getImm();
         const int64_t Size = PseudoMI->getOperand(6).getImm();
-        const int64_t StrideBytes = PseudoMI->getOperand(7).getImm();
+        const Register StrideReg = PseudoMI->getOperand(7).getReg();
         if (DType < 0 || DType > 31)
           report_fatal_error("Linx: TMA.TLOAD dtype must fit u5");
         validateStrictTileSizeCode(Size, "TMA.TLOAD");
-        if (StrideBytes != 0)
-          report_fatal_error(
-              "Linx: TMA.TLOAD currently requires stride_bytes=0 in strict-v0.3");
+        const uint64_t Dim0 = requirePositiveDimImm(LB0, "lb0", "TMA.TLOAD");
+        const uint64_t Dim1 = requirePositiveDimImm(LB1, "lb1", "TMA.TLOAD");
+        validateTileByteBudget("TMA.TLOAD", Dim0, Dim1, /*dim2=*/1u,
+                               dtypeElementBitsForTileCheck(DType),
+                               static_cast<uint64_t>(Size));
+        if (!StrideReg)
+          report_fatal_error("Linx: TMA.TLOAD requires stride register binding");
 
         const unsigned DstID = tileRegIdFromReg(TRI, Dst);
         if (DstID >= 16)
@@ -1598,7 +1797,7 @@ public:
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_ARG)).addImm(Layout);
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOR))
             .addReg(LinxISA::R0)
-            .addReg(LinxISA::R0)
+            .addReg(StrideReg)
             .addReg(Base)
             .addReg(LinxISA::R0);
 
@@ -1667,13 +1866,17 @@ public:
         const int64_t LB0 = PseudoMI->getOperand(4).getImm();
         const int64_t LB1 = PseudoMI->getOperand(5).getImm();
         const int64_t Size = PseudoMI->getOperand(6).getImm();
-        const int64_t StrideBytes = PseudoMI->getOperand(7).getImm();
+        const Register StrideReg = PseudoMI->getOperand(7).getReg();
         if (DType < 0 || DType > 31)
           report_fatal_error("Linx: TMA.TSTORE dtype must fit u5");
         validateStrictTileSizeCode(Size, "TMA.TSTORE");
-        if (StrideBytes != 0)
-          report_fatal_error(
-              "Linx: TMA.TSTORE currently requires stride_bytes=0 in strict-v0.3");
+        const uint64_t Dim0 = requirePositiveDimImm(LB0, "lb0", "TMA.TSTORE");
+        const uint64_t Dim1 = requirePositiveDimImm(LB1, "lb1", "TMA.TSTORE");
+        validateTileByteBudget("TMA.TSTORE", Dim0, Dim1, /*dim2=*/1u,
+                               dtypeElementBitsForTileCheck(DType),
+                               static_cast<uint64_t>(Size));
+        if (!StrideReg)
+          report_fatal_error("Linx: TMA.TSTORE requires stride register binding");
         const unsigned SrcID = tileRegIdFromReg(TRI, Src);
 
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_TMA))
@@ -1684,7 +1887,7 @@ public:
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_ARG)).addImm(Layout);
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOR))
             .addReg(LinxISA::R0)
-            .addReg(LinxISA::R0)
+            .addReg(StrideReg)
             .addReg(Base)
             .addReg(LinxISA::R0);
 
@@ -1726,7 +1929,10 @@ public:
 
         const unsigned DstID = tileRegIdFromReg(TRI, Dst);
         const TileRelRef DstRef = tileRelRefFromId(DstID);
-        const unsigned EncDstPush = tileHandBase(DstRef.Hand);
+        // PR6 parity baseline: encode concrete destination tile id.
+        // Queue-push hand-only encoding requires full runtime relref queue
+        // semantics, which is not yet modeled in QEMU tile execution.
+        const unsigned EncDstTile = DstID;
 
         unsigned EncSrc = 0;
         RegState SrcFlags = RegState::Implicit;
@@ -1758,7 +1964,7 @@ public:
               .addImm(0)                              // S1R
               .addImm(1)                              // S1V (absent)
               .addImm(EncSrc)                         // SrcTile0
-              .addImm(EncDstPush)                     // SrcTile1 (dst push slot)
+              .addImm(EncDstTile)                     // SrcTile1 (dst tile id)
               .addImm(Meta.SizeCode)                  // SizeCode
               .addReg(Src, SrcFlags)
               .addReg(Dst, RegState::Define | RegState::Implicit);
@@ -1772,7 +1978,7 @@ public:
               .addImm(0)                              // S1R
               .addImm(1)                              // S1V (absent)
               .addImm(0)                              // SrcTile0 (unused)
-              .addImm(EncDstPush)                     // SrcTile1 (dst push slot)
+              .addImm(EncDstTile)                     // SrcTile1 (dst tile id)
               .addImm(Meta.SizeCode)                  // SizeCode
               .addReg(Dst, RegState::Define | RegState::Implicit);
         }
@@ -1795,6 +2001,12 @@ public:
         validateCubeDimImm(M, "m", "CUBE.MAMULB");
         validateCubeDimImm(N, "n", "CUBE.MAMULB");
         validateCubeDimImm(K, "k", "CUBE.MAMULB");
+        validateTileByteBudget("CUBE.MAMULB",
+                               requirePositiveDimImm(M, "m", "CUBE.MAMULB"),
+                               requirePositiveDimImm(N, "n", "CUBE.MAMULB"),
+                               requirePositiveDimImm(K, "k", "CUBE.MAMULB"),
+                               dtypeElementBitsForTileCheck(DType_I32),
+                               std::nullopt);
 
         const unsigned DstID = tileRegIdFromReg(TRI, Dst);
         if (DstID < 16)
@@ -1873,6 +2085,12 @@ public:
         validateCubeDimImm(M, "m", "CUBE.MAMULB.ACC");
         validateCubeDimImm(N, "n", "CUBE.MAMULB.ACC");
         validateCubeDimImm(K, "k", "CUBE.MAMULB.ACC");
+        validateTileByteBudget(
+            "CUBE.MAMULB.ACC",
+            requirePositiveDimImm(M, "m", "CUBE.MAMULB.ACC"),
+            requirePositiveDimImm(N, "n", "CUBE.MAMULB.ACC"),
+            requirePositiveDimImm(K, "k", "CUBE.MAMULB.ACC"),
+            dtypeElementBitsForTileCheck(DType_I32), std::nullopt);
 
         const unsigned DstID = tileRegIdFromReg(TRI, Dst);
         if (DstID < 16)
@@ -1981,57 +2199,131 @@ public:
       }
 
       case LinxISA::PSEUDO_TEPL_UNARY:
-      case LinxISA::PSEUDO_TEPL_BINARY: {
-        const bool IsUnary = PseudoMI->getOpcode() == LinxISA::PSEUDO_TEPL_UNARY;
-        const Register Dst = PseudoMI->getOperand(0).getReg();
-        const Register SrcA = PseudoMI->getOperand(1).getReg();
-        const Register SrcB = IsUnary ? Register() : PseudoMI->getOperand(2).getReg();
-        const int64_t TileOp10 = PseudoMI->getOperand(IsUnary ? 2 : 3).getImm();
-        const int64_t Size = PseudoMI->getOperand(IsUnary ? 3 : 4).getImm();
-        const int64_t DType = PseudoMI->getOperand(IsUnary ? 4 : 5).getImm();
+      case LinxISA::PSEUDO_TEPL_BINARY:
+      case LinxISA::PSEUDO_TEPL_BINARY_SCALAR:
+      case LinxISA::PSEUDO_TEPL_SPLAT: {
+        const unsigned Opc = PseudoMI->getOpcode();
+        const bool IsUnary = Opc == LinxISA::PSEUDO_TEPL_UNARY;
+        const bool IsBinary = Opc == LinxISA::PSEUDO_TEPL_BINARY;
+        const bool IsBinaryScalar = Opc == LinxISA::PSEUDO_TEPL_BINARY_SCALAR;
+        const bool IsSplat = Opc == LinxISA::PSEUDO_TEPL_SPLAT;
+        const char *Ctx = IsUnary
+                              ? "TEPL.UNARY"
+                              : (IsBinary ? "TEPL.BINARY"
+                                          : (IsBinaryScalar ? "TEPL.BINARY.SCALAR"
+                                                            : "TEPL.SPLAT"));
 
-        validateTileOp10(TileOp10, IsUnary ? "TEPL.UNARY" : "TEPL.BINARY");
-        validateStrictTileSizeCode(Size, IsUnary ? "TEPL.UNARY" : "TEPL.BINARY");
+        const Register Dst = PseudoMI->getOperand(0).getReg();
+        const Register SrcA = (IsUnary || IsBinary || IsBinaryScalar)
+                                  ? PseudoMI->getOperand(1).getReg()
+                                  : Register();
+        const Register SrcB = IsBinary ? PseudoMI->getOperand(2).getReg() : Register();
+        const Register SrcS = IsBinaryScalar
+                                  ? PseudoMI->getOperand(2).getReg()
+                                  : (IsSplat ? PseudoMI->getOperand(1).getReg()
+                                             : Register());
+        const int64_t TileOp10 =
+            PseudoMI->getOperand(IsUnary ? 2 : (IsBinary ? 3 : (IsBinaryScalar ? 3 : 2)))
+                .getImm();
+        const int64_t Size =
+            PseudoMI->getOperand(IsUnary ? 3 : (IsBinary ? 4 : (IsBinaryScalar ? 4 : 3)))
+                .getImm();
+        const int64_t DType =
+            PseudoMI->getOperand(IsUnary ? 4 : (IsBinary ? 5 : (IsBinaryScalar ? 5 : 4)))
+                .getImm();
+        const int64_t Mode =
+            IsBinaryScalar
+                ? PseudoMI->getOperand(6).getImm()
+                : (IsSplat ? PseudoMI->getOperand(5).getImm()
+                           : static_cast<int64_t>(TEPLMode::VV));
+
+        validateWhitelistedTEPLTileOp10(TileOp10, Ctx);
+        validateStrictTileSizeCode(Size, Ctx);
         if (DType < 0 || DType > 31)
-          report_fatal_error(Twine("Linx: ") + (IsUnary ? "TEPL.UNARY" : "TEPL.BINARY") +
-                             " dtype must fit u5");
+          report_fatal_error(Twine("Linx: ") + Ctx + " dtype must fit u5");
+        if (Mode < 0 || Mode > 2)
+          report_fatal_error(Twine("Linx: ") + Ctx + " mode must be in range 0..2");
+        if (IsBinaryScalar && Mode != static_cast<int64_t>(TEPLMode::VS))
+          report_fatal_error("Linx: TEPL.BINARY.SCALAR requires mode=1 (VS)");
+        if (IsSplat && Mode != static_cast<int64_t>(TEPLMode::SV))
+          report_fatal_error("Linx: TEPL.SPLAT requires mode=2 (SV)");
+        if ((IsUnary || IsBinary) && Mode != static_cast<int64_t>(TEPLMode::VV))
+          report_fatal_error("Linx: TEPL.UNARY/BINARY require mode=0 (VV)");
 
         const unsigned DstID = tileRegIdFromReg(TRI, Dst);
-        const unsigned AID = tileRegIdFromReg(TRI, SrcA);
-        const unsigned BID = IsUnary ? 0u : tileRegIdFromReg(TRI, SrcB);
+        const unsigned AID = (IsUnary || IsBinary || IsBinaryScalar)
+                                 ? tileRegIdFromReg(TRI, SrcA)
+                                 : 0u;
+        const unsigned BID = IsBinary ? tileRegIdFromReg(TRI, SrcB) : 0u;
         const TileRelRef DstRef = tileRelRefFromId(DstID);
-        const unsigned EncA = tileIdFromRelRef(tileRelRefFromId(AID));
-        const unsigned EncB = IsUnary ? 0u : tileIdFromRelRef(tileRelRefFromId(BID));
+        const unsigned EncA =
+            (IsUnary || IsBinary || IsBinaryScalar)
+                ? tileIdFromRelRef(tileRelRefFromId(AID))
+                : 0u;
+        const unsigned EncB =
+            IsBinary ? tileIdFromRelRef(tileRelRefFromId(BID)) : 0u;
+        const bool HasS0Tile = IsUnary || IsBinary || IsBinaryScalar;
+        const bool HasS1Tile = IsBinary;
 
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_TEPL))
             .addImm(DType)
             .addImm(TileOp10);
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_ARG)).addImm(Mode);
+        if (IsBinaryScalar || IsSplat) {
+          // TEPL scalar extensions bind scalar source through B.IOR.
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOR))
+              .addReg(LinxISA::R0) // RegDst (unused)
+              .addReg(SrcS)        // RegSrc0 (scalar)
+              .addReg(LinxISA::R0) // RegSrc1
+              .addReg(LinxISA::R0) // RegSrc2
+              .addReg(SrcS, RegState::Implicit);
+        }
 
-        // Descriptor 0: input tile bindings.
+        // Descriptor 0: input bindings.
         auto InDesc = BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G0))
-                          .addImm(dstTileFieldFromRelRef(DstRef)) // DstTile hand
-                          .addImm(0)                               // S0R
-                          .addImm(0)                               // S0V (present)
-                          .addImm(0)                               // S1R
-                          .addImm(IsUnary ? 1 : 0)                 // S1V
-                          .addImm(EncA)                            // SrcTile0
-                          .addImm(EncB)                            // SrcTile1
-                          .addImm(Size);                           // SizeCode
-        InDesc.addReg(SrcA, RegState::Implicit);
-        if (!IsUnary)
+                          .addImm(dstTileFieldFromRelRef(DstRef))   // DstTile hand
+                          .addImm(0)                                // S0R
+                          .addImm(HasS0Tile ? 0 : 1)                // S0V
+                          .addImm(0)                                // S1R
+                          .addImm(HasS1Tile ? 0 : 1)                // S1V
+                          .addImm(EncA)                             // SrcTile0
+                          .addImm(EncB)                             // SrcTile1
+                          .addImm(Size);                            // SizeCode
+        if (HasS0Tile)
+          InDesc.addReg(SrcA, RegState::Implicit);
+        if (HasS1Tile)
           InDesc.addReg(SrcB, RegState::Implicit);
 
         // Descriptor 1: destination tile binding (queue-push destination).
-        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
-            .addImm(dstTileFieldFromRelRef(DstRef))
-            .addImm(0)     // S0R
-            .addImm(1)     // S0V (absent)
-            .addImm(0)     // S1R
-            .addImm(1)     // S1V (absent)
-            .addImm(0)     // SrcTile0 (unused)
-            .addImm(DstID) // SrcTile1 (dst tile id)
-            .addImm(Size)  // SizeCode
-            .addReg(Dst, RegState::Define | RegState::Implicit);
+        //
+        // In-place TEPL forms (dst aliases a source tile) still use B.IOTI so
+        // size metadata stays explicit and disassembly remains canonical.
+        // Runtime destination allocation is guarded by descriptor shape checks.
+        const bool InPlace = (HasS0Tile && DstID == AID) ||
+                             (HasS1Tile && DstID == BID);
+        if (InPlace) {
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
+              .addImm(dstTileFieldFromRelRef(DstRef))
+              .addImm(0)     // S0R
+              .addImm(1)     // S0V (absent)
+              .addImm(0)     // S1R
+              .addImm(1)     // S1V (absent)
+              .addImm(0)     // SrcTile0 (unused)
+              .addImm(DstID) // SrcTile1 (dst tile id)
+              .addImm(Size)  // SizeCode
+              .addReg(Dst, RegState::Define | RegState::Implicit);
+        } else {
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
+              .addImm(dstTileFieldFromRelRef(DstRef))
+              .addImm(0)     // S0R
+              .addImm(1)     // S0V (absent)
+              .addImm(0)     // S1R
+              .addImm(1)     // S1V (absent)
+              .addImm(0)     // SrcTile0 (unused)
+              .addImm(DstID) // SrcTile1 (dst tile id)
+              .addImm(Size)  // SizeCode
+              .addReg(Dst, RegState::Define | RegState::Implicit);
+        }
 
         PseudoMI->eraseFromParent();
         Changed = true;
@@ -2098,19 +2390,19 @@ public:
             .addReg(SrcA, RegState::Implicit)
             .addReg(SrcB, RegState::Implicit);
 
-        // Descriptor 1: output (TO), group=1 (last). If the output register
-        // aliases an input tile, avoid B.IOTI allocation/clear by using B.IOT.
+        // Descriptor 1: output (TO), group=1 (last). Keep B.IOTI for both
+        // in-place and out-of-place forms so size metadata stays explicit.
         const bool InPlace = (DstID == AID) || (DstID == BID);
         if (InPlace) {
-          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOT_G1))
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
               .addImm(dstTileFieldFromRelRef(tileRelRefFromId(DstID))) // DstTile (hand hint)
-              .addReg(LinxISA::R0)           // RegSrc (unused)
               .addImm(0)                     // S0R
               .addImm(1)                     // S0V (absent)
               .addImm(0)                     // S1R
               .addImm(1)                     // S1V (absent)
               .addImm(0)                     // SrcTile0 (unused)
               .addImm(DstID)                 // SrcTile1 (dst tile id)
+              .addImm(Size)                  // SizeCode
               .addReg(Dst, RegState::Define | RegState::Implicit);
         } else {
           BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
@@ -2146,7 +2438,13 @@ public:
                                          : Register();
         const int64_t Dim2 = PseudoMI->getOperand(3).getImm();
         const int64_t AttrBits = PseudoMI->getOperand(4).getImm();
-        (void)AttrBits; // Bring-up: B.ATTR is not wired in the backend yet.
+
+        const Register Bind0 = PseudoMI->getOperand(5).getReg();
+        const Register Bind1 = PseudoMI->getOperand(6).getReg();
+        const Register Bind2 = PseudoMI->getOperand(7).getReg();
+        const Register Bind3 = PseudoMI->getOperand(8).getReg();
+        const Register Bind4 = PseudoMI->getOperand(9).getReg();
+        const Register Bind5 = PseudoMI->getOperand(10).getReg();
 
         const Register Bind0 = PseudoMI->getOperand(5).getReg();
         const Register Bind1 = PseudoMI->getOperand(6).getReg();
@@ -2165,6 +2463,28 @@ public:
         BuildMI(MBB, InsertPt, DL, TII.get(BStartOpc)).addImm(Mode);
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_TEXT))
             .addSym(getOrCreateVBlockBodySym());
+
+        if (AttrBits < 0 || (static_cast<uint64_t>(AttrBits) & ~0x003fffffull))
+          report_fatal_error("Linx: vblock.launch attr_bits must fit 22 bits");
+        const uint32_t Attr = static_cast<uint32_t>(AttrBits);
+        const uint32_t AttrAQRLMask = (1u << 18) | (1u << 21);
+        if ((Attr & ~AttrAQRLMask) != 0u) {
+          report_fatal_error(
+              "Linx: vblock.launch only supports aq/rl B.ATTR bits in strict-v0.3");
+        }
+        if (Attr != 0u) {
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_ATTR))
+              .addImm((Attr >> 0) & 0x1u)  // C
+              .addImm((Attr >> 1) & 0x1u)  // DR
+              .addImm((Attr >> 2) & 0x1fu) // DataLayout
+              .addImm((Attr >> 7) & 0x1fu) // DataType
+              .addImm((Attr >> 12) & 0x1fu) // PadValue
+              .addImm((Attr >> 17) & 0x1u) // T
+              .addImm((Attr >> 18) & 0x1u) // aq
+              .addImm((Attr >> 19) & 0x1u) // atom
+              .addImm((Attr >> 20) & 0x1u) // far
+              .addImm((Attr >> 21) & 0x1u); // rl
+        }
 
         auto emitIOR = [&](Register A, Register B, Register C) {
           if (A == LinxISA::R0 && B == LinxISA::R0 && C == LinxISA::R0)
@@ -2821,12 +3141,16 @@ public:
 		          continue;
 		        }
 		        const unsigned Opc = SetcMI.getOpcode();
-		        if ((Opc != LinxISA::CSETC_EQ && Opc != LinxISA::CSETC_NE) ||
-		            SetcMI.getNumOperands() < 2 || !SetcMI.getOperand(0).isReg() ||
-		            !SetcMI.getOperand(1).isReg()) {
-		          ++It;
-		          continue;
-		        }
+			        if ((Opc != LinxISA::CSETC_EQ && Opc != LinxISA::CSETC_NE) ||
+			            SetcMI.getNumOperands() < 2 || !SetcMI.getOperand(0).isReg() ||
+			            !SetcMI.getOperand(1).isReg()) {
+			          ++It;
+			          continue;
+			        }
+			        if (!linxEnableSetcSrcRTypeFlags()) {
+			          ++It;
+			          continue;
+			        }
 
 		        const Register A = SetcMI.getOperand(0).getReg();
 		        const Register B = SetcMI.getOperand(1).getReg();
@@ -2951,10 +3275,6 @@ public:
           if (!MBB.succ_empty())
             ReturnBB = *MBB.succ_begin();
           if (ReturnBB && DecoupledBodyBBs.contains(ReturnBB))
-            ReturnBB = nullptr;
-          if (!ReturnBB)
-            ReturnBB = MBB.getNextNode();
-          if (EmptyBodyBB && ReturnBB == EmptyBodyBB)
             ReturnBB = nullptr;
           if (!ReturnBB)
             ReturnBB = &MBB;
@@ -3257,9 +3577,11 @@ public:
 		            }
 
 			            if (!EmittedImmSetc) {
-			              auto tryEmitZextWSetcUW = [&]() -> bool {
-			                if (BrOpcForSetc != LinxISA::BEQ && BrOpcForSetc != LinxISA::BNE)
-			                  return false;
+				              auto tryEmitZextWSetcUW = [&]() -> bool {
+				                if (!linxEnableSetcSrcRTypeFlags())
+				                  return false;
+				                if (BrOpcForSetc != LinxISA::BEQ && BrOpcForSetc != LinxISA::BNE)
+				                  return false;
 			                if ((LHSReg == LinxISA::R0) == (RHSReg == LinxISA::R0))
 			                  return false;
 
@@ -3644,10 +3966,12 @@ public:
 	          }
 
 			          if (!EmittedImmSetc) {
-			            auto tryEmitZextWSetcUW = [&]() -> bool {
-			              if (Last->getOpcode() != LinxISA::BEQ &&
-			                  Last->getOpcode() != LinxISA::BNE)
-			                return false;
+				            auto tryEmitZextWSetcUW = [&]() -> bool {
+				              if (!linxEnableSetcSrcRTypeFlags())
+				                return false;
+				              if (Last->getOpcode() != LinxISA::BEQ &&
+				                  Last->getOpcode() != LinxISA::BNE)
+				                return false;
 			              if ((LHSReg == LinxISA::R0) == (RHSReg == LinxISA::R0))
 			                return false;
 
@@ -3948,10 +4272,14 @@ public:
 		            (Opc == LinxISA::CSETC_EQ || Opc == LinxISA::SETC_EQ);
 		        const bool IsNe =
 		            (Opc == LinxISA::CSETC_NE || Opc == LinxISA::SETC_NE);
-		        if (!IsEq && !IsNe) {
-		          ++It;
-		          continue;
-		        }
+			        if (!IsEq && !IsNe) {
+			          ++It;
+			          continue;
+			        }
+			        if (!linxEnableSetcSrcRTypeFlags()) {
+			          ++It;
+			          continue;
+			        }
 
 		        if (MI.getNumOperands() < 2 || !MI.getOperand(0).isReg() ||
 		            !MI.getOperand(1).isReg()) {
@@ -4003,12 +4331,16 @@ public:
 		        }
 
 		        const unsigned Opc = MI.getOpcode();
-		        const bool IsEq = (Opc == LinxISA::CMPEQ);
-		        const bool IsNe = (Opc == LinxISA::CMPNE);
-		        if (!IsEq && !IsNe) {
-		          ++It;
-		          continue;
-		        }
+			        const bool IsEq = (Opc == LinxISA::CMPEQ);
+			        const bool IsNe = (Opc == LinxISA::CMPNE);
+			        if (!IsEq && !IsNe) {
+			          ++It;
+			          continue;
+			        }
+			        if (!linxEnableSetcSrcRTypeFlags()) {
+			          ++It;
+			          continue;
+			        }
 
 		        if (MI.getNumOperands() < 3 || !MI.getOperand(1).isReg() ||
 		            !MI.getOperand(2).isReg()) {
@@ -5604,6 +5936,36 @@ public:
             std::prev(InsertBStop)->getOpcode() != LinxISA::BSTOP) {
           BuildMI(MBB, InsertBStop, DebugLoc(), TII.get(LinxISA::BSTOP));
           Changed = true;
+        }
+      }
+    }
+
+    // Enforce decoupled SIMT body contract: body-style headers must carry
+    // a B.TEXT pointer before the next marker.
+    for (MachineBasicBlock &MBB : MF) {
+      for (auto It = MBB.begin(), E = MBB.end(); It != E; ++It) {
+        if (!isSimtBodyHeaderOpcode(It->getOpcode()))
+          continue;
+
+        bool HasBodyPtr = false;
+        auto J = std::next(It);
+        for (; J != E; ++J) {
+          if (J->isDebugInstr())
+            continue;
+          if (J->getOpcode() == LinxISA::B_TEXT) {
+            HasBodyPtr = true;
+            break;
+          }
+          if (isMarkerInstr(*J) || isFrameMacroInstr(*J))
+            break;
+          if (!isHeaderDescriptorOpcode(J->getOpcode()))
+            break;
+        }
+
+        if (!HasBodyPtr) {
+          report_fatal_error(
+              "Linx: BSTART.{MPAR,MSEQ,VPAR,VSEQ} must include B.TEXT in the "
+              "decoupled header");
         }
       }
     }

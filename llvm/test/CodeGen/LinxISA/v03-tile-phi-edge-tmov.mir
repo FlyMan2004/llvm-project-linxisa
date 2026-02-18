@@ -3,18 +3,18 @@
 
 # BAL-LABEL: name: tile_phi_edge
 # BAL: bb.1:
-# BAL: $tile2 = PSEUDO_TMA_TMOV killed $tile0, 8, 0, 0, 0, 0, 0
+# BAL: $tile2 = PSEUDO_TMA_TMOV killed $tile0, 8, 17, 0, 0, 0, 0
 # BAL: bb.2:
-# BAL: $tile2 = PSEUDO_TMA_TMOV $tile1, 8, 0, 0, 0, 0, 1
+# BAL: $tile2 = PSEUDO_TMA_TMOV $tile1, 8, 17, 0, 0, 0, 1
 # BAL-NOT: = COPY
 
 # BLK-LABEL: name: tile_phi_edge
 # BLK: bb.1:
-# BLK: BSTART_TMA 0, 2
+# BLK: BSTART_TMA 17, 2
 # BLK-NEXT: B_ARG 0
 # BLK: B_IOTI_G1
 # BLK: bb.2:
-# BLK: BSTART_TMA 0, 2
+# BLK: BSTART_TMA 17, 2
 # BLK-NEXT: B_ARG 0
 # BLK: B_IOTI_G1
 # BLK-NOT: PSEUDO_TMA_TMOV

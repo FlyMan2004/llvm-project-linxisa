@@ -51,6 +51,16 @@ static bool isPPCBareMetal(const llvm::Triple &Triple) {
          Triple.getEnvironment() == llvm::Triple::EABI;
 }
 
+/// Is the triple linx{32,64}-*-none-elf?
+static bool isLinxBareMetal(const llvm::Triple &Triple) {
+  const llvm::Triple::ArchType Arch = Triple.getArch();
+  if (Arch != llvm::Triple::linx32 && Arch != llvm::Triple::linx64)
+    return false;
+  if (Triple.getOS() != llvm::Triple::UnknownOS)
+    return false;
+  return Triple.getEnvironmentName() == "elf";
+}
+
 static bool findRISCVMultilibs(const Driver &D,
                                const llvm::Triple &TargetTriple,
                                const ArgList &Args, DetectedMultilibs &Result) {
@@ -351,7 +361,7 @@ void BareMetal::findMultilibs(const Driver &D, const llvm::Triple &Triple,
 bool BareMetal::handlesTarget(const llvm::Triple &Triple) {
   return arm::isARMEABIBareMetal(Triple) ||
          aarch64::isAArch64BareMetal(Triple) || isRISCVBareMetal(Triple) ||
-         isPPCBareMetal(Triple);
+         isPPCBareMetal(Triple) || isLinxBareMetal(Triple);
 }
 
 Tool *BareMetal::buildLinker() const {
@@ -360,6 +370,12 @@ Tool *BareMetal::buildLinker() const {
 
 Tool *BareMetal::buildStaticLibTool() const {
   return new tools::baremetal::StaticLibTool(*this);
+}
+
+const char *BareMetal::getDefaultLinker() const {
+  if (isLinxBareMetal(getTriple()))
+    return "ld.lld";
+  return Generic_ELF::getDefaultLinker();
 }
 
 BareMetal::OrderedMultilibs BareMetal::getOrderedMultilibs() const {

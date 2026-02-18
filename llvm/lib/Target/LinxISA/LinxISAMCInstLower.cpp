@@ -409,6 +409,24 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     return;
   }
 
+  case LinxISA::B_ATTR: {
+    OutMI.setOpcode(getSpecOpcodeByAsmFmt(
+        "B.ATTR {trap, atomic, <aq, rl, aqrl>, far, DataLayout.{canon, normal}, "
+        "SrcType, PadValue, DR}",
+        /*LengthBits=*/32));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // C
+    OutMI.addOperand(MCOperand::createImm(I(1))); // DR
+    OutMI.addOperand(MCOperand::createImm(I(2))); // DataLayout
+    OutMI.addOperand(MCOperand::createImm(I(3))); // DataType
+    OutMI.addOperand(MCOperand::createImm(I(4))); // PadValue
+    OutMI.addOperand(MCOperand::createImm(I(5))); // T
+    OutMI.addOperand(MCOperand::createImm(I(6))); // aq
+    OutMI.addOperand(MCOperand::createImm(I(7))); // atom
+    OutMI.addOperand(MCOperand::createImm(I(8))); // far
+    OutMI.addOperand(MCOperand::createImm(I(9))); // rl
+    return;
+  }
+
   case LinxISA::B_DIM_LB0:
   case LinxISA::B_DIM_LB1:
   case LinxISA::B_DIM_LB2: {

@@ -22,6 +22,11 @@ static cl::opt<bool>
                            cl::desc("Enable Linx mask compare/setc folding"),
                            cl::init(false));
 
+static cl::opt<bool> LinxEnableSetcSrcRTypeFlags(
+    "linx-enable-setc-srcr-flags", cl::Hidden,
+    cl::desc("Enable Linx setc/cmp srcR type modifiers (.sw/.uw) in blockify"),
+    cl::init(false));
+
 static cl::opt<bool> LinxEnableCShift16(
     "linx-enable-cshift16", cl::Hidden,
     cl::desc("Enable Linx compressed C.SLLI/C.SRLI emission"), cl::init(false));
@@ -46,9 +51,9 @@ static cl::opt<LinxCodeSizeBalanceMode> LinxCodeSizeMode(
 
 bool llvm::linxEnableNegImmCanon() { return LinxEnableNegImmCanon; }
 bool llvm::linxEnableMaskSetcFold() { return LinxEnableMaskSetcFold; }
+bool llvm::linxEnableSetcSrcRTypeFlags() { return LinxEnableSetcSrcRTypeFlags; }
 bool llvm::linxEnableCShift16() { return LinxEnableCShift16; }
 bool llvm::linxEnableT1Motion() { return LinxEnableT1Motion; }
 LinxCodeSizeBalanceMode llvm::linxCodeSizeBalanceMode() {
   return LinxCodeSizeMode;
 }
-

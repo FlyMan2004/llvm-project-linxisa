@@ -88,13 +88,41 @@ static void printTileRef(raw_ostream &OS, unsigned TileId) {
 static StringRef dtypeName(unsigned DT) {
   switch (DT & 0x1f) {
   case 0:
-    return "INT32";
+    return "FP64";
   case 1:
     return "FP32";
-  case 4:
+  case 2:
     return "FP16";
+  case 3:
+    return "FP8";
   case 6:
     return "BF16";
+  case 7:
+    return "FPL8";
+  case 11:
+    return "FP4";
+  case 12:
+    return "FPL4";
+  case 16:
+    return "INT64";
+  case 17:
+    return "INT32";
+  case 18:
+    return "INT16";
+  case 19:
+    return "INT8";
+  case 20:
+    return "INT4";
+  case 24:
+    return "UINT64";
+  case 25:
+    return "UINT32";
+  case 26:
+    return "UINT16";
+  case 27:
+    return "UINT8";
+  case 28:
+    return "UINT4";
   default:
     return StringRef();
   }
@@ -208,6 +236,8 @@ static StringRef teplAliasMnemonic(unsigned TileOp10) {
     return "BSTART.TCOLMIN";
   case 0x026:
     return "BSTART.TCOLSUM";
+  case 0x027:
+    return "BSTART.TCOLEXPAND";
   case 0x040:
     return "BSTART.TEXP";
   case 0x041:
@@ -218,6 +248,8 @@ static StringRef teplAliasMnemonic(unsigned TileOp10) {
     return "BSTART.TRSQRT";
   case 0x044:
     return "BSTART.TRECIP";
+  case 0x045:
+    return "BSTART.TEXPANDS";
   case 0x060:
     return "BSTART.TGATHER";
   case 0x061:
@@ -263,6 +295,64 @@ static unsigned legacyParOpFromCubeFunction(unsigned Func) {
     return 258u;
   default:
     return Func & 0x1fu;
+  }
+}
+
+static StringRef layoutFormatName(unsigned Format) {
+  switch (Format & 0x1fu) {
+  case 0:
+    return "NORM.normal";
+  case 2:
+    return "ND2NZ.normal";
+  case 3:
+    return "ND2ZN.normal";
+  case 8:
+    return "DN2ZN.normal";
+  case 9:
+    return "DN2NZ.normal";
+  case 28:
+    return "NZ2DN.canon";
+  default:
+    return StringRef();
+  }
+}
+
+static StringRef tmovModeName(unsigned Mode) {
+  switch (Mode & 0x1fu) {
+  case 0:
+    return "V2V";
+  case 1:
+    return "A2V";
+  default:
+    return StringRef();
+  }
+}
+
+static StringRef teplModeName(unsigned Mode) {
+  switch (Mode & 0x1fu) {
+  case 0:
+    return "VV";
+  case 1:
+    return "VS";
+  case 2:
+    return "SV";
+  default:
+    return StringRef();
+  }
+}
+
+static StringRef padValueName(unsigned Pad) {
+  switch (Pad & 0x1fu) {
+  case 0:
+    return "Null";
+  case 1:
+    return "Zero";
+  case 2:
+    return "Max";
+  case 3:
+    return "Min";
+  default:
+    return StringRef();
   }
 }
 
@@ -809,15 +899,30 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
   // Special-case: accelerator/tile block-start instructions.
   //
   // v0.3-facing disassembly is typed (`BSTART.TMA` / `BSTART.CUBE` /
-  // `BSTART.TEPL`).
+  // `BSTART.TEPL`) and also accepts direct typed aliases
+  // (`BSTART.TLOAD`, `BSTART.TMATMUL`, `BSTART.TADD`, ...).
   static constexpr StringLiteral LegacyPackedStart = "BSTART." "PAR";
   const bool IsLegacyPacked = AsmFmt.starts_with(LegacyPackedStart);
   const bool IsTypedTMA = AsmFmt.starts_with("BSTART.TMA");
   const bool IsTypedCUBE = AsmFmt.starts_with("BSTART.CUBE");
   const bool IsTypedTEPL = AsmFmt.starts_with("BSTART.TEPL");
-  if (IsLegacyPacked || IsTypedTMA || IsTypedCUBE || IsTypedTEPL) {
-    const unsigned DT =
-        static_cast<unsigned>(findFieldImm("DataType").value_or(0)) & 0x1fu;
+  const StringRef TypedTok = stripAngleSuffix(RawTok);
+  const bool IsDirectTMAAlias =
+      TypedTok == "BSTART.TLOAD" || TypedTok == "BSTART.TSTORE" ||
+      TypedTok == "BSTART.TMOV";
+  const bool IsDirectCUBEAlias =
+      TypedTok == "BSTART.TMATMUL" || TypedTok == "BSTART.TMATMUL.ACC" ||
+      TypedTok == "BSTART.ACCCVT";
+  const bool IsDirectTEPLAlias =
+      TypedTok.starts_with("BSTART.T") && !IsDirectTMAAlias &&
+      !IsDirectCUBEAlias && TypedTok != "BSTART.TMA" &&
+      TypedTok != "BSTART.TEPL";
+  if (IsLegacyPacked || IsTypedTMA || IsTypedCUBE || IsTypedTEPL ||
+      IsDirectTMAAlias || IsDirectCUBEAlias || IsDirectTEPLAlias) {
+    const unsigned DT = static_cast<unsigned>(
+                            findFieldImm("DataType")
+                                .value_or(findFieldImm("dtype").value_or(0))) &
+                        0x1fu;
 
     auto printDataType = [&]() {
       if (StringRef DTName = dtypeName(DT); !DTName.empty())
@@ -827,6 +932,36 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     };
 
     unsigned ParStateOp = 0u;
+
+    if (IsDirectTMAAlias || IsDirectCUBEAlias || IsDirectTEPLAlias) {
+      OS << TypedTok << "\t";
+      printDataType();
+
+      if (IsDirectTMAAlias) {
+        LastTileHeader = LastTileHeaderKind::TMA;
+        if (TypedTok == "BSTART.TLOAD")
+          ParStateOp = 33u;
+        else if (TypedTok == "BSTART.TSTORE")
+          ParStateOp = 65u;
+        else
+          ParStateOp = 34u; // TMOV
+      } else if (IsDirectCUBEAlias) {
+        LastTileHeader = LastTileHeaderKind::CUBE;
+        if (TypedTok == "BSTART.TMATMUL")
+          ParStateOp = 2u;
+        else if (TypedTok == "BSTART.TMATMUL.ACC")
+          ParStateOp = 66u;
+        else
+          ParStateOp = 258u; // ACCCVT
+      } else {
+        LastTileHeader = LastTileHeaderKind::TEPL;
+      }
+
+      LastParTileOp = ParStateOp;
+      LastParTileOpValid = true;
+      printAnnotation(OS, Annot);
+      return;
+    }
 
     if (IsTypedTMA || IsTypedCUBE) {
       const unsigned Func =
@@ -840,6 +975,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
           OS << "BSTART.TMA\t" << utostr(Func) << ", ";
           printDataType();
         }
+        LastTileHeader = LastTileHeaderKind::TMA;
       } else {
         ParStateOp = legacyParOpFromCubeFunction(Func);
         if (StringRef Alias = cubeAliasMnemonic(Func); !Alias.empty()) {
@@ -849,6 +985,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
           OS << "BSTART.CUBE\t" << utostr(Func) << ", ";
           printDataType();
         }
+        LastTileHeader = LastTileHeaderKind::CUBE;
       }
 
       LastParTileOp = ParStateOp;
@@ -864,12 +1001,31 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     StringRef Alias;
     if (IsTypedTEPL) {
       Alias = teplAliasMnemonic(TileOp10);
+      LastTileHeader = LastTileHeaderKind::TEPL;
     } else {
       // Legacy packed PAR encodes both TEPL and TMA/CUBE families; prefer
       // canonical typed aliases.
       Alias = legacyPackedAliasMnemonic(TileOp10);
       if (Alias.empty())
         Alias = teplAliasMnemonic(TileOp10);
+      if (!Alias.empty() &&
+          (Alias.starts_with("BSTART.TLOAD") || Alias.starts_with("BSTART.TSTORE") ||
+           Alias.starts_with("BSTART.TMOV"))) {
+        LastTileHeader = LastTileHeaderKind::TMA;
+      } else if (!Alias.empty() &&
+                 (Alias.starts_with("BSTART.TMATMUL") ||
+                  Alias.starts_with("BSTART.ACCCVT"))) {
+        LastTileHeader = LastTileHeaderKind::CUBE;
+      } else if (!Alias.empty() || !isLegacyCubeTileOp(TileOp10)) {
+        LastTileHeader = LastTileHeaderKind::TEPL;
+      } else {
+        LastTileHeader = LastTileHeaderKind::None;
+      }
+
+      LastParTileOp = ParStateOp;
+      LastParTileOpValid = true;
+      printAnnotation(OS, Annot);
+      return;
     }
 
     if (!Alias.empty()) {
@@ -1066,6 +1222,21 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       }
     }
 
+    // Non-tile block starts terminate any tile-header descriptor context used
+    // by B.ARG/B.IOT pretty-printing.
+    LastParTileOp = 0;
+    LastParTileOpValid = false;
+    LastTileHeader = LastTileHeaderKind::None;
+
+    printAnnotation(OS, Annot);
+    return;
+  }
+
+  // Decoupled-body PC-relative target.
+  if (AsmFmt.starts_with("B.TEXT")) {
+    OS << "B.TEXT\t";
+    if (!emitPcRelTargetHex("simm25", /*Signed=*/true))
+      OS << "0x0";
     printAnnotation(OS, Annot);
     return;
   }
@@ -1261,8 +1432,9 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
 
     const unsigned ActiveParOp = LastParTileOpValid ? LastParTileOp : 0u;
 
-    // v0.3 bring-up: MAMULB-class blocks write an implicit accumulator.
-    const bool IsAccDst = (ActiveParOp == 2u || ActiveParOp == 66u);
+    // v0.3 bring-up: CUBE MAMULB-class blocks write an implicit accumulator.
+    const bool IsAccDst = (LastTileHeader == LastTileHeaderKind::CUBE) &&
+                          (ActiveParOp == 2u || ActiveParOp == 66u);
 
     const char *DstKind = "t";
     if (IsAccDst) {
@@ -1330,6 +1502,20 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
 
   // Special-case: block argument format selector.
   if (AsmFmt.starts_with("B.ARG")) {
+    const unsigned Format =
+        static_cast<unsigned>(findFieldImm("format").value_or(0)) & 0x1fu;
+
+    auto printNamedOrFallback = [&](StringRef Name, StringRef Prefix) {
+      OS << "B.ARG\t";
+      if (!Name.empty()) {
+        OS << Name;
+      } else {
+        OS << Prefix << "=" << utostr(Format);
+      }
+      printAnnotation(OS, Annot);
+    };
+
+    // Keep user-authored fully-specialized forms verbatim.
     if (AsmFmt.contains("ND2ZN.normal") || AsmFmt.contains("DN2NZ.normal") ||
         AsmFmt.contains("DN2ZN.normal") || AsmFmt.contains("NZ2DN.canon") ||
         AsmFmt.contains("NORM.normal")) {
@@ -1342,32 +1528,109 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       return;
     }
 
-    const unsigned Format =
-        static_cast<unsigned>(findFieldImm("format").value_or(0)) & 0x1fu;
-    StringRef LayoutName = "format";
-    switch (Format) {
-    case 0:
-      LayoutName = "NORM.normal";
-      break;
-    case 3:
-      LayoutName = "ND2ZN.normal";
-      break;
-    case 8:
-      LayoutName = "DN2ZN.normal";
-      break;
-    case 9:
-      LayoutName = "DN2NZ.normal";
-      break;
-    case 28:
-      LayoutName = "NZ2DN.canon";
-      break;
-    default:
-      LayoutName = "format";
+    const unsigned ActiveParOp = LastParTileOpValid ? LastParTileOp : 0u;
+    switch (LastTileHeader) {
+    case LastTileHeaderKind::TMA:
+      if (ActiveParOp == 34u) { // TMOV
+        printNamedOrFallback(tmovModeName(Format), "mode");
+        return;
+      }
+      // TLOAD/TSTORE: layout/pad selector.
+      printNamedOrFallback(layoutFormatName(Format), "format");
+      return;
+    case LastTileHeaderKind::TEPL:
+      printNamedOrFallback(teplModeName(Format), "mode");
+      return;
+    case LastTileHeaderKind::CUBE:
+      if (ActiveParOp == 258u) { // ACCCVT qarg0
+        printNamedOrFallback(StringRef(), "qarg0");
+        return;
+      }
+      printNamedOrFallback(StringRef(), "arg");
+      return;
+    case LastTileHeaderKind::None:
       break;
     }
-    OS << "B.ARG\t" << LayoutName;
-    if (LayoutName == "format")
-      OS << "=" << utostr(Format);
+
+    // Context-free fallback.
+    printNamedOrFallback(layoutFormatName(Format), "format");
+    return;
+  }
+
+  // Special-case: block attributes with named fields.
+  if (AsmFmt.starts_with("B.ATTR")) {
+    const unsigned C = static_cast<unsigned>(
+                           findFieldImm("C")
+                               .value_or(findFieldImm("c").value_or(0))) &
+                       0x1u;
+    const unsigned DR = static_cast<unsigned>(
+                            findFieldImm("DR")
+                                .value_or(findFieldImm("dr").value_or(0))) &
+                        0x1u;
+    const unsigned Layout =
+        static_cast<unsigned>(findFieldImm("DataLayout")
+                                  .value_or(findFieldImm("layout").value_or(0))) &
+        0x1fu;
+    const unsigned DType =
+        static_cast<unsigned>(findFieldImm("DataType")
+                                  .value_or(findFieldImm("dtype").value_or(0))) &
+        0x1fu;
+    const unsigned Pad =
+        static_cast<unsigned>(findFieldImm("PadValue")
+                                  .value_or(findFieldImm("pad").value_or(0))) &
+        0x1fu;
+    const unsigned T = static_cast<unsigned>(
+                           findFieldImm("T")
+                               .value_or(findFieldImm("t").value_or(0))) &
+                       0x1u;
+    const unsigned Aq = static_cast<unsigned>(
+                            findFieldImm("aq")
+                                .value_or(findFieldImm("AQ").value_or(0))) &
+                        0x1u;
+    const unsigned Atom = static_cast<unsigned>(
+                              findFieldImm("atom")
+                                  .value_or(findFieldImm("atomic").value_or(0))) &
+                          0x1u;
+    const unsigned Far = static_cast<unsigned>(
+                             findFieldImm("far")
+                                 .value_or(findFieldImm("FAR").value_or(0))) &
+                         0x1u;
+    const unsigned Rl = static_cast<unsigned>(
+                            findFieldImm("rl")
+                                .value_or(findFieldImm("RL").value_or(0))) &
+                        0x1u;
+
+    const StringRef LayoutName = ((Layout & 0x1u) != 0u) ? "normal" : "canon";
+    const StringRef DTName = dtypeName(DType);
+    const StringRef PadName = padValueName(Pad);
+    StringRef OrderName = "none";
+    if (Aq && Rl)
+      OrderName = "aqrl";
+    else if (Aq)
+      OrderName = "aq";
+    else if (Rl)
+      OrderName = "rl";
+
+    OS << "B.ATTR\t{"
+       << "trap=" << (C ? "on" : "off")
+       << ", atomic=" << (Atom ? "on" : "off")
+       << ", order=" << OrderName
+       << ", far=" << (Far ? "on" : "off")
+       << ", layout=" << LayoutName
+       << ", dtype=";
+    if (!DTName.empty())
+      OS << DTName;
+    else
+      OS << "DT" << utostr(DType);
+    OS << ", pad=";
+    if (!PadName.empty())
+      OS << PadName;
+    else
+      OS << "Pad" << utostr(Pad);
+    OS << ", dr=" << (DR ? "on" : "off")
+       << ", t=" << (T ? "on" : "off")
+       << "}";
+
     printAnnotation(OS, Annot);
     return;
   }

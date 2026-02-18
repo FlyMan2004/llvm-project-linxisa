@@ -31,6 +31,11 @@ using namespace llvm::opt;
 
 using tools::addPathIfExists;
 
+static bool isLinxArch(const llvm::Triple &Triple) {
+  return Triple.getArch() == llvm::Triple::linx32 ||
+         Triple.getArch() == llvm::Triple::linx64;
+}
+
 /// Get our best guess at the multiarch triple for a target.
 ///
 /// Debian-based systems are starting to use a multiarch setup where they use
@@ -375,9 +380,23 @@ Linux::Linux(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
 }
 
 ToolChain::RuntimeLibType Linux::GetDefaultRuntimeLibType() const {
+  if (isLinxArch(getTriple()))
+    return ToolChain::RLT_CompilerRT;
   if (getTriple().isAndroid())
     return ToolChain::RLT_CompilerRT;
   return Generic_ELF::GetDefaultRuntimeLibType();
+}
+
+ToolChain::UnwindLibType Linux::GetUnwindLibType(const ArgList &Args) const {
+  if (!isLinxArch(getTriple()))
+    return Generic_ELF::GetUnwindLibType(Args);
+
+  if (Args.getLastArg(options::OPT_unwindlib_EQ))
+    return Generic_ELF::GetUnwindLibType(Args);
+
+  if (GetRuntimeLibType(Args) == ToolChain::RLT_CompilerRT)
+    return ToolChain::UNW_CompilerRT;
+  return Generic_ELF::GetUnwindLibType(Args);
 }
 
 unsigned Linux::GetDefaultDwarfVersion() const {
@@ -387,6 +406,8 @@ unsigned Linux::GetDefaultDwarfVersion() const {
 }
 
 ToolChain::CXXStdlibType Linux::GetDefaultCXXStdlibType() const {
+  if (isLinxArch(getTriple()))
+    return ToolChain::CST_Libcxx;
   if (getTriple().isAndroid())
     return ToolChain::CST_Libcxx;
   return ToolChain::CST_Libstdcxx;
@@ -997,7 +1018,7 @@ void Linux::addExtraOpts(llvm::opt::ArgStringList &CmdArgs) const {
 }
 
 const char *Linux::getDefaultLinker() const {
-  if (getTriple().isAndroid())
+  if (getTriple().isAndroid() || isLinxArch(getTriple()))
     return "ld.lld";
   return Generic_ELF::getDefaultLinker();
 }

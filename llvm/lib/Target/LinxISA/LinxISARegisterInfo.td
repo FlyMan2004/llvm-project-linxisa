@@ -98,28 +98,31 @@ def GPR : RegisterClass<"Linx", [i64, i32, f64, f32], 64,
          U1, U2, U3, U4)>;
 
 // Tile register classes.
-def TILE : RegisterClass<"Linx", [linxtile], 32768,
+//
+// Keep `v1024i32` as a temporary bridge VT for legacy clang builtins while
+// the frontend migrates to target("linx.tile") values.
+def TILE : RegisterClass<"Linx", [linxtile, v1024i32], 32768,
     (sequence "TILE%i", 0, 31)>;
 
 // Sub-classes for encodable destination banks used by block types:
 // - TMA blocks write into T/U hands (TILE0..TILE15) selected by group.
 // - CUBE blocks write into M/N hands (TILE16..TILE31) selected by group.
-def TILE_TU : RegisterClass<"Linx", [linxtile], 32768,
+def TILE_TU : RegisterClass<"Linx", [linxtile, v1024i32], 32768,
     (sequence "TILE%i", 0, 15)>;
-def TILE_MN : RegisterClass<"Linx", [linxtile], 32768,
+def TILE_MN : RegisterClass<"Linx", [linxtile, v1024i32], 32768,
     (sequence "TILE%i", 16, 31)>;
 
 // Hand-specific classes (v0.3 auto-mode canonical policy).
 //
 // These are used to enforce deterministic hand placement in post-isel MIR and
 // when constructing spill/reload sequences for tile pressure scenarios.
-def TILE_T : RegisterClass<"Linx", [linxtile], 32768,
+def TILE_T : RegisterClass<"Linx", [linxtile, v1024i32], 32768,
     (sequence "TILE%i", 0, 7)>;
-def TILE_U : RegisterClass<"Linx", [linxtile], 32768,
+def TILE_U : RegisterClass<"Linx", [linxtile, v1024i32], 32768,
     (sequence "TILE%i", 8, 15)>;
-def TILE_M : RegisterClass<"Linx", [linxtile], 32768,
+def TILE_M : RegisterClass<"Linx", [linxtile, v1024i32], 32768,
     (sequence "TILE%i", 16, 23)>;
-def TILE_N : RegisterClass<"Linx", [linxtile], 32768,
+def TILE_N : RegisterClass<"Linx", [linxtile, v1024i32], 32768,
     (sequence "TILE%i", 24, 31)>;
 
 def CSR_Linx : CalleeSavedRegs<(add R10,

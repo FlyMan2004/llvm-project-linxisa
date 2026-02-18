@@ -50,7 +50,7 @@ struct TileRelRef {
 
 struct TileMeta {
   uint8_t SizeCode = 0;
-  uint8_t DataType = 0;
+  uint8_t DataType = 17;
   int64_t Layout = 0;
   bool HasSize = false;
   bool HasDataType = false;
@@ -200,7 +200,7 @@ static bool extractDefMetadata(const MachineInstr &MI, TileMeta &Meta) {
     Meta.HasSize = true;
     Meta.SizeCode = static_cast<uint8_t>(MI.getOperand(2).getImm() & 0x1f);
     Meta.HasDataType = true;
-    Meta.DataType = 0; // bring-up default INT32
+    Meta.DataType = 17; // bring-up default INT32 (v0.3 DataType table)
     return true;
 
   case LinxISA::PSEUDO_TMA_TLOAD_DESC:
@@ -217,7 +217,7 @@ static bool extractDefMetadata(const MachineInstr &MI, TileMeta &Meta) {
     Meta.HasSize = true;
     Meta.SizeCode = 8; // bring-up default 4KB tile value
     Meta.HasDataType = true;
-    Meta.DataType = 0;
+    Meta.DataType = 17;
     return true;
 
   case LinxISA::PSEUDO_CUBE_ACCCVT:
@@ -232,7 +232,7 @@ static bool extractDefMetadata(const MachineInstr &MI, TileMeta &Meta) {
     Meta.HasSize = true;
     Meta.SizeCode = static_cast<uint8_t>(MI.getOperand(3).getImm() & 0x1f);
     Meta.HasDataType = true;
-    Meta.DataType = 0;
+    Meta.DataType = 17;
     return true;
 
   case LinxISA::PSEUDO_VTILE_ADD:
@@ -240,7 +240,7 @@ static bool extractDefMetadata(const MachineInstr &MI, TileMeta &Meta) {
     Meta.HasSize = true;
     Meta.SizeCode = 8; // current blockify default
     Meta.HasDataType = true;
-    Meta.DataType = 0;
+    Meta.DataType = 17;
     return true;
 
   case LinxISA::PSEUDO_TEPL_UNARY:
@@ -255,6 +255,20 @@ static bool extractDefMetadata(const MachineInstr &MI, TileMeta &Meta) {
     Meta.SizeCode = static_cast<uint8_t>(MI.getOperand(4).getImm() & 0x1f);
     Meta.HasDataType = true;
     Meta.DataType = static_cast<uint8_t>(MI.getOperand(5).getImm() & 0x1f);
+    return true;
+
+  case LinxISA::PSEUDO_TEPL_BINARY_SCALAR:
+    Meta.HasSize = true;
+    Meta.SizeCode = static_cast<uint8_t>(MI.getOperand(4).getImm() & 0x1f);
+    Meta.HasDataType = true;
+    Meta.DataType = static_cast<uint8_t>(MI.getOperand(5).getImm() & 0x1f);
+    return true;
+
+  case LinxISA::PSEUDO_TEPL_SPLAT:
+    Meta.HasSize = true;
+    Meta.SizeCode = static_cast<uint8_t>(MI.getOperand(3).getImm() & 0x1f);
+    Meta.HasDataType = true;
+    Meta.DataType = static_cast<uint8_t>(MI.getOperand(4).getImm() & 0x1f);
     return true;
 
   case LinxISA::PSEUDO_TMA_TMOV:
@@ -274,6 +288,21 @@ static bool extractDefMetadata(const MachineInstr &MI, TileMeta &Meta) {
 
 static bool isTileTMOVPseudo(const MachineInstr &MI) {
   return MI.getOpcode() == LinxISA::PSEUDO_TMA_TMOV;
+}
+
+static bool definesTileReg(const MachineInstr &MI, Register Reg) {
+  for (const MachineOperand &MO : MI.operands()) {
+    if (!MO.isReg() || !MO.isDef() || MO.isImplicit())
+      continue;
+    if (MO.getReg() == Reg)
+      return true;
+  }
+  return false;
+}
+
+static bool isCubeAccumulatorProducerOpcode(unsigned Opc) {
+  return Opc == LinxISA::PSEUDO_CUBE_MAMULB ||
+         Opc == LinxISA::PSEUDO_CUBE_MAMULB_ACC;
 }
 
 static bool isTileCopyInstr(const MachineInstr &MI,
@@ -358,9 +387,12 @@ public:
 
       std::string Reason;
       if (!metadataCompatible(It->second, Incoming, Reason)) {
-        reportTileBalanceError(MF, DefMI,
-                               Twine("incompatible tile metadata for def: ") +
-                                   Reason);
+        // Physical tile registers are reused across independent defs in a
+        // function. Strict metadata rejection is enforced on COPY/PHI edge
+        // normalization where both source and destination values participate
+        // in the same flow relation.
+        It->second = Incoming;
+        return;
       }
       It->second = mergeMetadata(It->second, Incoming);
     };
@@ -413,6 +445,33 @@ public:
     // Seed metadata from tile-value defining pseudos.
     for (MachineBasicBlock &MBB : MF) {
       for (MachineInstr &MI : MBB) {
+        if (MI.getOpcode() == LinxISA::PSEUDO_CUBE_MAMULB_ACC ||
+            MI.getOpcode() == LinxISA::PSEUDO_CUBE_ACCCVT) {
+          if (MI.getNumOperands() > 1 && MI.getOperand(1).isReg()) {
+            const Register Acc = MI.getOperand(1).getReg();
+            if (isTilePhysReg(Acc)) {
+              MachineInstr *PrevDef = nullptr;
+              auto DefIt = MI.getIterator();
+              while (DefIt != MBB.begin()) {
+                --DefIt;
+                if (definesTileReg(*DefIt, Acc)) {
+                  PrevDef = &*DefIt;
+                  break;
+                }
+              }
+              if (PrevDef && !isCubeAccumulatorProducerOpcode(PrevDef->getOpcode())) {
+                reportTileBalanceError(
+                    MF, MI,
+                    Twine(MI.getOpcode() == LinxISA::PSEUDO_CUBE_MAMULB_ACC
+                              ? "cube.mamulb.acc"
+                              : "cube.acccvt") +
+                        " requires accumulator operand produced by "
+                        "cube.mamulb or cube.mamulb.acc");
+              }
+            }
+          }
+        }
+
         TileMeta Meta;
         if (!extractDefMetadata(MI, Meta))
           continue;

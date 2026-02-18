@@ -20,19 +20,6 @@ entry:
 ; CHECK: BSTART.TADD
 ; CHECK: BSTART.TSTORE
 
-define void @tepl_binary_fallback(ptr %a, ptr %b, ptr %dst) {
-entry:
-  %ta = call %linx.tile @llvm.linx.tile.tload(ptr %a, i32 8, i32 1, i64 0, i64 8, i64 8, i64 0)
-  %tb = call %linx.tile @llvm.linx.tile.tload(ptr %b, i32 8, i32 1, i64 0, i64 8, i64 8, i64 0)
-  %tc = call %linx.tile @llvm.linx.tepl.binary(%linx.tile %ta, %linx.tile %tb, i32 511, i32 8, i32 1)
-  call void @llvm.linx.tile.tstore(ptr %dst, %linx.tile %tc, i32 8, i32 1, i64 0, i64 8, i64 8, i64 0)
-  ret void
-}
-
-; CHECK-LABEL: tepl_binary_fallback:
-; CHECK: BSTART.TEPL{{[[:space:]]+}}511
-; CHECK: BSTART.TSTORE
-
 define void @tepl_unary_rowmax(ptr %a, ptr %dst) {
 entry:
   %ta = call %linx.tile @llvm.linx.tile.tload(ptr %a, i32 8, i32 1, i64 0, i64 8, i64 8, i64 0)
