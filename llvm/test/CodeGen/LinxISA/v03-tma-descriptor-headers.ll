@@ -1,23 +1,25 @@
 ; RUN: llc -mtriple=linx64 -O2 < %s | FileCheck %s
 
-declare <1024 x i32> @llvm.linx.tma.tload.desc(ptr, i32, i32, i32, i32)
-declare void @llvm.linx.tma.tstore.desc(ptr, <1024 x i32>, i32, i32, i32, i32)
+%linx.tile = type target("linx.tile")
+
+declare %linx.tile @llvm.linx.tile.tload(ptr, i32, i32, i64, i64, i64, i64)
+declare void @llvm.linx.tile.tstore(ptr, %linx.tile, i32, i32, i64, i64, i64, i64)
 
 define void @tma_desc_roundtrip(ptr %src, ptr %dst) {
 entry:
-  %t = call <1024 x i32> @llvm.linx.tma.tload.desc(ptr %src, i32 0, i32 8, i32 8, i32 8)
-  call void @llvm.linx.tma.tstore.desc(ptr %dst, <1024 x i32> %t, i32 0, i32 8, i32 8, i32 8)
+  %t = call %linx.tile @llvm.linx.tile.tload(ptr %src, i32 8, i32 0, i64 0, i64 8, i64 8, i64 0)
+  call void @llvm.linx.tile.tstore(ptr %dst, %linx.tile %t, i32 8, i32 0, i64 0, i64 8, i64 8, i64 0)
   ret void
 }
 
 ; CHECK-LABEL: tma_desc_roundtrip:
-; CHECK: BSTART.TMA{{[[:space:]]+}}TLOAD,
+; CHECK: BSTART.TLOAD{{[[:space:]]+}}
 ; CHECK: C.B.DIMI{{.*}}->lb0
 ; CHECK: C.B.DIMI{{.*}}->lb1
 ; CHECK: B.ARG
 ; CHECK: B.IOR
 ; CHECK: B.IOTI
-; CHECK: BSTART.TMA{{[[:space:]]+}}TSTORE,
+; CHECK: BSTART.TSTORE{{[[:space:]]+}}
 ; CHECK: B.ARG
 ; CHECK: B.IOR
 ; CHECK: B.IOTI

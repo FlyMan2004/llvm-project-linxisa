@@ -14,6 +14,7 @@
 namespace llvm {
 
 class LinxISASubtarget;
+class Function;
 
 class LinxISATargetLowering : public TargetLowering {
   const LinxISASubtarget &STI;
@@ -47,6 +48,8 @@ public:
   void LowerAsmOperandForConstraint(SDValue Op, StringRef Constraint,
                                     std::vector<SDValue> &Ops,
                                     SelectionDAG &DAG) const override;
+
+  bool areJTsAllowed(const Function *Fn) const override;
 
 private:
   SDValue LowerBR(SDValue Op, SelectionDAG &DAG) const;

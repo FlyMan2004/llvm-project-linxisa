@@ -16,7 +16,7 @@ public:
 
 namespace LinxISA {
 using Specifier = uint8_t;
-enum { S_None, S_PLT };
+enum { S_None, S_PLT, S_GOT };
 } // namespace LinxISA
 
 } // namespace llvm

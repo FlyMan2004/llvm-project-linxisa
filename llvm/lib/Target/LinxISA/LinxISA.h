@@ -11,18 +11,37 @@
 
 #include "llvm/CodeGen/SelectionDAGNodes.h"
 #include "llvm/Pass.h"
+#include <cstdint>
 
 namespace llvm {
 
 class LinxISATargetMachine;
 class PassRegistry;
 
+enum class LinxCodeSizeBalanceMode : uint8_t {
+  Off,
+  Balanced,
+  StaticFirst,
+  DynamicFirst,
+};
+
 FunctionPass *createLinxISAISelDag(LinxISATargetMachine &TM);
+FunctionPass *createLinxISATileSSABalancePass();
 FunctionPass *createLinxISABlockifyPass();
+FunctionPass *createLinxISASIMTAutoVectorizePass();
 
 void initializeLinxISAAsmPrinterPass(PassRegistry &);
 void initializeLinxISADAGToDAGISelLegacyPass(PassRegistry &);
+void initializeLinxISATileSSABalancePass(PassRegistry &);
 void initializeLinxISABlockifyPass(PassRegistry &);
+void initializeLinxISASIMTAutoVectorizePass(PassRegistry &);
+
+bool linxEnableNegImmCanon();
+bool linxEnableMaskSetcFold();
+bool linxEnableSetcSrcRTypeFlags();
+bool linxEnableCShift16();
+bool linxEnableT1Motion();
+LinxCodeSizeBalanceMode linxCodeSizeBalanceMode();
 
 namespace LinxISD {
 

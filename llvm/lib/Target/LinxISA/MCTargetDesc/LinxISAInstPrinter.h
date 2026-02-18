@@ -2,6 +2,7 @@
 #define LLVM_LIB_TARGET_LINXISA_MCTARGETDESC_LINXISAINSTPRINTER_H
 
 #include "llvm/MC/MCInstPrinter.h"
+#include <cstdint>
 
 namespace llvm {
 
@@ -20,8 +21,16 @@ public:
                  raw_ostream &OS) override;
 
 private:
+  enum class LastTileHeaderKind : uint8_t {
+    None,
+    TMA,
+    CUBE,
+    TEPL,
+  };
+
   unsigned LastParTileOp = 0;
   bool LastParTileOpValid = false;
+  LastTileHeaderKind LastTileHeader = LastTileHeaderKind::None;
 };
 
 } // namespace llvm

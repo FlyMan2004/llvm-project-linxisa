@@ -138,6 +138,10 @@ def uimm6 : Operand<i64>, PatLeaf<(i64 imm), [{ return isUInt<6>(N->getZExtValue
   let ParserMatchClass = ImmAsmOperand;
 }
 
+def uimm10 : Operand<i64>, PatLeaf<(i64 imm), [{ return isUInt<10>(N->getZExtValue()); }]> {
+  let ParserMatchClass = ImmAsmOperand;
+}
+
 def uimm2 : Operand<i64>, PatLeaf<(i64 imm), [{ return isUInt<2>(N->getZExtValue()); }]> {
   let ParserMatchClass = ImmAsmOperand;
 }
@@ -185,15 +189,9 @@ def CallTarget : Operand<iPTR> {
 let isCall = 1, hasSideEffects = 1, Size = 6, Uses = [R1], Defs = [R10] in
 def PSEUDO_CALL : Pseudo<(outs), (ins CallTarget:$dst), "# PSEUDO_CALL", []>;
 
-// Musttail-first lowering form: transfer control after frame teardown without
-// materializing a new return address in `ra`.
-let isCall = 1, isReturn = 1, isTerminator = 1, isBarrier = 1,
-    hasSideEffects = 1, Size = 6,
-    Uses = [R1, R10] in
-def PSEUDO_TAILCALL : Pseudo<(outs), (ins CallTarget:$dst), "# PSEUDO_TAILCALL", []>;
-
-// Return value registers are attached as explicit machine operands by
-// LowerReturn. Keep only `ra` as a static implicit use here.
+// Keep RA live at return. Return value registers are attached explicitly by
+// LowerReturn as operands on each PSEUDO_RET instance, so they must not be
+// hard-wired here (void returns would otherwise require undefined a0/a1).
 let isReturn = 1, isTerminator = 1, Size = 4, Uses = [R10] in
 def PSEUDO_RET : Pseudo<(outs), (ins), "# PSEUDO_RET", [(RetGlue)]>;
 
@@ -428,8 +426,10 @@ def PSEUDO_TMA_TLOAD_ANY : Pseudo<(outs TILE:$dst), (ins GPR_Arch:$base, i64imm:
 
 let hasSideEffects = 1, isBarrier = 1, mayLoad = 1, Size = 4 in
 def PSEUDO_TMA_TLOAD_DESC : Pseudo<(outs TILE_TU:$dst),
-                                   (ins GPR_Arch:$base, i64imm:$layout, i64imm:$lb0,
-                                        i64imm:$lb1, i64imm:$size),
+                                   (ins GPR_Arch:$base, i64imm:$dtype,
+                                        i64imm:$layout, i64imm:$lb0,
+                                        i64imm:$lb1, i64imm:$size,
+                                        GPR_Arch:$stride_bytes),
                                    "# PSEUDO_TMA_TLOAD_DESC", []>;
 
 let hasSideEffects = 1, isBarrier = 1, mayStore = 1, Size = 4 in
@@ -438,9 +438,29 @@ def PSEUDO_TMA_TSTORE : Pseudo<(outs), (ins GPR_Arch:$base, TILE:$src, i64imm:$s
 
 let hasSideEffects = 1, isBarrier = 1, mayStore = 1, Size = 4 in
 def PSEUDO_TMA_TSTORE_DESC : Pseudo<(outs),
-                                    (ins GPR_Arch:$base, TILE:$src, i64imm:$layout,
-                                         i64imm:$lb0, i64imm:$lb1, i64imm:$size),
+                                    (ins GPR_Arch:$base, TILE:$src,
+                                         i64imm:$dtype, i64imm:$layout,
+                                         i64imm:$lb0, i64imm:$lb1,
+                                         i64imm:$size, GPR_Arch:$stride_bytes),
                                     "# PSEUDO_TMA_TSTORE_DESC", []>;
+
+// Compiler-inserted tile SSA edge balancing pseudo.
+//
+// Operand contract:
+//   dst/src       : tile destination/source values
+//   size          : SizeCode propagated from source tile metadata
+//   dtype         : DataType (0 when unknown; strict mismatch checking happens
+//                   in LinxISATileSSABalance before this pseudo is emitted)
+//   layout        : layout payload (valid when has_layout=1)
+//   has_layout    : 0/1 bit
+//   mode          : TMOV mode (PR2 defaults to V2V=0)
+//   src_reuse     : 0/1 bit derived from COPY kill semantics
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_TMA_TMOV : Pseudo<(outs TILE:$dst),
+                             (ins TILE:$src, i64imm:$size, i64imm:$dtype,
+                                  i64imm:$layout, i64imm:$has_layout,
+                                  i64imm:$mode, i64imm:$src_reuse),
+                             "# PSEUDO_TMA_TMOV", []>;
 
 let hasSideEffects = 1, isBarrier = 1, Size = 4 in
 def PSEUDO_CUBE_MAMULB : Pseudo<(outs TILE_MN:$dst),
@@ -454,9 +474,65 @@ def PSEUDO_CUBE_MAMULB_ACC : Pseudo<(outs TILE_MN:$dst),
                                          i64imm:$m, i64imm:$n, i64imm:$k),
                                     "# PSEUDO_CUBE_MAMULB_ACC", []>;
 
-// Tile vector elementwise ops: execute a SIMT body in a VPAR decoupled block.
-// Lowered late into:
-//   BSTART.VPAR + B.TEXT body + B.IOTI(inputs) + B.IOTI(output) + B.DIM(LB0/LB1)
+// PR5 roadmap stub: explicit CUBE ACCCVT stage for frontend intrinsic use.
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_CUBE_ACCCVT : Pseudo<(outs TILE_MN:$dst),
+                                (ins TILE:$acc,
+                                     i64imm:$size, i64imm:$dtype,
+                                     i64imm:$qarg0, i64imm:$qarg1),
+                                "# PSEUDO_CUBE_ACCCVT", []>;
+
+// PR5 TEPL template-op dispatch pseudos.
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_TEPL_UNARY : Pseudo<(outs TILE:$dst),
+                               (ins TILE:$src, i64imm:$tileop,
+                                    i64imm:$size, i64imm:$dtype),
+                               "# PSEUDO_TEPL_UNARY", []>;
+
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_TEPL_BINARY : Pseudo<(outs TILE:$dst),
+                                (ins TILE:$srcA, TILE:$srcB, i64imm:$tileop,
+                                     i64imm:$size, i64imm:$dtype),
+                                "# PSEUDO_TEPL_BINARY", []>;
+
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_TEPL_BINARY_SCALAR : Pseudo<(outs TILE:$dst),
+                                       (ins TILE:$srcA, GPR_Arch:$srcS,
+                                            i64imm:$tileop, i64imm:$size,
+                                            i64imm:$dtype, i64imm:$mode),
+                                       "# PSEUDO_TEPL_BINARY_SCALAR", []>;
+
+let hasSideEffects = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_TEPL_SPLAT : Pseudo<(outs TILE:$dst),
+                               (ins GPR_Arch:$srcS, i64imm:$tileop,
+                                    i64imm:$size, i64imm:$dtype,
+                                    i64imm:$mode),
+                               "# PSEUDO_TEPL_SPLAT", []>;
+
+// Vector decoupled blocks (bring-up): lowered late into BSTART.VSEQ/VPAR headers
+// with B.TEXT + B.DIM descriptors and a per-function empty body stub.
+let hasSideEffects = 1, Size = 4 in
+def PSEUDO_VBLOCK_LAUNCH : Pseudo<(outs),
+                                  (ins i64imm:$vkind, i64imm:$dim0, i64imm:$dim1,
+                                       i64imm:$dim2, i64imm:$attr_bits,
+                                       GPR_Arch:$bind0, GPR_Arch:$bind1,
+                                       GPR_Arch:$bind2, GPR_Arch:$bind3,
+                                       GPR_Arch:$bind4, GPR_Arch:$bind5),
+                                  "# PSEUDO_VBLOCK_LAUNCH", []>;
+
+// Dynamic-dimension variant used when Dim1 (group count) is runtime-varying.
+let hasSideEffects = 1, Size = 4 in
+def PSEUDO_VBLOCK_LAUNCH_DYN1 : Pseudo<(outs),
+                                       (ins i64imm:$vkind, i64imm:$dim0,
+                                            GPR_Arch:$dim1,
+                                            i64imm:$dim2, i64imm:$attr_bits,
+                                            GPR_Arch:$bind0, GPR_Arch:$bind1,
+                                            GPR_Arch:$bind2, GPR_Arch:$bind3,
+                                            GPR_Arch:$bind4, GPR_Arch:$bind5),
+                                       "# PSEUDO_VBLOCK_LAUNCH_DYN1", []>;
+
+// SIMT tile binary ops (auto-mode): lowered in Blockify into decoupled
+// BSTART.VPAR headers + B.TEXT bodies.
 let hasSideEffects = 1, isBarrier = 1, Size = 4 in {
   def PSEUDO_VPAR_TADD : Pseudo<(outs TILE:$dst),
                                 (ins TILE:$srcA, TILE:$srcB, i64imm:$size),
@@ -464,34 +540,117 @@ let hasSideEffects = 1, isBarrier = 1, Size = 4 in {
   def PSEUDO_VPAR_TSUB : Pseudo<(outs TILE:$dst),
                                 (ins TILE:$srcA, TILE:$srcB, i64imm:$size),
                                 "# PSEUDO_VPAR_TSUB", []>;
-}
-
-// Bring-up: allow C/C++ vector arithmetic on 4KiB tile values to lower to the
-// same VPAR decoupled block expansion without requiring intrinsics.
-//
-// These pseudos are selected from plain `add/sub <1024 x i32>` operations and
-// implicitly assume a 4KiB tile footprint (SizeCode=8).
-let hasSideEffects = 0, isBarrier = 0, Size = 4 in {
-  def PSEUDO_VTILE_ADD : Pseudo<(outs TILE:$dst),
-                                (ins TILE:$srcA, TILE:$srcB),
+  def PSEUDO_VTILE_ADD : Pseudo<(outs TILE:$dst), (ins TILE:$srcA, TILE:$srcB),
                                 "# PSEUDO_VTILE_ADD", []>;
-  def PSEUDO_VTILE_SUB : Pseudo<(outs TILE:$dst),
-                                (ins TILE:$srcA, TILE:$srcB),
+  def PSEUDO_VTILE_SUB : Pseudo<(outs TILE:$dst), (ins TILE:$srcA, TILE:$srcB),
                                 "# PSEUDO_VTILE_SUB", []>;
 }
 
-// Vector decoupled blocks (bring-up): lowered late into BSTART.VSEQ/VPAR headers
-// with B.TEXT + B.DIM descriptors and a per-function empty body stub.
-let hasSideEffects = 1, isBarrier = 1, Size = 4 in
-def PSEUDO_VBLOCK_LAUNCH : Pseudo<(outs),
-                                  (ins i64imm:$vkind, i64imm:$dim0, i64imm:$dim1,
-                                       i64imm:$dim2, i64imm:$attr_bits),
-                                  "# PSEUDO_VBLOCK_LAUNCH", []>;
+// Vector body pseudo ops. These carry lane-register encodings (ri*/vt/vu/vm/vn
+// namespace IDs) as immediates and are lowered in MCInstLower to canonical
+// strict-v0.3 V.* encodings.
+let hasSideEffects = 1, Size = 4 in {
+  def PSEUDO_V_ADD : Pseudo<(outs),
+                            (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR,
+                                 i64imm:$srcRType, i64imm:$shamt),
+                            "# PSEUDO_V_ADD", []>;
+  def PSEUDO_V_SUB : Pseudo<(outs),
+                            (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR,
+                                 i64imm:$srcRType, i64imm:$shamt),
+                            "# PSEUDO_V_SUB", []>;
+  def PSEUDO_V_FADD : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                             "# PSEUDO_V_FADD", []>;
+  def PSEUDO_V_FSUB : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                             "# PSEUDO_V_FSUB", []>;
+  def PSEUDO_V_FMUL : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                             "# PSEUDO_V_FMUL", []>;
+  def PSEUDO_V_FDIV : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                             "# PSEUDO_V_FDIV", []>;
+
+  def PSEUDO_V_CMP_EQ : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                               "# PSEUDO_V_CMP_EQ", []>;
+  def PSEUDO_V_CMP_NE : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                               "# PSEUDO_V_CMP_NE", []>;
+  def PSEUDO_V_CMP_LT : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                               "# PSEUDO_V_CMP_LT", []>;
+  def PSEUDO_V_CMP_LTU : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                                "# PSEUDO_V_CMP_LTU", []>;
+  def PSEUDO_V_CMP_GE : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                               "# PSEUDO_V_CMP_GE", []>;
+  def PSEUDO_V_CMP_GEU : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                                "# PSEUDO_V_CMP_GEU", []>;
+  def PSEUDO_V_FEQ : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                            "# PSEUDO_V_FEQ", []>;
+  def PSEUDO_V_FNE : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                            "# PSEUDO_V_FNE", []>;
+  def PSEUDO_V_FLT : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                            "# PSEUDO_V_FLT", []>;
+  def PSEUDO_V_FGE : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+                            "# PSEUDO_V_FGE", []>;
+
+  def PSEUDO_V_CSEL : Pseudo<(outs),
+                             (ins i64imm:$dst, i64imm:$srcP, i64imm:$srcL,
+                                  i64imm:$srcR, i64imm:$srcRType),
+                             "# PSEUDO_V_CSEL", []>;
+
+  let mayLoad = 1 in
+  def PSEUDO_V_LW_BRG : Pseudo<(outs),
+                               (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR,
+                                    i64imm:$shamt, i64imm:$localBit),
+                               "# PSEUDO_V_LW_BRG", []>;
+  let mayStore = 1 in
+  def PSEUDO_V_SW_BRG : Pseudo<(outs),
+                               (ins i64imm:$srcD, i64imm:$srcL, i64imm:$srcR,
+                                    i64imm:$shamt, i64imm:$localBit),
+                               "# PSEUDO_V_SW_BRG", []>;
+
+  def PSEUDO_V_RDADD : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL),
+                              "# PSEUDO_V_RDADD", []>;
+  def PSEUDO_V_RDAND : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL),
+                              "# PSEUDO_V_RDAND", []>;
+  def PSEUDO_V_RDFADD : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL),
+                               "# PSEUDO_V_RDFADD", []>;
+  def PSEUDO_V_RDFMAX : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL),
+                               "# PSEUDO_V_RDFMAX", []>;
+  def PSEUDO_V_RDFMIN : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL),
+                               "# PSEUDO_V_RDFMIN", []>;
+  def PSEUDO_V_RDMAX : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL),
+                              "# PSEUDO_V_RDMAX", []>;
+  def PSEUDO_V_RDMIN : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL),
+                              "# PSEUDO_V_RDMIN", []>;
+  def PSEUDO_V_RDOR : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL),
+                             "# PSEUDO_V_RDOR", []>;
+  def PSEUDO_V_RDXOR : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL),
+                              "# PSEUDO_V_RDXOR", []>;
+
+  def PSEUDO_V_B_EQ : Pseudo<(outs),
+                             (ins i64imm:$srcL, i64imm:$srcR, BrTarget:$target),
+                             "# PSEUDO_V_B_EQ", []>;
+  def PSEUDO_V_B_NE : Pseudo<(outs),
+                             (ins i64imm:$srcL, i64imm:$srcR, BrTarget:$target),
+                             "# PSEUDO_V_B_NE", []>;
+  def PSEUDO_V_B_LT : Pseudo<(outs),
+                             (ins i64imm:$srcL, i64imm:$srcR, BrTarget:$target),
+                             "# PSEUDO_V_B_LT", []>;
+  def PSEUDO_V_B_GE : Pseudo<(outs),
+                             (ins i64imm:$srcL, i64imm:$srcR, BrTarget:$target),
+                             "# PSEUDO_V_B_GE", []>;
+  def PSEUDO_V_B_LTU : Pseudo<(outs),
+                              (ins i64imm:$srcL, i64imm:$srcR, BrTarget:$target),
+                              "# PSEUDO_V_B_LTU", []>;
+  def PSEUDO_V_B_GEU : Pseudo<(outs),
+                              (ins i64imm:$srcL, i64imm:$srcR, BrTarget:$target),
+                              "# PSEUDO_V_B_GEU", []>;
+}
+
+let hasSideEffects = 1, isTerminator = 1, isBarrier = 1, Size = 4 in
+def PSEUDO_V_J : Pseudo<(outs), (ins BrTarget:$target), "# PSEUDO_V_J", []>;
 
 // Real tile-block descriptor instructions (emitted after register allocation).
 let hasSideEffects = 1, isBarrier = 1, Size = 4 in {
   def BSTART_TMA  : LinxISAInst<(outs), (ins uimm5:$dtype, uimm5:$func), "", []>;
   def BSTART_CUBE : LinxISAInst<(outs), (ins uimm5:$dtype, uimm5:$func), "", []>;
+  def BSTART_TEPL : LinxISAInst<(outs), (ins uimm5:$dtype, uimm10:$tileop), "", []>;
 
   // Vector block start markers (decoupled headers).
   //
@@ -499,13 +658,21 @@ let hasSideEffects = 1, isBarrier = 1, Size = 4 in {
   // the MachineInstr for now (vblock.launch emits Mode=0).
   def BSTART_VPAR : LinxISAInst<(outs), (ins uimm5:$mode), "", []>;
   def BSTART_VSEQ : LinxISAInst<(outs), (ins uimm5:$mode), "", []>;
-  def BSTART_MSEQ : LinxISAInst<(outs), (ins uimm5:$mode), "", []>;  // Sequential vector with memory
-  def BSTART_MPAR : LinxISAInst<(outs), (ins uimm5:$mode), "", []>;  // Parallel vector with memory
+  def BSTART_MPAR : LinxISAInst<(outs), (ins uimm5:$mode), "", []>;
+  def BSTART_MSEQ : LinxISAInst<(outs), (ins uimm5:$mode), "", []>;
 
   // Decoupled-body pointer for tile/vector headers (see ISA manual: decoupled blocks).
   def B_TEXT : LinxISAInst<(outs), (ins BrTarget:$dst), "", []>;
 
   def B_ARG : LinxISAInst<(outs), (ins i64imm:$format), "", []>;
+
+  // Full B.ATTR descriptor (strict-v0.3):
+  // {C, DR, DataLayout, DataType, PadValue, T, aq, atom, far, rl}
+  def B_ATTR : LinxISAInst<(outs), (ins i64imm:$c, i64imm:$dr,
+                                       i64imm:$layout, i64imm:$dtype,
+                                       i64imm:$pad, i64imm:$t,
+                                       i64imm:$aq, i64imm:$atom,
+                                       i64imm:$far, i64imm:$rl), "", []>;
 
   def B_DIM_LB0 : LinxISAInst<(outs), (ins GPR_Arch:$reg, i64imm:$imm), "", []>;
   def B_DIM_LB1 : LinxISAInst<(outs), (ins GPR_Arch:$reg, i64imm:$imm), "", []>;

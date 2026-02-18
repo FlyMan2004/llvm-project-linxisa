@@ -9,20 +9,22 @@
 #include "LinxISA.h"
 #include "LinxISABaseInfo.h"
 #include "LinxISAInstrInfo.h"
+#include "LinxISAMachineFunctionInfo.h"
 #include "LinxISARegisterInfo.h"
 #include "MCTargetDesc/LinxISAMCTargetDesc.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetOpcodes.h"
-#include "llvm/IR/InlineAsm.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/Support/Debug.h"
@@ -30,8 +32,11 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
 #include <limits>
 #include <optional>
+#include <string>
 
 using namespace llvm;
 
@@ -50,6 +55,291 @@ struct LocalDUInfo {
   unsigned UseOpNo = 0;
 };
 
+enum class TileHand : uint8_t {
+  T = 0,
+  U = 1,
+  M = 2,
+  N = 3,
+  ACC = 4,
+};
+
+struct TileRelRef {
+  TileHand Hand = TileHand::T;
+  uint8_t Depth = 1; // 1..8
+  bool Reuse = false;
+};
+
+struct TileMeta {
+  uint8_t SizeCode = 0;
+  uint8_t DataType = 17;
+  int64_t Layout = 0;
+  bool HasLayout = false;
+};
+
+enum class TMovMode : uint8_t {
+  V2V = 0,
+  A2V = 1,
+};
+
+enum class TEPLMode : uint8_t {
+  VV = 0,
+  VS = 1,
+  SV = 2,
+};
+
+static std::optional<uint64_t> tileSizeCodeToBytes(unsigned SizeCode) {
+  if (SizeCode >= 60)
+    return std::nullopt;
+  return 1ull << (SizeCode + 4u);
+}
+
+static bool isStrictTileSizeCode(unsigned SizeCode) {
+  std::optional<uint64_t> Bytes = tileSizeCodeToBytes(SizeCode);
+  return Bytes && *Bytes >= 512u && *Bytes <= 4096u;
+}
+
+static void validateStrictTileSizeCode(int64_t SizeCode, StringRef Context) {
+  if (SizeCode < 0 || SizeCode > 31 ||
+      !isStrictTileSizeCode(static_cast<unsigned>(SizeCode))) {
+    report_fatal_error(Twine("Linx: ") + Context +
+                       " requires SizeCode in strict 512B..4KB policy");
+  }
+}
+
+static void validateTileOp10(int64_t TileOp10, StringRef Context) {
+  if (TileOp10 < 0 || TileOp10 > 1023)
+    report_fatal_error(Twine("Linx: ") + Context +
+                       " requires TileOp10 in range 0..1023");
+}
+
+static bool isWhitelistedTEPLTileOp10(int64_t TileOp10) {
+  switch (TileOp10 & 0x3ff) {
+  case 0x000:
+  case 0x001:
+  case 0x002:
+  case 0x003:
+  case 0x004:
+  case 0x005:
+  case 0x006:
+  case 0x007:
+  case 0x008:
+  case 0x009:
+  case 0x00a:
+  case 0x00d:
+  case 0x00e:
+  case 0x00f:
+  case 0x020:
+  case 0x021:
+  case 0x022:
+  case 0x024:
+  case 0x025:
+  case 0x026:
+  case 0x027:
+  case 0x040:
+  case 0x041:
+  case 0x042:
+  case 0x043:
+  case 0x044:
+  case 0x045:
+  case 0x060:
+  case 0x061:
+  case 0x062:
+  case 0x063:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static void validateWhitelistedTEPLTileOp10(int64_t TileOp10,
+                                            StringRef Context) {
+  validateTileOp10(TileOp10, Context);
+  if (!isWhitelistedTEPLTileOp10(TileOp10))
+    report_fatal_error(Twine("Linx: ") + Context +
+                       " uses TileOp10 outside strict-v0.3 whitelist");
+}
+
+static void validateCubeDimImm(int64_t Dim, StringRef DimName,
+                               StringRef Context) {
+  if (Dim < 0 || Dim > 131071)
+    report_fatal_error(Twine("Linx: ") + Context + " requires " + DimName +
+                       " in range 0..131071");
+}
+
+static uint64_t dtypeElementBitsForTileCheck(int64_t DType) {
+  switch (DType & 0x1f) {
+  case 0:  // FP64
+  case 16: // INT64
+  case 24: // UINT64
+    return 64u;
+  case 1:  // FP32
+  case 17: // INT32
+  case 25: // UINT32
+    return 32u;
+  case 2:  // FP16
+  case 6:  // BF16
+  case 18: // INT16
+  case 26: // UINT16
+    return 16u;
+  case 3:  // FP8
+  case 7:  // FPL8
+  case 19: // INT8
+  case 27: // UINT8
+    return 8u;
+  case 11: // FP4
+  case 12: // FPL4
+  case 20: // INT4
+  case 28: // UINT4
+    return 4u;
+  default:
+    // Keep bring-up compatibility for unknown dtype encodings and apply a
+    // conservative 32-bit element width for strict byte-budget checks.
+    return 32u;
+  }
+}
+
+static uint64_t requirePositiveDimImm(int64_t Dim, StringRef DimName,
+                                      StringRef Context) {
+  if (Dim <= 0)
+    report_fatal_error(Twine("Linx: ") + Context + " requires " + DimName +
+                       " > 0 for tile-byte validation (got " + Twine(Dim) +
+                       ")");
+  return static_cast<uint64_t>(Dim);
+}
+
+static uint64_t computeTileBytesOrDie(StringRef Context, uint64_t Dim0,
+                                      uint64_t Dim1, uint64_t Dim2,
+                                      uint64_t ElemBits) {
+  auto MulOverflowU64 = [](uint64_t A, uint64_t B, uint64_t &Out) {
+    if (A == 0 || B == 0) {
+      Out = 0;
+      return false;
+    }
+    if (A > (std::numeric_limits<uint64_t>::max() / B))
+      return true;
+    Out = A * B;
+    return false;
+  };
+
+  uint64_t ElemCount = 0;
+  uint64_t Tmp = 0;
+  if (MulOverflowU64(Dim0, Dim1, Tmp) || MulOverflowU64(Tmp, Dim2, ElemCount) ||
+      MulOverflowU64(ElemCount, ElemBits, Tmp)) {
+    report_fatal_error(Twine("Linx: ") + Context +
+                       " tile-byte check overflow while evaluating "
+                       "dim0*dim1*dim2*elem_bits");
+  }
+  if (Tmp > std::numeric_limits<uint64_t>::max() - 7u) {
+    report_fatal_error(Twine("Linx: ") + Context +
+                       " tile-byte check overflow while rounding bits to bytes");
+  }
+  return (Tmp + 7u) / 8u;
+}
+
+static void validateTileByteBudget(StringRef Context, uint64_t Dim0,
+                                   uint64_t Dim1, uint64_t Dim2,
+                                   uint64_t ElemBits,
+                                   std::optional<uint64_t> SizeCode) {
+  const uint64_t Bytes =
+      computeTileBytesOrDie(Context, Dim0, Dim1, Dim2, ElemBits);
+  constexpr uint64_t StrictMaxBytes = 4096u;
+  if (Bytes > StrictMaxBytes) {
+    report_fatal_error(Twine("Linx: ") + Context +
+                       " tile-byte check failed: bytes=" + Twine(Bytes) +
+                       "B (dim0=" + Twine(Dim0) + ", dim1=" + Twine(Dim1) +
+                       ", dim2=" + Twine(Dim2) +
+                       ", elem_bits=" + Twine(ElemBits) +
+                       ") exceeds strict max 4096B. Shrink dimensions or "
+                       "element width.");
+  }
+
+  if (SizeCode) {
+    std::optional<uint64_t> LimitBytes = tileSizeCodeToBytes(*SizeCode);
+    if (!LimitBytes) {
+      report_fatal_error(Twine("Linx: ") + Context +
+                         " internal error: invalid SizeCode while checking "
+                         "tile-byte budget");
+    }
+    if (Bytes > *LimitBytes) {
+      report_fatal_error(Twine("Linx: ") + Context +
+                         " tile-byte check failed: bytes=" + Twine(Bytes) +
+                         "B (dim0=" + Twine(Dim0) + ", dim1=" + Twine(Dim1) +
+                         ", dim2=" + Twine(Dim2) +
+                         ", elem_bits=" + Twine(ElemBits) +
+                         ") exceeds descriptor limit " + Twine(*LimitBytes) +
+                         "B (SizeCode=" + Twine(*SizeCode) +
+                         "). Shrink dimensions/element width or increase "
+                         "SizeCode.");
+    }
+  }
+}
+
+static unsigned tileHandBase(TileHand Hand) {
+  switch (Hand) {
+  case TileHand::T:
+    return 0;
+  case TileHand::U:
+    return 8;
+  case TileHand::M:
+    return 16;
+  case TileHand::N:
+    return 24;
+  case TileHand::ACC:
+    return 32;
+  }
+  llvm_unreachable("invalid tile hand");
+}
+
+static TileRelRef tileRelRefFromId(unsigned TileId, bool Reuse = false) {
+  TileRelRef Ref;
+  if (TileId < 8) {
+    Ref.Hand = TileHand::T;
+  } else if (TileId < 16) {
+    Ref.Hand = TileHand::U;
+  } else if (TileId < 24) {
+    Ref.Hand = TileHand::M;
+  } else {
+    Ref.Hand = TileHand::N;
+  }
+  Ref.Depth = static_cast<uint8_t>((TileId & 0x7u) + 1u);
+  Ref.Reuse = Reuse;
+  return Ref;
+}
+
+static unsigned tileIdFromRelRef(const TileRelRef &Ref) {
+  if (Ref.Hand == TileHand::ACC)
+    report_fatal_error("Linx: ACC is not encodable as a source tile relref");
+  if (Ref.Depth < 1 || Ref.Depth > 8)
+    report_fatal_error("Linx: invalid tile relref depth (expected 1..8)");
+  return tileHandBase(Ref.Hand) + static_cast<unsigned>(Ref.Depth - 1u);
+}
+
+static unsigned dstTileFieldFromHand(TileHand Hand) {
+  switch (Hand) {
+  case TileHand::T:
+    return 0;
+  case TileHand::U:
+    return 1;
+  case TileHand::M:
+    return 2;
+  case TileHand::N:
+    return 3;
+  case TileHand::ACC:
+    return 4;
+  }
+  llvm_unreachable("invalid tile hand");
+}
+
+static unsigned dstTileFieldFromRelRef(const TileRelRef &Ref) {
+  return dstTileFieldFromHand(Ref.Hand);
+}
+
+static unsigned tileRegIdFromReg(const TargetRegisterInfo &TRI, Register Reg) {
+  if (!Reg || !Reg.isPhysical() || !LinxISA::TILERegClass.contains(Reg))
+    report_fatal_error("Linx: expected physical tile register");
+  return TRI.getEncodingValue(Reg) & 0x1fu;
+}
+
 static bool isMarkerInstr(const MachineInstr &MI) {
   switch (MI.getOpcode()) {
   case LinxISA::CBSTART_STD:
@@ -62,9 +352,44 @@ static bool isMarkerInstr(const MachineInstr &MI) {
   case LinxISA::BSTART_STD_RET:
   case LinxISA::BSTART_TMA:
   case LinxISA::BSTART_CUBE:
+  case LinxISA::BSTART_TEPL:
   case LinxISA::BSTART_VPAR:
   case LinxISA::BSTART_VSEQ:
+  case LinxISA::BSTART_MPAR:
+  case LinxISA::BSTART_MSEQ:
   case LinxISA::BSTOP:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool isSimtBodyHeaderOpcode(unsigned Opc) {
+  switch (Opc) {
+  case LinxISA::BSTART_MPAR:
+  case LinxISA::BSTART_MSEQ:
+  case LinxISA::BSTART_VPAR:
+  case LinxISA::BSTART_VSEQ:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool isHeaderDescriptorOpcode(unsigned Opc) {
+  switch (Opc) {
+  case LinxISA::B_TEXT:
+  case LinxISA::B_ARG:
+  case LinxISA::B_ATTR:
+  case LinxISA::B_DIM_LB0:
+  case LinxISA::B_DIM_LB1:
+  case LinxISA::B_DIM_LB2:
+  case LinxISA::C_B_DIMI:
+  case LinxISA::B_IOR:
+  case LinxISA::B_IOT_G0:
+  case LinxISA::B_IOT_G1:
+  case LinxISA::B_IOTI_G0:
+  case LinxISA::B_IOTI_G1:
     return true;
   default:
     return false;
@@ -92,8 +417,14 @@ static bool isTilePseudoInstr(const MachineInstr &MI) {
   case LinxISA::PSEUDO_TMA_TLOAD_DESC:
   case LinxISA::PSEUDO_TMA_TSTORE:
   case LinxISA::PSEUDO_TMA_TSTORE_DESC:
+  case LinxISA::PSEUDO_TMA_TMOV:
   case LinxISA::PSEUDO_CUBE_MAMULB:
   case LinxISA::PSEUDO_CUBE_MAMULB_ACC:
+  case LinxISA::PSEUDO_CUBE_ACCCVT:
+  case LinxISA::PSEUDO_TEPL_UNARY:
+  case LinxISA::PSEUDO_TEPL_BINARY:
+  case LinxISA::PSEUDO_TEPL_BINARY_SCALAR:
+  case LinxISA::PSEUDO_TEPL_SPLAT:
   case LinxISA::PSEUDO_VPAR_TADD:
   case LinxISA::PSEUDO_VPAR_TSUB:
   case LinxISA::PSEUDO_VTILE_ADD:
@@ -107,6 +438,7 @@ static bool isTilePseudoInstr(const MachineInstr &MI) {
 static bool isVBlockPseudoInstr(const MachineInstr &MI) {
   switch (MI.getOpcode()) {
   case LinxISA::PSEUDO_VBLOCK_LAUNCH:
+  case LinxISA::PSEUDO_VBLOCK_LAUNCH_DYN1:
     return true;
   default:
     return false;
@@ -117,6 +449,7 @@ static bool isTileBlockStartInstr(const MachineInstr &MI) {
   switch (MI.getOpcode()) {
   case LinxISA::BSTART_TMA:
   case LinxISA::BSTART_CUBE:
+  case LinxISA::BSTART_TEPL:
     return true;
   default:
     return false;
@@ -207,15 +540,17 @@ public:
   bool runOnMachineFunction(MachineFunction &MF) override {
     const auto &TII = *MF.getSubtarget().getInstrInfo();
     const auto &TRI = *MF.getSubtarget().getRegisterInfo();
+    MachineRegisterInfo &MRI = MF.getRegInfo();
 
     const BitVector Reserved = TRI.getReservedRegs(MF);
     bool Changed = false;
 
-    // Per-function empty decoupled-body stub used by tile/vector block headers.
-    // This is emitted as a linear snippet that terminates at BSTOP and is
-    // referenced via B.TEXT from decoupled headers.
+    // Per-function decoupled-body stubs used by block headers.
+    // - Empty body: tile headers that execute via descriptor-only semantics.
+    // - VBlock body: generic SIMT vector body used by autovec vblock launch.
     MachineBasicBlock *EmptyBodyBB = nullptr;
-    MCSymbol *EmptyBodySym = nullptr;
+    MachineBasicBlock *VBlockBodyBB = nullptr;
+    MCSymbol *VBlockBodySym = nullptr;
     MachineBasicBlock *VTileAddBodyBB = nullptr;
     MCSymbol *VTileAddBodySym = nullptr;
     MachineBasicBlock *VTileSubBodyBB = nullptr;
@@ -232,7 +567,9 @@ public:
           continue;
         if (Sym->getName().starts_with(".__linx_empty_body.")) {
           EmptyBodyBB = &MBB;
-          EmptyBodySym = Sym;
+        } else if (Sym->getName().starts_with(".__linx_vblock_body.")) {
+          VBlockBodyBB = &MBB;
+          VBlockBodySym = Sym;
         } else if (Sym->getName().starts_with(".__linx_vtile_add_body.")) {
           VTileAddBodyBB = &MBB;
           VTileAddBodySym = Sym;
@@ -242,41 +579,713 @@ public:
           break;
         }
       }
-      if (EmptyBodyBB && VTileAddBodyBB && VTileSubBodyBB)
+      if (EmptyBodyBB && VBlockBodyBB && VTileAddBodyBB && VTileSubBodyBB)
         break;
     }
 
     SmallPtrSet<MachineBasicBlock *, 8> DecoupledBodyBBs;
     if (EmptyBodyBB)
       DecoupledBodyBBs.insert(EmptyBodyBB);
+    if (VBlockBodyBB)
+      DecoupledBodyBBs.insert(VBlockBodyBB);
     if (VTileAddBodyBB)
       DecoupledBodyBBs.insert(VTileAddBodyBB);
     if (VTileSubBodyBB)
       DecoupledBodyBBs.insert(VTileSubBodyBB);
 
-    auto getOrCreateEmptyBodySym = [&]() -> MCSymbol * {
-      if (EmptyBodySym)
-        return EmptyBodySym;
+    struct ParsedVReg {
+      unsigned Code = 0;
+      unsigned SrcRType = 3; // default: no suffix modifier
+      unsigned Shamt = 0;
+    };
+
+    auto toUpperStr = [](StringRef S) -> std::string {
+      std::string Out;
+      Out.reserve(S.size());
+      for (char C : S)
+        Out.push_back(static_cast<char>(
+            std::toupper(static_cast<unsigned char>(C))));
+      return Out;
+    };
+
+    auto parseSrcRTypeSuffix = [&](StringRef Suffix) -> std::optional<unsigned> {
+      std::string Up = toUpperStr(Suffix);
+      if (Up == "SW")
+        return 0u;
+      if (Up == "UW")
+        return 1u;
+      if (Up == "NEG" || Up == "NOT")
+        return 2u;
+      return std::nullopt;
+    };
+
+    auto parseRegCode = [&](StringRef Name) -> std::optional<unsigned> {
+      StringRef N = Name.trim();
+      if (N.size() >= 2 && (N[0] == 'r' || N[0] == 'R') &&
+          std::isdigit(static_cast<unsigned char>(N[1]))) {
+        N = N.drop_front();
+        unsigned V = 0;
+        if (!N.getAsInteger(10, V) && V < 32)
+          return V;
+        return std::nullopt;
+      }
+
+      std::string Upper = toUpperStr(N);
+
+      auto parsePrefixedIndex = [&](StringRef Prefix, unsigned Class,
+                                    unsigned MaxIndex)
+          -> std::optional<unsigned> {
+        StringRef U(Upper);
+        if (!U.starts_with(Prefix))
+          return std::nullopt;
+        StringRef Tail = U.drop_front(Prefix.size());
+        if (Tail.empty())
+          return std::nullopt;
+        unsigned Index = 0;
+        if (Tail.getAsInteger(10, Index) || Index > MaxIndex)
+          return std::nullopt;
+        return (Class << 5) | (Index & 0x1fu);
+      };
+
+      auto parseVecQueue = [&](StringRef Prefix, unsigned Class,
+                               unsigned MaxIndex) -> std::optional<unsigned> {
+        StringRef U(Upper);
+        if (!U.starts_with(Prefix))
+          return std::nullopt;
+        StringRef Tail = U.drop_front(Prefix.size());
+        unsigned Index = 0;
+        if (Tail.empty()) {
+          Index = 0;
+        } else {
+          if (!Tail.consume_front("#"))
+            return std::nullopt;
+          if (Tail.getAsInteger(10, Index) || Index == 0 || Index > MaxIndex)
+            return std::nullopt;
+        }
+        return (Class << 5) | (Index & 0x1fu);
+      };
+
+      if (auto V = parsePrefixedIndex("RI", /*Class=*/1, /*MaxIndex=*/31))
+        return *V;
+      if (auto V = parsePrefixedIndex("LC", /*Class=*/3, /*MaxIndex=*/2))
+        return *V;
+      if (auto V = parseVecQueue("VT", /*Class=*/4, /*MaxIndex=*/31))
+        return *V;
+      if (auto V = parseVecQueue("VU", /*Class=*/5, /*MaxIndex=*/31))
+        return *V;
+      if (auto V = parseVecQueue("VM", /*Class=*/6, /*MaxIndex=*/31))
+        return *V;
+      if (auto V = parseVecQueue("VN", /*Class=*/7, /*MaxIndex=*/31))
+        return *V;
+
+      if (Upper == "TA")
+        return (8u << 5) | 0u;
+      if (Upper == "TB")
+        return (8u << 5) | 1u;
+      if (Upper == "TC")
+        return (8u << 5) | 2u;
+      if (Upper == "TD")
+        return (8u << 5) | 3u;
+      if (Upper == "TO")
+        return (8u << 5) | 4u;
+      if (Upper == "TS")
+        return (8u << 5) | 5u;
+
+      if (Upper == "ZERO")
+        return 0u;
+      if (Upper == "SP")
+        return 1u;
+      if (Upper == "A0")
+        return 2u;
+      if (Upper == "A1")
+        return 3u;
+      if (Upper == "A2")
+        return 4u;
+      if (Upper == "A3")
+        return 5u;
+      if (Upper == "A4")
+        return 6u;
+      if (Upper == "A5")
+        return 7u;
+      if (Upper == "A6")
+        return 8u;
+      if (Upper == "A7")
+        return 9u;
+      if (Upper == "RA")
+        return 10u;
+      if (Upper == "S0")
+        return 11u;
+      if (Upper == "S1")
+        return 12u;
+      if (Upper == "S2")
+        return 13u;
+      if (Upper == "S3")
+        return 14u;
+      if (Upper == "S4")
+        return 15u;
+      if (Upper == "S5")
+        return 16u;
+      if (Upper == "S6")
+        return 17u;
+      if (Upper == "S7")
+        return 18u;
+      if (Upper == "S8")
+        return 19u;
+      if (Upper == "X0")
+        return 20u;
+      if (Upper == "X1")
+        return 21u;
+      if (Upper == "X2")
+        return 22u;
+      if (Upper == "X3")
+        return 23u;
+      if (Upper == "T#1")
+        return 24u;
+      if (Upper == "T#2")
+        return 25u;
+      if (Upper == "T#3")
+        return 26u;
+      if (Upper == "T#4")
+        return 27u;
+      if (Upper == "U#1")
+        return 28u;
+      if (Upper == "U#2")
+        return 29u;
+      if (Upper == "U#3" || Upper == "U")
+        return 30u;
+      if (Upper == "U#4" || Upper == "T")
+        return 31u;
+
+      return std::nullopt;
+    };
+
+    auto parseVecRegToken = [&](StringRef Token) -> std::optional<ParsedVReg> {
+      StringRef T = Token.trim();
+      if (T.empty())
+        return std::nullopt;
+
+      ParsedVReg Out;
+      if (size_t ShiftPos = T.find("<<"); ShiftPos != StringRef::npos) {
+        StringRef Sh = T.drop_front(ShiftPos + 2).trim();
+        unsigned Shamt = 0;
+        if (Sh.getAsInteger(10, Shamt))
+          return std::nullopt;
+        Out.Shamt = Shamt;
+        T = T.take_front(ShiftPos).trim();
+      }
+
+      StringRef Base = T;
+      StringRef Suffix;
+      if (size_t Dot = T.rfind('.'); Dot != StringRef::npos) {
+        Base = T.take_front(Dot).trim();
+        Suffix = T.drop_front(Dot + 1).trim();
+      }
+
+      auto RegCode = parseRegCode(Base);
+      if (!RegCode)
+        return std::nullopt;
+      Out.Code = *RegCode;
+
+      if (!Suffix.empty()) {
+        if (auto SrcRType = parseSrcRTypeSuffix(Suffix))
+          Out.SrcRType = *SrcRType;
+      }
+      return Out;
+    };
+
+    auto splitCSV = [](StringRef S, SmallVectorImpl<StringRef> &Out) {
+      SmallVector<StringRef, 8> Raw;
+      S.split(Raw, ',', -1, false);
+      for (StringRef R : Raw) {
+        R = R.trim();
+        if (!R.empty())
+          Out.push_back(R);
+      }
+    };
+
+    auto parseMemTriple = [&](StringRef MemExpr, ParsedVReg &Base,
+                              ParsedVReg &Index) -> bool {
+      const size_t L = MemExpr.find('[');
+      const size_t R = MemExpr.rfind(']');
+      if (L == StringRef::npos || R == StringRef::npos || R <= L)
+        return false;
+      StringRef Inside = MemExpr.slice(L + 1, R).trim();
+      SmallVector<StringRef, 4> Parts;
+      splitCSV(Inside, Parts);
+      if (Parts.size() != 3)
+        return false;
+      auto BaseOp = parseVecRegToken(Parts[0]);
+      auto LaneOp = parseVecRegToken(Parts[1]);
+      auto IndexOp = parseVecRegToken(Parts[2]);
+      if (!BaseOp || !LaneOp || !IndexOp)
+        return false;
+      // Bring-up contract: lane selector is lc0<<2.
+      const unsigned WantLc0Code = (3u << 5) | 0u;
+      if (LaneOp->Code != WantLc0Code || LaneOp->Shamt != 2u)
+        return false;
+      Base = *BaseOp;
+      Index = *IndexOp;
+      return true;
+    };
+
+    auto normalizeLabel = [&](StringRef Label) -> std::string {
+      std::string Out;
+      StringRef L = Label.trim();
+      if (L.ends_with(":"))
+        L = L.drop_back().trim();
+      Out.reserve(L.size());
+      for (char C : L) {
+        if (std::isalnum(static_cast<unsigned char>(C)) || C == '_' || C == '.')
+          Out.push_back(C);
+      }
+      return Out;
+    };
+
+    auto emitVectorBodyLine =
+        [&](MachineBasicBlock &BodyBB, StringRef RawLine, StringRef CtxName,
+            function_ref<MCSymbol *(StringRef)> LookupLabelSym) {
+      StringRef Line = RawLine;
+      if (size_t Semi = Line.find(';'); Semi != StringRef::npos)
+        Line = Line.take_front(Semi);
+      Line = Line.trim();
+      if (Line.empty())
+        return;
+
+      auto fail = [&](StringRef Msg) -> void {
+        SmallString<256> Full;
+        raw_svector_ostream OS(Full);
+        OS << "Linx blockify: " << Msg << " in " << CtxName << ": '" << Line
+           << "'";
+        report_fatal_error(OS.str());
+      };
+
+      if (Line.ends_with(":")) {
+        std::string Label = normalizeLabel(Line);
+        if (Label.empty())
+          fail("invalid vector body label");
+        MCSymbol *Sym = LookupLabelSym(Label);
+        if (!Sym)
+          fail("undefined vector body label");
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(TargetOpcode::EH_LABEL))
+            .addSym(Sym);
+        return;
+      }
+
+      if (Line.equals_insensitive("C.BSTOP") || Line.equals_insensitive("BSTOP")) {
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(LinxISA::BSTOP));
+        return;
+      }
+
+      size_t SpacePos = Line.find(' ');
+      if (SpacePos == StringRef::npos)
+        fail("invalid vector body statement");
+      StringRef Head = Line.take_front(SpacePos).trim();
+      StringRef Rest = Line.drop_front(SpacePos + 1).trim();
+      if (Head.empty() || Rest.empty())
+        fail("invalid vector body statement");
+
+      if (Head.equals_insensitive("j")) {
+        std::string Label = normalizeLabel(Rest);
+        if (Label.empty())
+          fail("missing label in j");
+        MCSymbol *Sym = LookupLabelSym(Label);
+        if (!Sym)
+          fail("undefined vector body label");
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(LinxISA::PSEUDO_V_J))
+            .addSym(Sym);
+        return;
+      }
+
+      if (Head.equals_insensitive("b.eq") || Head.equals_insensitive("b.ne") ||
+          Head.equals_insensitive("b.lt") || Head.equals_insensitive("b.ge") ||
+          Head.equals_insensitive("b.ltu") || Head.equals_insensitive("b.geu")) {
+        SmallVector<StringRef, 4> Ops;
+        splitCSV(Rest, Ops);
+        if (Ops.size() != 3)
+          fail("expected 'b.<cc> SrcL, SrcR, label'");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        auto SrcR = parseVecRegToken(Ops[1]);
+        std::string Label = normalizeLabel(Ops[2]);
+        if (!SrcL || !SrcR || Label.empty())
+          fail("failed to parse operands for branch");
+        MCSymbol *Sym = LookupLabelSym(Label);
+        if (!Sym)
+          fail("undefined vector body label");
+
+        unsigned Opc = 0;
+        if (Head.equals_insensitive("b.eq"))
+          Opc = LinxISA::PSEUDO_V_B_EQ;
+        else if (Head.equals_insensitive("b.ne"))
+          Opc = LinxISA::PSEUDO_V_B_NE;
+        else if (Head.equals_insensitive("b.lt"))
+          Opc = LinxISA::PSEUDO_V_B_LT;
+        else if (Head.equals_insensitive("b.ge"))
+          Opc = LinxISA::PSEUDO_V_B_GE;
+        else if (Head.equals_insensitive("b.ltu"))
+          Opc = LinxISA::PSEUDO_V_B_LTU;
+        else if (Head.equals_insensitive("b.geu"))
+          Opc = LinxISA::PSEUDO_V_B_GEU;
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+            .addImm(SrcL->Code)
+            .addImm(SrcR->Code)
+            .addSym(Sym);
+        return;
+      }
+
+      auto parseArrow = [&](StringRef Expr, StringRef &SrcPart,
+                            ParsedVReg &Dst) -> bool {
+        size_t Arrow = Expr.find("->");
+        if (Arrow == StringRef::npos)
+          return false;
+        SrcPart = Expr.take_front(Arrow).trim();
+        StringRef DstPart = Expr.drop_front(Arrow + 2).trim();
+        if (size_t Comma = DstPart.find(','); Comma != StringRef::npos)
+          DstPart = DstPart.take_front(Comma).trim();
+        auto DstOp = parseVecRegToken(DstPart);
+        if (!DstOp)
+          return false;
+        Dst = *DstOp;
+        return true;
+      };
+
+      if (Head.equals_insensitive("v.add") || Head.equals_insensitive("v.sub")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in vector ALU op");
+        SmallVector<StringRef, 4> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 2)
+          fail("expected two source operands for vector ALU op");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        auto SrcR = parseVecRegToken(Ops[1]);
+        if (!SrcL || !SrcR)
+          fail("failed to parse source operands for vector ALU op");
+        const unsigned Opc = Head.equals_insensitive("v.add")
+                                 ? LinxISA::PSEUDO_V_ADD
+                                 : LinxISA::PSEUDO_V_SUB;
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+            .addImm(Dst.Code)
+            .addImm(SrcL->Code)
+            .addImm(SrcR->Code)
+            .addImm(SrcR->SrcRType)
+            .addImm(SrcR->Shamt);
+        return;
+      }
+
+      if (Head.equals_insensitive("v.fadd") || Head.equals_insensitive("v.fsub") ||
+          Head.equals_insensitive("v.fmul") || Head.equals_insensitive("v.fdiv")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in vector FP op");
+        SmallVector<StringRef, 4> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 2)
+          fail("expected two source operands for vector FP op");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        auto SrcR = parseVecRegToken(Ops[1]);
+        if (!SrcL || !SrcR)
+          fail("failed to parse source operands for vector FP op");
+        unsigned Opc = LinxISA::PSEUDO_V_FADD;
+        if (Head.equals_insensitive("v.fsub"))
+          Opc = LinxISA::PSEUDO_V_FSUB;
+        else if (Head.equals_insensitive("v.fmul"))
+          Opc = LinxISA::PSEUDO_V_FMUL;
+        else if (Head.equals_insensitive("v.fdiv"))
+          Opc = LinxISA::PSEUDO_V_FDIV;
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+            .addImm(Dst.Code)
+            .addImm(SrcL->Code)
+            .addImm(SrcR->Code);
+        return;
+      }
+
+      if (Head.starts_with_insensitive("v.cmp.")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in vector compare op");
+        SmallVector<StringRef, 4> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 2)
+          fail("expected two source operands for vector compare op");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        auto SrcR = parseVecRegToken(Ops[1]);
+        if (!SrcL || !SrcR)
+          fail("failed to parse source operands for vector compare op");
+
+        unsigned Opc = 0;
+        if (Head.equals_insensitive("v.cmp.eq"))
+          Opc = LinxISA::PSEUDO_V_CMP_EQ;
+        else if (Head.equals_insensitive("v.cmp.ne"))
+          Opc = LinxISA::PSEUDO_V_CMP_NE;
+        else if (Head.equals_insensitive("v.cmp.lt"))
+          Opc = LinxISA::PSEUDO_V_CMP_LT;
+        else if (Head.equals_insensitive("v.cmp.ltu"))
+          Opc = LinxISA::PSEUDO_V_CMP_LTU;
+        else if (Head.equals_insensitive("v.cmp.ge"))
+          Opc = LinxISA::PSEUDO_V_CMP_GE;
+        else if (Head.equals_insensitive("v.cmp.geu"))
+          Opc = LinxISA::PSEUDO_V_CMP_GEU;
+        if (!Opc)
+          fail("unsupported vector compare op");
+
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+            .addImm(Dst.Code)
+            .addImm(SrcL->Code)
+            .addImm(SrcR->Code);
+        return;
+      }
+
+      if (Head.equals_insensitive("v.feq") || Head.equals_insensitive("v.fne") ||
+          Head.equals_insensitive("v.flt") || Head.equals_insensitive("v.fge")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in vector FP compare op");
+        SmallVector<StringRef, 4> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 2)
+          fail("expected two source operands for vector FP compare op");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        auto SrcR = parseVecRegToken(Ops[1]);
+        if (!SrcL || !SrcR)
+          fail("failed to parse source operands for vector FP compare op");
+
+        unsigned Opc = 0;
+        if (Head.equals_insensitive("v.feq"))
+          Opc = LinxISA::PSEUDO_V_FEQ;
+        else if (Head.equals_insensitive("v.fne"))
+          Opc = LinxISA::PSEUDO_V_FNE;
+        else if (Head.equals_insensitive("v.flt"))
+          Opc = LinxISA::PSEUDO_V_FLT;
+        else if (Head.equals_insensitive("v.fge"))
+          Opc = LinxISA::PSEUDO_V_FGE;
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+            .addImm(Dst.Code)
+            .addImm(SrcL->Code)
+            .addImm(SrcR->Code);
+        return;
+      }
+
+      if (Head.starts_with_insensitive("v.rd")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in vector reduction op");
+        SmallVector<StringRef, 2> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 1)
+          fail("expected one source operand for vector reduction op");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        if (!SrcL)
+          fail("failed to parse source operand for vector reduction op");
+
+        unsigned Opc = 0;
+        if (Head.equals_insensitive("v.rdadd"))
+          Opc = LinxISA::PSEUDO_V_RDADD;
+        else if (Head.equals_insensitive("v.rdand"))
+          Opc = LinxISA::PSEUDO_V_RDAND;
+        else if (Head.equals_insensitive("v.rdfadd"))
+          Opc = LinxISA::PSEUDO_V_RDFADD;
+        else if (Head.equals_insensitive("v.rdfmax"))
+          Opc = LinxISA::PSEUDO_V_RDFMAX;
+        else if (Head.equals_insensitive("v.rdfmin"))
+          Opc = LinxISA::PSEUDO_V_RDFMIN;
+        else if (Head.equals_insensitive("v.rdmax"))
+          Opc = LinxISA::PSEUDO_V_RDMAX;
+        else if (Head.equals_insensitive("v.rdmin"))
+          Opc = LinxISA::PSEUDO_V_RDMIN;
+        else if (Head.equals_insensitive("v.rdor"))
+          Opc = LinxISA::PSEUDO_V_RDOR;
+        else if (Head.equals_insensitive("v.rdxor"))
+          Opc = LinxISA::PSEUDO_V_RDXOR;
+        if (!Opc)
+          fail("unsupported vector reduction op");
+
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+            .addImm(Dst.Code)
+            .addImm(SrcL->Code);
+        return;
+      }
+
+      if (Head.equals_insensitive("v.csel")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in v.csel");
+        SmallVector<StringRef, 6> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 3)
+          fail("expected three source operands for v.csel");
+        auto SrcP = parseVecRegToken(Ops[0]);
+        auto SrcL = parseVecRegToken(Ops[1]);
+        auto SrcR = parseVecRegToken(Ops[2]);
+        if (!SrcP || !SrcL || !SrcR)
+          fail("failed to parse source operands for v.csel");
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(LinxISA::PSEUDO_V_CSEL))
+            .addImm(Dst.Code)
+            .addImm(SrcP->Code)
+            .addImm(SrcL->Code)
+            .addImm(SrcR->Code)
+            .addImm(SrcR->SrcRType);
+        return;
+      }
+
+      if (Head.starts_with_insensitive("v.lw.brg") ||
+          Head.equals_insensitive("v.lw.local")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in v.lw");
+        ParsedVReg Base, Index;
+        if (!parseMemTriple(SrcPart, Base, Index))
+          fail("expected memory form [base, lc0<<2, idx] in v.lw");
+        const unsigned LocalBit =
+            (Head.contains_insensitive(".local") ||
+             Head.equals_insensitive("v.lw.local"))
+                ? 1u
+                : 0u;
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(LinxISA::PSEUDO_V_LW_BRG))
+            .addImm(Dst.Code)
+            .addImm(Base.Code)
+            .addImm(Index.Code)
+            .addImm(Index.Shamt)
+            .addImm(LocalBit);
+        return;
+      }
+
+      if (Head.starts_with_insensitive("v.sw.brg") ||
+          Head.equals_insensitive("v.sw.local")) {
+        const size_t LBr = Rest.find('[');
+        if (LBr == StringRef::npos)
+          fail("expected memory operand in v.sw");
+        StringRef ValuePart = Rest.take_front(LBr).trim();
+        if (ValuePart.ends_with(","))
+          ValuePart = ValuePart.drop_back().trim();
+        StringRef MemPart = Rest.drop_front(LBr).trim();
+        auto SrcD = parseVecRegToken(ValuePart);
+        ParsedVReg Base, Index;
+        if (!SrcD || !parseMemTriple(MemPart, Base, Index))
+          fail("expected v.sw SrcD, [base, lc0<<2, idx]");
+        if (Index.Shamt < 2)
+          fail("v.sw index shift must be >= 2");
+        const unsigned EncodedShamt = Index.Shamt - 2;
+        const unsigned LocalBit =
+            (Head.contains_insensitive(".local") ||
+             Head.equals_insensitive("v.sw.local"))
+                ? 1u
+                : 0u;
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(LinxISA::PSEUDO_V_SW_BRG))
+            .addImm(SrcD->Code)
+            .addImm(Base.Code)
+            .addImm(Index.Code)
+            .addImm(EncodedShamt)
+            .addImm(LocalBit);
+        return;
+      }
+
+      fail("unsupported vector body statement");
+    };
+
+    auto emitVectorBodyText = [&](MachineBasicBlock &BodyBB, StringRef BodyText,
+                                  StringRef CtxName) {
+      SmallVector<StringRef, 64> Lines;
+      StringRef Cursor = BodyText;
+      while (!Cursor.empty()) {
+        auto Split = Cursor.split('\n');
+        Lines.push_back(Split.first);
+        Cursor = Split.second;
+      }
+
+      StringMap<MCSymbol *> LabelSyms;
+      MCContext &Ctx = MF.getContext();
+
+      auto makeContextTag = [&](StringRef S) -> std::string {
+        std::string Tag;
+        Tag.reserve(S.size());
+        for (char C : S) {
+          if (std::isalnum(static_cast<unsigned char>(C)))
+            Tag.push_back(static_cast<char>(
+                std::tolower(static_cast<unsigned char>(C))));
+          else
+            Tag.push_back('_');
+        }
+        return Tag;
+      };
+      const std::string CtxTag = makeContextTag(CtxName);
+
+      auto getOrCreateLabelSym = [&](StringRef LabelToken) -> MCSymbol * {
+        std::string Key = normalizeLabel(LabelToken);
+        if (Key.empty())
+          return nullptr;
+        auto It = LabelSyms.find(Key);
+        if (It != LabelSyms.end())
+          return It->second;
+        SmallString<96> SymName;
+        raw_svector_ostream OS(SymName);
+        OS << ".__linx_vbody_" << CtxTag << "." << MF.getFunctionNumber()
+           << "." << Key;
+        MCSymbol *Sym = Ctx.getOrCreateSymbol(OS.str());
+        LabelSyms[Key] = Sym;
+        return Sym;
+      };
+
+      // Pass 1: collect all labels (forward references are legal).
+      for (StringRef RawLine : Lines) {
+        StringRef Line = RawLine;
+        if (size_t Semi = Line.find(';'); Semi != StringRef::npos)
+          Line = Line.take_front(Semi);
+        Line = Line.trim();
+        if (!Line.empty() && Line.ends_with(":"))
+          (void)getOrCreateLabelSym(Line);
+      }
+
+      auto lookupLabelSym = [&](StringRef LabelToken) -> MCSymbol * {
+        std::string Key = normalizeLabel(LabelToken);
+        if (Key.empty())
+          return nullptr;
+        auto It = LabelSyms.find(Key);
+        if (It == LabelSyms.end())
+          return nullptr;
+        return It->second;
+      };
+
+      for (StringRef RawLine : Lines)
+        emitVectorBodyLine(BodyBB, RawLine, CtxName, lookupLabelSym);
+    };
+
+    auto getOrCreateVBlockBodySym = [&]() -> MCSymbol * {
+      if (VBlockBodySym)
+        return VBlockBodySym;
 
       MCContext &Ctx = MF.getContext();
       SmallString<64> Name;
       raw_svector_ostream OS(Name);
-      OS << ".__linx_empty_body." << MF.getFunctionNumber();
-      EmptyBodySym = Ctx.getOrCreateSymbol(OS.str());
+      OS << ".__linx_vblock_body." << MF.getFunctionNumber();
+      VBlockBodySym = Ctx.getOrCreateSymbol(OS.str());
 
-      EmptyBodyBB = MF.CreateMachineBasicBlock();
-      MF.insert(MF.end(), EmptyBodyBB);
-      EmptyBodyBB->setLabelMustBeEmitted();
+      VBlockBodyBB = MF.CreateMachineBasicBlock();
+      MF.insert(MF.end(), VBlockBodyBB);
+      VBlockBodyBB->setLabelMustBeEmitted();
 
-      BuildMI(*EmptyBodyBB, EmptyBodyBB->end(), DebugLoc(),
+      BuildMI(*VBlockBodyBB, VBlockBodyBB->end(), DebugLoc(),
               TII.get(TargetOpcode::EH_LABEL))
-          .addSym(EmptyBodySym);
-      BuildMI(*EmptyBodyBB, EmptyBodyBB->end(), DebugLoc(),
-              TII.get(LinxISA::BSTOP));
+          .addSym(VBlockBodySym);
+      static const char kDefaultBodyAsm[] =
+          "  v.add lc0.sw, lc1.sw, ->vt\n"
+          "  C.BSTOP\n";
+      StringRef BodyText = kDefaultBodyAsm;
+      if (auto *MFI = MF.getInfo<LinxISAMachineFunctionInfo>()) {
+        if (MFI->hasVBlockBodyAsm())
+          BodyText = MFI->getVBlockBodyAsm();
+      }
+      emitVectorBodyText(*VBlockBodyBB, BodyText, "vblock body");
 
-      DecoupledBodyBBs.insert(EmptyBodyBB);
+      DecoupledBodyBBs.insert(VBlockBodyBB);
       Changed = true;
-      return EmptyBodySym;
+      return VBlockBodySym;
     };
 
     auto getOrCreateVTileAddBodySym = [&]() -> MCSymbol * {
@@ -303,10 +1312,7 @@ public:
           "  v.add vt#1.sw, vu#1.sw, ->vt.w\n"
           "  v.sw.local vt#1, [to, lc0<<2, lc1<<8]\n"
           "  C.BSTOP\n";
-      BuildMI(*VTileAddBodyBB, VTileAddBodyBB->end(), DebugLoc(),
-              TII.get(TargetOpcode::INLINEASM))
-          .addExternalSymbol(kBodyAsm)
-          .addImm(InlineAsm::Extra_HasSideEffects);
+      emitVectorBodyText(*VTileAddBodyBB, StringRef(kBodyAsm), "vtile add body");
 
       DecoupledBodyBBs.insert(VTileAddBodyBB);
       Changed = true;
@@ -337,10 +1343,7 @@ public:
           "  v.sub vt#1.sw, vu#1.sw, ->vt.w\n"
           "  v.sw.local vt#1, [to, lc0<<2, lc1<<8]\n"
           "  C.BSTOP\n";
-      BuildMI(*VTileSubBodyBB, VTileSubBodyBB->end(), DebugLoc(),
-              TII.get(TargetOpcode::INLINEASM))
-          .addExternalSymbol(kBodyAsm)
-          .addImm(InlineAsm::Extra_HasSideEffects);
+      emitVectorBodyText(*VTileSubBodyBB, StringRef(kBodyAsm), "vtile sub body");
 
       DecoupledBodyBBs.insert(VTileSubBodyBB);
       Changed = true;
@@ -392,8 +1395,9 @@ public:
       return TailBB;
     };
 
-    // Ensure call-transfer pseudos end a block. This matches BlockISA: call
-    // headers are block exits, and musttail transfer pseudos are terminators.
+    // Ensure PSEUDO_CALL ends a block. This matches BlockISA: the call is the
+    // block's outgoing control-flow (encoded in the BSTART header), and the
+    // return target is the next block (encoded via SETRET).
     SmallVector<MachineBasicBlock *, 32> CallSplitWorklist;
     CallSplitWorklist.reserve(MF.size());
     for (MachineBasicBlock &MBB : MF)
@@ -404,8 +1408,7 @@ public:
       for (MachineInstr &MI : *MBB) {
         if (MI.isDebugInstr())
           continue;
-        if (MI.getOpcode() != LinxISA::PSEUDO_CALL &&
-            MI.getOpcode() != LinxISA::PSEUDO_TAILCALL)
+        if (MI.getOpcode() != LinxISA::PSEUDO_CALL)
           continue;
 
         auto Next = std::next(MI.getIterator());
@@ -485,15 +1488,8 @@ public:
       case LinxISA::FEXIT:
       case LinxISA::FRET_RA:
       case LinxISA::FRET_STK: {
-        if (hasRealInstrAfter(*MacroMI)) {
-          // Some late CFG cleanups may merge a standalone frame-macro block with
-          // its successor. Re-split instead of hard-failing.
-          MachineBasicBlock *ContBB = splitAfterInstr(*MBB, *MacroMI);
-          MacroSplitWorklist.push_back(ContBB);
-          MacroSplitWorklist.push_back(MBB);
-          Changed = true;
-          break;
-        }
+        if (hasRealInstrAfter(*MacroMI))
+          report_fatal_error("Linx: frame macro must be the last instruction in its block");
         if (!hasRealInstrBefore(*MacroMI))
           continue;
         MachineBasicBlock *TailBB = splitBeforeInstr(*MBB, *MacroMI);
@@ -586,14 +1582,6 @@ public:
       }
     }
 
-    // Expand tile pseudos now that they are isolated blocks (and registers are
-    // physical after RA).
-    auto tileRegId = [&](Register Reg) -> unsigned {
-      if (!Reg || !Reg.isPhysical())
-        report_fatal_error("Linx: expected physical tile register");
-      return TRI.getEncodingValue(Reg) & 0x1fu;
-    };
-
     for (MachineBasicBlock &MBB : MF) {
       MachineInstr *PseudoMI = nullptr;
       for (MachineInstr &MI : MBB) {
@@ -647,9 +1635,10 @@ public:
         break;
       }
 
-      constexpr unsigned DType_I32 = 0;
+      constexpr unsigned DType_I32 = 17;
       constexpr unsigned TMA_TLOAD = 0;
       constexpr unsigned TMA_TSTORE = 1;
+      constexpr unsigned TMA_TMOV = 2;
       constexpr unsigned CUBE_MAMULB = 0;
       constexpr unsigned CUBE_MAMULB_ACC = 2;
       constexpr unsigned CUBE_ACCCVT = 8;
@@ -670,14 +1659,15 @@ public:
             .addImm(Imm);
       };
 
-      auto tileKindFromId = [](unsigned ID) -> unsigned {
-        if (ID < 8)
-          return 0; // t
-        if (ID < 16)
-          return 1; // u
-        if (ID < 24)
-          return 2; // m
-        return 3; // n
+      auto emitDimReg = [&](MachineBasicBlock &DimMBB,
+                            MachineBasicBlock::iterator DimInsertPt,
+                            unsigned LoopNest, Register SrcReg) {
+        const unsigned BDimOpc = (LoopNest == 0)   ? LinxISA::B_DIM_LB0
+                               : (LoopNest == 1) ? LinxISA::B_DIM_LB1
+                               :                  LinxISA::B_DIM_LB2;
+        BuildMI(DimMBB, DimInsertPt, DL, TII.get(BDimOpc))
+            .addReg(SrcReg)
+            .addImm(0);
       };
 
       switch (PseudoMI->getOpcode()) {
@@ -685,8 +1675,9 @@ public:
         const Register Dst = PseudoMI->getOperand(0).getReg();
         const Register Base = PseudoMI->getOperand(1).getReg();
         const int64_t Size = PseudoMI->getOperand(2).getImm();
+        validateStrictTileSizeCode(Size, "TMA.TLOAD");
 
-        const unsigned DstID = tileRegId(Dst);
+        const unsigned DstID = tileRegIdFromReg(TRI, Dst);
         if (DstID >= 16)
           report_fatal_error("Linx: TMA.TLOAD dst must be in TILE0..TILE15");
 
@@ -714,7 +1705,7 @@ public:
         // tile destination register in the first absent source slot (SrcTile1)
         // and set S0V/S1V to indicate no tile inputs.
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
-            .addImm(tileKindFromId(DstID)) // DstTile (hand)
+            .addImm(dstTileFieldFromRelRef(tileRelRefFromId(DstID))) // DstTile (hand)
             .addImm(0)      // S0R
             .addImm(1)      // S0V (absent)
             .addImm(0)      // S1R
@@ -733,8 +1724,9 @@ public:
         const Register Dst = PseudoMI->getOperand(0).getReg();
         const Register Base = PseudoMI->getOperand(1).getReg();
         const int64_t Size = PseudoMI->getOperand(2).getImm();
+        validateStrictTileSizeCode(Size, "TMA.TLOAD");
 
-        const unsigned DstID = tileRegId(Dst);
+        const unsigned DstID = tileRegIdFromReg(TRI, Dst);
 
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_TMA))
             .addImm(DType_I32)
@@ -751,7 +1743,7 @@ public:
             .addReg(LinxISA::R0);
 
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
-            .addImm(tileKindFromId(DstID))
+            .addImm(dstTileFieldFromRelRef(tileRelRefFromId(DstID)))
             .addImm(0)
             .addImm(1)
             .addImm(0)
@@ -769,29 +1761,41 @@ public:
       case LinxISA::PSEUDO_TMA_TLOAD_DESC: {
         const Register Dst = PseudoMI->getOperand(0).getReg();
         const Register Base = PseudoMI->getOperand(1).getReg();
-        const int64_t Layout = PseudoMI->getOperand(2).getImm();
-        const int64_t LB0 = PseudoMI->getOperand(3).getImm();
-        const int64_t LB1 = PseudoMI->getOperand(4).getImm();
-        const int64_t Size = PseudoMI->getOperand(5).getImm();
+        const int64_t DType = PseudoMI->getOperand(2).getImm();
+        const int64_t Layout = PseudoMI->getOperand(3).getImm();
+        const int64_t LB0 = PseudoMI->getOperand(4).getImm();
+        const int64_t LB1 = PseudoMI->getOperand(5).getImm();
+        const int64_t Size = PseudoMI->getOperand(6).getImm();
+        const Register StrideReg = PseudoMI->getOperand(7).getReg();
+        if (DType < 0 || DType > 31)
+          report_fatal_error("Linx: TMA.TLOAD dtype must fit u5");
+        validateStrictTileSizeCode(Size, "TMA.TLOAD");
+        const uint64_t Dim0 = requirePositiveDimImm(LB0, "lb0", "TMA.TLOAD");
+        const uint64_t Dim1 = requirePositiveDimImm(LB1, "lb1", "TMA.TLOAD");
+        validateTileByteBudget("TMA.TLOAD", Dim0, Dim1, /*dim2=*/1u,
+                               dtypeElementBitsForTileCheck(DType),
+                               static_cast<uint64_t>(Size));
+        if (!StrideReg)
+          report_fatal_error("Linx: TMA.TLOAD requires stride register binding");
 
-        const unsigned DstID = tileRegId(Dst);
+        const unsigned DstID = tileRegIdFromReg(TRI, Dst);
         if (DstID >= 16)
           report_fatal_error("Linx: TMA.TLOAD dst must be in TILE0..TILE15");
 
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_TMA))
-            .addImm(DType_I32)
+            .addImm(DType)
             .addImm(TMA_TLOAD);
         emitDim(MBB, InsertPt, /*LoopNest=*/0, LB0);
         emitDim(MBB, InsertPt, /*LoopNest=*/1, LB1);
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_ARG)).addImm(Layout);
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOR))
             .addReg(LinxISA::R0)
-            .addReg(LinxISA::R0)
+            .addReg(StrideReg)
             .addReg(Base)
             .addReg(LinxISA::R0);
 
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
-            .addImm(tileKindFromId(DstID))
+            .addImm(dstTileFieldFromRelRef(tileRelRefFromId(DstID)))
             .addImm(0)
             .addImm(1)
             .addImm(0)
@@ -810,8 +1814,9 @@ public:
         const Register Base = PseudoMI->getOperand(0).getReg();
         const Register Src = PseudoMI->getOperand(1).getReg();
         const int64_t Size = PseudoMI->getOperand(2).getImm();
+        validateStrictTileSizeCode(Size, "TMA.TSTORE");
 
-        const unsigned SrcID = tileRegId(Src);
+        const unsigned SrcID = tileRegIdFromReg(TRI, Src);
 
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_TMA))
             .addImm(DType_I32)
@@ -831,7 +1836,7 @@ public:
 
         // Store: encode the source tile in SrcTile0 and mark it present (S0V=0).
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
-            .addImm(tileKindFromId(SrcID)) // DstTile (hand hint)
+            .addImm(dstTileFieldFromRelRef(tileRelRefFromId(SrcID))) // DstTile (hand hint)
             .addImm(0)      // S0R
             .addImm(0)      // S0V (present)
             .addImm(0)      // S1R
@@ -849,26 +1854,38 @@ public:
       case LinxISA::PSEUDO_TMA_TSTORE_DESC: {
         const Register Base = PseudoMI->getOperand(0).getReg();
         const Register Src = PseudoMI->getOperand(1).getReg();
-        const int64_t Layout = PseudoMI->getOperand(2).getImm();
-        const int64_t LB0 = PseudoMI->getOperand(3).getImm();
-        const int64_t LB1 = PseudoMI->getOperand(4).getImm();
-        const int64_t Size = PseudoMI->getOperand(5).getImm();
-        const unsigned SrcID = tileRegId(Src);
+        const int64_t DType = PseudoMI->getOperand(2).getImm();
+        const int64_t Layout = PseudoMI->getOperand(3).getImm();
+        const int64_t LB0 = PseudoMI->getOperand(4).getImm();
+        const int64_t LB1 = PseudoMI->getOperand(5).getImm();
+        const int64_t Size = PseudoMI->getOperand(6).getImm();
+        const Register StrideReg = PseudoMI->getOperand(7).getReg();
+        if (DType < 0 || DType > 31)
+          report_fatal_error("Linx: TMA.TSTORE dtype must fit u5");
+        validateStrictTileSizeCode(Size, "TMA.TSTORE");
+        const uint64_t Dim0 = requirePositiveDimImm(LB0, "lb0", "TMA.TSTORE");
+        const uint64_t Dim1 = requirePositiveDimImm(LB1, "lb1", "TMA.TSTORE");
+        validateTileByteBudget("TMA.TSTORE", Dim0, Dim1, /*dim2=*/1u,
+                               dtypeElementBitsForTileCheck(DType),
+                               static_cast<uint64_t>(Size));
+        if (!StrideReg)
+          report_fatal_error("Linx: TMA.TSTORE requires stride register binding");
+        const unsigned SrcID = tileRegIdFromReg(TRI, Src);
 
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_TMA))
-            .addImm(DType_I32)
+            .addImm(DType)
             .addImm(TMA_TSTORE);
         emitDim(MBB, InsertPt, /*LoopNest=*/0, LB0);
         emitDim(MBB, InsertPt, /*LoopNest=*/1, LB1);
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_ARG)).addImm(Layout);
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOR))
             .addReg(LinxISA::R0)
-            .addReg(LinxISA::R0)
+            .addReg(StrideReg)
             .addReg(Base)
             .addReg(LinxISA::R0);
 
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
-            .addImm(tileKindFromId(SrcID))
+            .addImm(dstTileFieldFromRelRef(tileRelRefFromId(SrcID)))
             .addImm(0)
             .addImm(0)
             .addImm(0)
@@ -877,6 +1894,87 @@ public:
             .addImm(0)
             .addImm(Size)
             .addReg(Src, RegState::Implicit);
+
+        PseudoMI->eraseFromParent();
+        Changed = true;
+        break;
+      }
+
+      case LinxISA::PSEUDO_TMA_TMOV: {
+        const Register Dst = PseudoMI->getOperand(0).getReg();
+        const Register Src = PseudoMI->getOperand(1).getReg();
+
+        TileMeta Meta;
+        Meta.SizeCode = static_cast<uint8_t>(PseudoMI->getOperand(2).getImm() & 0x1f);
+        Meta.DataType = static_cast<uint8_t>(PseudoMI->getOperand(3).getImm() & 0x1f);
+        Meta.Layout = PseudoMI->getOperand(4).getImm();
+        Meta.HasLayout = (PseudoMI->getOperand(5).getImm() & 1) != 0;
+        validateStrictTileSizeCode(Meta.SizeCode, "TMOV");
+
+        const int64_t Mode = PseudoMI->getOperand(6).getImm();
+        if (Mode != static_cast<int64_t>(TMovMode::V2V) &&
+            Mode != static_cast<int64_t>(TMovMode::A2V))
+          report_fatal_error("Linx: TMOV mode must be V2V(0) or A2V(1)");
+        const bool IsA2V = Mode == static_cast<int64_t>(TMovMode::A2V);
+        const bool SrcReuse = (PseudoMI->getOperand(7).getImm() & 1) != 0;
+        if (IsA2V && SrcReuse)
+          report_fatal_error("Linx: TMOV A2V mode does not allow src_reuse=1");
+
+        const unsigned DstID = tileRegIdFromReg(TRI, Dst);
+        const TileRelRef DstRef = tileRelRefFromId(DstID);
+        // PR6 parity baseline: encode concrete destination tile id.
+        // Queue-push hand-only encoding requires full runtime relref queue
+        // semantics, which is not yet modeled in QEMU tile execution.
+        const unsigned EncDstTile = DstID;
+
+        unsigned EncSrc = 0;
+        RegState SrcFlags = RegState::Implicit;
+        if (!IsA2V) {
+          const unsigned SrcID = tileRegIdFromReg(TRI, Src);
+          const TileRelRef SrcRef = tileRelRefFromId(SrcID, SrcReuse);
+          // Enforce canonical relref mapping and depth range.
+          EncSrc = tileIdFromRelRef(SrcRef);
+          (void)tileIdFromRelRef(DstRef);
+          if (!SrcReuse)
+            SrcFlags |= RegState::Kill;
+        } else {
+          // Validate destination relref in A2V mode too.
+          (void)tileIdFromRelRef(DstRef);
+        }
+
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_TMA))
+            .addImm(Meta.DataType)
+            .addImm(TMA_TMOV);
+
+        // B.ARG carries TMOV mode (strict profile: V2V + A2V).
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_ARG)).addImm(Mode);
+
+        if (!IsA2V) {
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
+              .addImm(dstTileFieldFromRelRef(DstRef)) // DstTile (hand)
+              .addImm(SrcReuse ? 1 : 0)               // S0R
+              .addImm(0)                              // S0V (present)
+              .addImm(0)                              // S1R
+              .addImm(1)                              // S1V (absent)
+              .addImm(EncSrc)                         // SrcTile0
+              .addImm(EncDstTile)                     // SrcTile1 (dst tile id)
+              .addImm(Meta.SizeCode)                  // SizeCode
+              .addReg(Src, SrcFlags)
+              .addReg(Dst, RegState::Define | RegState::Implicit);
+        } else {
+          // A2V: source is implicit accumulator state, so no explicit source
+          // tile is bound in B.IOTI.
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
+              .addImm(dstTileFieldFromRelRef(DstRef)) // DstTile (hand)
+              .addImm(0)                              // S0R
+              .addImm(1)                              // S0V (absent)
+              .addImm(0)                              // S1R
+              .addImm(1)                              // S1V (absent)
+              .addImm(0)                              // SrcTile0 (unused)
+              .addImm(EncDstTile)                     // SrcTile1 (dst tile id)
+              .addImm(Meta.SizeCode)                  // SizeCode
+              .addReg(Dst, RegState::Define | RegState::Implicit);
+        }
 
         PseudoMI->eraseFromParent();
         Changed = true;
@@ -893,15 +1991,24 @@ public:
         const int64_t M = PseudoMI->getOperand(3).getImm();
         const int64_t N = PseudoMI->getOperand(4).getImm();
         const int64_t K = PseudoMI->getOperand(5).getImm();
+        validateCubeDimImm(M, "m", "CUBE.MAMULB");
+        validateCubeDimImm(N, "n", "CUBE.MAMULB");
+        validateCubeDimImm(K, "k", "CUBE.MAMULB");
+        validateTileByteBudget("CUBE.MAMULB",
+                               requirePositiveDimImm(M, "m", "CUBE.MAMULB"),
+                               requirePositiveDimImm(N, "n", "CUBE.MAMULB"),
+                               requirePositiveDimImm(K, "k", "CUBE.MAMULB"),
+                               dtypeElementBitsForTileCheck(DType_I32),
+                               std::nullopt);
 
-        const unsigned DstID = tileRegId(Dst);
+        const unsigned DstID = tileRegIdFromReg(TRI, Dst);
         if (DstID < 16)
           report_fatal_error("Linx: CUBE.ACCCVT dst must be in TILE16..TILE31");
         const unsigned Group = (DstID >> 3) & 0x1u;
         const unsigned Depth = DstID & 0x7u;
 
-        const unsigned AID = tileRegId(SrcA);
-        const unsigned BID = tileRegId(SrcB);
+        const unsigned AID = tileRegIdFromReg(TRI, SrcA);
+        const unsigned BID = tileRegIdFromReg(TRI, SrcB);
 
         // First block: MAMULB
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_CUBE))
@@ -935,7 +2042,8 @@ public:
             .addImm(DType_I32)
             .addImm(CUBE_ACCCVT);
 
-        const unsigned DstKind = tileKindFromId(Depth | (Group << 3) | 16u);
+        const unsigned DstKind =
+            dstTileFieldFromRelRef(tileRelRefFromId(Depth | (Group << 3) | 16u));
         BuildMI(*AccBB, AccBB->end(), DL, TII.get(LinxISA::B_IOTI_G1))
             .addImm(DstKind)
             .addImm(0)       // S0R
@@ -967,15 +2075,24 @@ public:
         const int64_t M = PseudoMI->getOperand(4).getImm();
         const int64_t N = PseudoMI->getOperand(5).getImm();
         const int64_t K = PseudoMI->getOperand(6).getImm();
+        validateCubeDimImm(M, "m", "CUBE.MAMULB.ACC");
+        validateCubeDimImm(N, "n", "CUBE.MAMULB.ACC");
+        validateCubeDimImm(K, "k", "CUBE.MAMULB.ACC");
+        validateTileByteBudget(
+            "CUBE.MAMULB.ACC",
+            requirePositiveDimImm(M, "m", "CUBE.MAMULB.ACC"),
+            requirePositiveDimImm(N, "n", "CUBE.MAMULB.ACC"),
+            requirePositiveDimImm(K, "k", "CUBE.MAMULB.ACC"),
+            dtypeElementBitsForTileCheck(DType_I32), std::nullopt);
 
-        const unsigned DstID = tileRegId(Dst);
+        const unsigned DstID = tileRegIdFromReg(TRI, Dst);
         if (DstID < 16)
           report_fatal_error("Linx: CUBE.ACCCVT dst must be in TILE16..TILE31");
         const unsigned Group = (DstID >> 3) & 0x1u;
         const unsigned Depth = DstID & 0x7u;
 
-        const unsigned AID = tileRegId(SrcA);
-        const unsigned BID = tileRegId(SrcB);
+        const unsigned AID = tileRegIdFromReg(TRI, SrcA);
+        const unsigned BID = tileRegIdFromReg(TRI, SrcB);
 
         // First block: MAMULB.ACC
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_CUBE))
@@ -1010,7 +2127,8 @@ public:
             .addImm(DType_I32)
             .addImm(CUBE_ACCCVT);
 
-        const unsigned DstKind = tileKindFromId(Depth | (Group << 3) | 16u);
+        const unsigned DstKind =
+            dstTileFieldFromRelRef(tileRelRefFromId(Depth | (Group << 3) | 16u));
         BuildMI(*AccBB, AccBB->end(), DL, TII.get(LinxISA::B_IOTI_G1))
             .addImm(DstKind)
             .addImm(0)       // S0R
@@ -1021,6 +2139,184 @@ public:
             .addImm(16u | (Group << 3) | Depth) // SrcTile1 (dst tile reg id)
             .addImm(8)       // SizeCode (bring-up: 4KiB)
             .addReg(Dst, RegState::Define | RegState::Implicit);
+
+        PseudoMI->eraseFromParent();
+        Changed = true;
+        break;
+      }
+
+      case LinxISA::PSEUDO_CUBE_ACCCVT: {
+        // Expand into one block:
+        //   BSTART.CUBE(ACCCVT) + B.ARG(qarg0) + B.IOT(dst)
+        //
+        // qarg1 is reserved for follow-on quant wiring and must be 0 in PR5.
+        const Register Dst = PseudoMI->getOperand(0).getReg();
+        const Register Acc = PseudoMI->getOperand(1).getReg();
+        const int64_t Size = PseudoMI->getOperand(2).getImm();
+        const int64_t DType = PseudoMI->getOperand(3).getImm();
+        const int64_t QArg0 = PseudoMI->getOperand(4).getImm();
+        const int64_t QArg1 = PseudoMI->getOperand(5).getImm();
+
+        validateStrictTileSizeCode(Size, "CUBE.ACCCVT");
+        if (DType < 0 || DType > 31)
+          report_fatal_error("Linx: CUBE.ACCCVT dtype must fit u5");
+        if (QArg1 != 0)
+          report_fatal_error(
+              "Linx: CUBE.ACCCVT currently requires qarg1=0 in strict-v0.3");
+
+        const unsigned DstID = tileRegIdFromReg(TRI, Dst);
+        if (DstID < 16)
+          report_fatal_error("Linx: CUBE.ACCCVT dst must be in TILE16..TILE31");
+        const unsigned DstKind =
+            dstTileFieldFromRelRef(tileRelRefFromId(DstID));
+
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_CUBE))
+            .addImm(DType)
+            .addImm(CUBE_ACCCVT);
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_ARG)).addImm(QArg0);
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
+            .addImm(DstKind)
+            .addImm(0)       // S0R
+            .addImm(1)       // S0V (absent)
+            .addImm(0)       // S1R
+            .addImm(1)       // S1V (absent)
+            .addImm(0)       // SrcTile0 (unused)
+            .addImm(DstID)   // SrcTile1 (dst tile id)
+            .addImm(Size)    // SizeCode
+            .addReg(Acc, RegState::Implicit)
+            .addReg(Dst, RegState::Define | RegState::Implicit);
+
+        PseudoMI->eraseFromParent();
+        Changed = true;
+        break;
+      }
+
+      case LinxISA::PSEUDO_TEPL_UNARY:
+      case LinxISA::PSEUDO_TEPL_BINARY:
+      case LinxISA::PSEUDO_TEPL_BINARY_SCALAR:
+      case LinxISA::PSEUDO_TEPL_SPLAT: {
+        const unsigned Opc = PseudoMI->getOpcode();
+        const bool IsUnary = Opc == LinxISA::PSEUDO_TEPL_UNARY;
+        const bool IsBinary = Opc == LinxISA::PSEUDO_TEPL_BINARY;
+        const bool IsBinaryScalar = Opc == LinxISA::PSEUDO_TEPL_BINARY_SCALAR;
+        const bool IsSplat = Opc == LinxISA::PSEUDO_TEPL_SPLAT;
+        const char *Ctx = IsUnary
+                              ? "TEPL.UNARY"
+                              : (IsBinary ? "TEPL.BINARY"
+                                          : (IsBinaryScalar ? "TEPL.BINARY.SCALAR"
+                                                            : "TEPL.SPLAT"));
+
+        const Register Dst = PseudoMI->getOperand(0).getReg();
+        const Register SrcA = (IsUnary || IsBinary || IsBinaryScalar)
+                                  ? PseudoMI->getOperand(1).getReg()
+                                  : Register();
+        const Register SrcB = IsBinary ? PseudoMI->getOperand(2).getReg() : Register();
+        const Register SrcS = IsBinaryScalar
+                                  ? PseudoMI->getOperand(2).getReg()
+                                  : (IsSplat ? PseudoMI->getOperand(1).getReg()
+                                             : Register());
+        const int64_t TileOp10 =
+            PseudoMI->getOperand(IsUnary ? 2 : (IsBinary ? 3 : (IsBinaryScalar ? 3 : 2)))
+                .getImm();
+        const int64_t Size =
+            PseudoMI->getOperand(IsUnary ? 3 : (IsBinary ? 4 : (IsBinaryScalar ? 4 : 3)))
+                .getImm();
+        const int64_t DType =
+            PseudoMI->getOperand(IsUnary ? 4 : (IsBinary ? 5 : (IsBinaryScalar ? 5 : 4)))
+                .getImm();
+        const int64_t Mode =
+            IsBinaryScalar
+                ? PseudoMI->getOperand(6).getImm()
+                : (IsSplat ? PseudoMI->getOperand(5).getImm()
+                           : static_cast<int64_t>(TEPLMode::VV));
+
+        validateWhitelistedTEPLTileOp10(TileOp10, Ctx);
+        validateStrictTileSizeCode(Size, Ctx);
+        if (DType < 0 || DType > 31)
+          report_fatal_error(Twine("Linx: ") + Ctx + " dtype must fit u5");
+        if (Mode < 0 || Mode > 2)
+          report_fatal_error(Twine("Linx: ") + Ctx + " mode must be in range 0..2");
+        if (IsBinaryScalar && Mode != static_cast<int64_t>(TEPLMode::VS))
+          report_fatal_error("Linx: TEPL.BINARY.SCALAR requires mode=1 (VS)");
+        if (IsSplat && Mode != static_cast<int64_t>(TEPLMode::SV))
+          report_fatal_error("Linx: TEPL.SPLAT requires mode=2 (SV)");
+        if ((IsUnary || IsBinary) && Mode != static_cast<int64_t>(TEPLMode::VV))
+          report_fatal_error("Linx: TEPL.UNARY/BINARY require mode=0 (VV)");
+
+        const unsigned DstID = tileRegIdFromReg(TRI, Dst);
+        const unsigned AID = (IsUnary || IsBinary || IsBinaryScalar)
+                                 ? tileRegIdFromReg(TRI, SrcA)
+                                 : 0u;
+        const unsigned BID = IsBinary ? tileRegIdFromReg(TRI, SrcB) : 0u;
+        const TileRelRef DstRef = tileRelRefFromId(DstID);
+        const unsigned EncA =
+            (IsUnary || IsBinary || IsBinaryScalar)
+                ? tileIdFromRelRef(tileRelRefFromId(AID))
+                : 0u;
+        const unsigned EncB =
+            IsBinary ? tileIdFromRelRef(tileRelRefFromId(BID)) : 0u;
+        const bool HasS0Tile = IsUnary || IsBinary || IsBinaryScalar;
+        const bool HasS1Tile = IsBinary;
+
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTART_TEPL))
+            .addImm(DType)
+            .addImm(TileOp10);
+        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_ARG)).addImm(Mode);
+        if (IsBinaryScalar || IsSplat) {
+          // TEPL scalar extensions bind scalar source through B.IOR.
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOR))
+              .addReg(LinxISA::R0) // RegDst (unused)
+              .addReg(SrcS)        // RegSrc0 (scalar)
+              .addReg(LinxISA::R0) // RegSrc1
+              .addReg(LinxISA::R0) // RegSrc2
+              .addReg(SrcS, RegState::Implicit);
+        }
+
+        // Descriptor 0: input bindings.
+        auto InDesc = BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G0))
+                          .addImm(dstTileFieldFromRelRef(DstRef))   // DstTile hand
+                          .addImm(0)                                // S0R
+                          .addImm(HasS0Tile ? 0 : 1)                // S0V
+                          .addImm(0)                                // S1R
+                          .addImm(HasS1Tile ? 0 : 1)                // S1V
+                          .addImm(EncA)                             // SrcTile0
+                          .addImm(EncB)                             // SrcTile1
+                          .addImm(Size);                            // SizeCode
+        if (HasS0Tile)
+          InDesc.addReg(SrcA, RegState::Implicit);
+        if (HasS1Tile)
+          InDesc.addReg(SrcB, RegState::Implicit);
+
+        // Descriptor 1: destination tile binding (queue-push destination).
+        //
+        // In-place TEPL forms (dst aliases a source tile) still use B.IOTI so
+        // size metadata stays explicit and disassembly remains canonical.
+        // Runtime destination allocation is guarded by descriptor shape checks.
+        const bool InPlace = (HasS0Tile && DstID == AID) ||
+                             (HasS1Tile && DstID == BID);
+        if (InPlace) {
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
+              .addImm(dstTileFieldFromRelRef(DstRef))
+              .addImm(0)     // S0R
+              .addImm(1)     // S0V (absent)
+              .addImm(0)     // S1R
+              .addImm(1)     // S1V (absent)
+              .addImm(0)     // SrcTile0 (unused)
+              .addImm(DstID) // SrcTile1 (dst tile id)
+              .addImm(Size)  // SizeCode
+              .addReg(Dst, RegState::Define | RegState::Implicit);
+        } else {
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
+              .addImm(dstTileFieldFromRelRef(DstRef))
+              .addImm(0)     // S0R
+              .addImm(1)     // S0V (absent)
+              .addImm(0)     // S1R
+              .addImm(1)     // S1V (absent)
+              .addImm(0)     // SrcTile0 (unused)
+              .addImm(DstID) // SrcTile1 (dst tile id)
+              .addImm(Size)  // SizeCode
+              .addReg(Dst, RegState::Define | RegState::Implicit);
+        }
 
         PseudoMI->eraseFromParent();
         Changed = true;
@@ -1050,9 +2346,9 @@ public:
                 ? PseudoMI->getOperand(3).getImm()
                 : 8; // 4KiB tiles (SizeCode=8)
 
-        const unsigned DstID = tileRegId(Dst);
-        const unsigned AID = tileRegId(SrcA);
-        const unsigned BID = tileRegId(SrcB);
+        const unsigned DstID = tileRegIdFromReg(TRI, Dst);
+        const unsigned AID = tileRegIdFromReg(TRI, SrcA);
+        const unsigned BID = tileRegIdFromReg(TRI, SrcB);
 
         // Derive a compact 2-D iteration space for the tile:
         // - LB0=64 elements (256B row stride => lc1<<8)
@@ -1076,7 +2372,7 @@ public:
 
         // Descriptor 0: inputs (TA/TB), group=0.
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G0))
-            .addImm(tileKindFromId(DstID)) // DstTile (hand hint)
+            .addImm(dstTileFieldFromRelRef(tileRelRefFromId(DstID))) // DstTile (hand hint)
             .addImm(0)                     // S0R
             .addImm(0)                     // S0V (present)
             .addImm(0)                     // S1R
@@ -1087,23 +2383,23 @@ public:
             .addReg(SrcA, RegState::Implicit)
             .addReg(SrcB, RegState::Implicit);
 
-        // Descriptor 1: output (TO), group=1 (last). If the output register
-        // aliases an input tile, avoid B.IOTI allocation/clear by using B.IOT.
+        // Descriptor 1: output (TO), group=1 (last). Keep B.IOTI for both
+        // in-place and out-of-place forms so size metadata stays explicit.
         const bool InPlace = (DstID == AID) || (DstID == BID);
         if (InPlace) {
-          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOT_G1))
-              .addImm(tileKindFromId(DstID)) // DstTile (hand hint)
-              .addReg(LinxISA::R0)           // RegSrc (unused)
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
+              .addImm(dstTileFieldFromRelRef(tileRelRefFromId(DstID))) // DstTile (hand hint)
               .addImm(0)                     // S0R
               .addImm(1)                     // S0V (absent)
               .addImm(0)                     // S1R
               .addImm(1)                     // S1V (absent)
               .addImm(0)                     // SrcTile0 (unused)
               .addImm(DstID)                 // SrcTile1 (dst tile id)
+              .addImm(Size)                  // SizeCode
               .addReg(Dst, RegState::Define | RegState::Implicit);
         } else {
           BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOTI_G1))
-              .addImm(tileKindFromId(DstID)) // DstTile (hand hint)
+              .addImm(dstTileFieldFromRelRef(tileRelRefFromId(DstID))) // DstTile (hand hint)
               .addImm(0)                     // S0R
               .addImm(1)                     // S0V (absent)
               .addImm(0)                     // S1R
@@ -1122,35 +2418,81 @@ public:
         break;
       }
 
-      case LinxISA::PSEUDO_VBLOCK_LAUNCH: {
+      case LinxISA::PSEUDO_VBLOCK_LAUNCH:
+      case LinxISA::PSEUDO_VBLOCK_LAUNCH_DYN1: {
         // Expand into a decoupled vector block header:
-        //   BSTART.VSEQ/VPAR + B.TEXT empty_body + B.DIM(LB0..2)
+        //   BSTART.MSEQ/MPAR + B.TEXT body + B.IOR(binds) + B.DIM(LB0..2)
+        const bool DynDim1 =
+            (PseudoMI->getOpcode() == LinxISA::PSEUDO_VBLOCK_LAUNCH_DYN1);
         const int64_t VKind = PseudoMI->getOperand(0).getImm();
         const int64_t Dim0 = PseudoMI->getOperand(1).getImm();
-        const int64_t Dim1 = PseudoMI->getOperand(2).getImm();
+        const int64_t Dim1Imm = DynDim1 ? 0 : PseudoMI->getOperand(2).getImm();
+        const Register Dim1Reg = DynDim1 ? PseudoMI->getOperand(2).getReg()
+                                         : Register();
         const int64_t Dim2 = PseudoMI->getOperand(3).getImm();
         const int64_t AttrBits = PseudoMI->getOperand(4).getImm();
-        (void)AttrBits; // Bring-up: B.ATTR is not wired in the backend yet.
+
+        const Register Bind0 = PseudoMI->getOperand(5).getReg();
+        const Register Bind1 = PseudoMI->getOperand(6).getReg();
+        const Register Bind2 = PseudoMI->getOperand(7).getReg();
+        const Register Bind3 = PseudoMI->getOperand(8).getReg();
+        const Register Bind4 = PseudoMI->getOperand(9).getReg();
+        const Register Bind5 = PseudoMI->getOperand(10).getReg();
 
         const unsigned Mode = 0; // bring-up default
-        const unsigned BStartOpc = (VKind == 0)   ? LinxISA::BSTART_VSEQ
-                                 : (VKind == 1) ? LinxISA::BSTART_VPAR
+        const unsigned BStartOpc = (VKind == 0)   ? LinxISA::BSTART_MSEQ
+                                 : (VKind == 1) ? LinxISA::BSTART_MPAR
                                                 : 0;
         if (!BStartOpc)
-          report_fatal_error("Linx: vblock.launch vkind must be 0(VSEQ) or 1(VPAR)");
+          report_fatal_error("Linx: vblock.launch vkind must be 0(MSEQ) or 1(MPAR)");
 
         BuildMI(MBB, InsertPt, DL, TII.get(BStartOpc)).addImm(Mode);
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_TEXT))
-            .addSym(getOrCreateEmptyBodySym());
-        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_DIM_LB0))
-            .addReg(LinxISA::R0)
-            .addImm(Dim0);
-        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_DIM_LB1))
-            .addReg(LinxISA::R0)
-            .addImm(Dim1);
-        BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_DIM_LB2))
-            .addReg(LinxISA::R0)
-            .addImm(Dim2);
+            .addSym(getOrCreateVBlockBodySym());
+
+        if (AttrBits < 0 || (static_cast<uint64_t>(AttrBits) & ~0x003fffffull))
+          report_fatal_error("Linx: vblock.launch attr_bits must fit 22 bits");
+        const uint32_t Attr = static_cast<uint32_t>(AttrBits);
+        const uint32_t AttrAQRLMask = (1u << 18) | (1u << 21);
+        if ((Attr & ~AttrAQRLMask) != 0u) {
+          report_fatal_error(
+              "Linx: vblock.launch only supports aq/rl B.ATTR bits in strict-v0.3");
+        }
+        if (Attr != 0u) {
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_ATTR))
+              .addImm((Attr >> 0) & 0x1u)  // C
+              .addImm((Attr >> 1) & 0x1u)  // DR
+              .addImm((Attr >> 2) & 0x1fu) // DataLayout
+              .addImm((Attr >> 7) & 0x1fu) // DataType
+              .addImm((Attr >> 12) & 0x1fu) // PadValue
+              .addImm((Attr >> 17) & 0x1u) // T
+              .addImm((Attr >> 18) & 0x1u) // aq
+              .addImm((Attr >> 19) & 0x1u) // atom
+              .addImm((Attr >> 20) & 0x1u) // far
+              .addImm((Attr >> 21) & 0x1u); // rl
+        }
+
+        auto emitIOR = [&](Register A, Register B, Register C) {
+          if (A == LinxISA::R0 && B == LinxISA::R0 && C == LinxISA::R0)
+            return;
+          // v0.3 bring-up contract: bind RI registers as an ordered namespace
+          // via B.IOR sources (RegSrc1, RegSrc0, RegSrc2).
+          BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_IOR))
+              .addReg(LinxISA::R0) // RegDst (unused in bring-up)
+              .addReg(B)           // RegSrc0
+              .addReg(A)           // RegSrc1
+              .addReg(C);          // RegSrc2
+        };
+
+        emitIOR(Bind0, Bind1, Bind2);
+        emitIOR(Bind3, Bind4, Bind5);
+
+        emitDim(MBB, InsertPt, /*LoopNest=*/0, Dim0);
+        if (DynDim1)
+          emitDimReg(MBB, InsertPt, /*LoopNest=*/1, Dim1Reg);
+        else
+          emitDim(MBB, InsertPt, /*LoopNest=*/1, Dim1Imm);
+        emitDim(MBB, InsertPt, /*LoopNest=*/2, Dim2);
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::BSTOP));
 
         PseudoMI->eraseFromParent();
@@ -1459,6 +2801,12 @@ public:
 	      auto hasSingleNonDbgUseInMBB =
 	          [&](Register Reg, const MachineInstr *UserMI,
 	              const MachineInstr *IgnoreMI) -> bool {
+	        // Cross-block users are not visible in the local MBB scan below.
+	        // Guard virtual registers up front so we never fold a producer that
+	        // still has uses in successor blocks.
+	        if (Reg.isVirtual() && !MRI.hasOneNonDBGUse(Reg))
+	          return false;
+
 	        unsigned Count = 0;
 	        for (const MachineInstr &MI : MBB) {
 	          if (MI.isDebugInstr() || isMarkerInstr(MI))
@@ -1779,12 +3127,16 @@ public:
 		          continue;
 		        }
 		        const unsigned Opc = SetcMI.getOpcode();
-		        if ((Opc != LinxISA::CSETC_EQ && Opc != LinxISA::CSETC_NE) ||
-		            SetcMI.getNumOperands() < 2 || !SetcMI.getOperand(0).isReg() ||
-		            !SetcMI.getOperand(1).isReg()) {
-		          ++It;
-		          continue;
-		        }
+			        if ((Opc != LinxISA::CSETC_EQ && Opc != LinxISA::CSETC_NE) ||
+			            SetcMI.getNumOperands() < 2 || !SetcMI.getOperand(0).isReg() ||
+			            !SetcMI.getOperand(1).isReg()) {
+			          ++It;
+			          continue;
+			        }
+			        if (!linxEnableSetcSrcRTypeFlags()) {
+			          ++It;
+			          continue;
+			        }
 
 		        const Register A = SetcMI.getOperand(0).getReg();
 		        const Register B = SetcMI.getOperand(1).getReg();
@@ -1857,7 +3209,8 @@ public:
 		                .addReg(LinxISA::R0)
 		                .addReg(OrigSrc)
 		                .getInstr();
-		        (void)NewMI;
+		        NewMI->getOperand(1).setTargetFlags(
+		            NewMI->getOperand(1).getTargetFlags() | LinxII::MO_SRCR_SW);
 
 		        auto NextIt = std::next(It);
 		        SetcMI.eraseFromParent();
@@ -1899,33 +3252,18 @@ public:
 	            Kind = ExitKind::Call;
 	          }
           /*
-           * CALL/ICALL blocks must always carry an adjacent SETRET target under
-           * the strict call/ret contract. For no-successor (noreturn) blocks,
-           * prefer the physical next block; if that is unavailable (or points at
-           * the internal empty-body stub), fall back to this block's own label.
-           * A true noreturn callee should never consume the return target, but a
-           * concrete marker keeps the header encoding and emulator checks valid.
+           * Only emit SETRET (and thus a concrete return target) when the call
+           * has a real CFG successor representing the continuation block.
+           *
+           * For noreturn calls, LLVM can leave the block with no successors;
+           * in that case, fabricating a "next block" return target produces
+           * invalid/unemitted labels (e.g. when the next block is an internal
+           * EH_LABEL-only decoupled body stub).
            */
           if (!MBB.succ_empty())
             ReturnBB = *MBB.succ_begin();
-          if (!ReturnBB)
-            ReturnBB = MBB.getNextNode();
-          if (EmptyBodyBB && ReturnBB == EmptyBodyBB)
+          if (ReturnBB && DecoupledBodyBBs.contains(ReturnBB))
             ReturnBB = nullptr;
-          if (!ReturnBB)
-            ReturnBB = &MBB;
-          Last->eraseFromParent();
-          Changed = true;
-          break;
-        }
-        case LinxISA::PSEUDO_TAILCALL: {
-          CallTargetOp = Last->getOperand(0);
-          if (CallTargetOp->isReg()) {
-            Kind = ExitKind::Ind;
-            HeaderSetcTgtReg = CallTargetOp->getReg();
-          } else {
-            Kind = ExitKind::Direct;
-          }
           Last->eraseFromParent();
           Changed = true;
           break;
@@ -2097,13 +3435,16 @@ public:
 
             // Prefer using the already-laid-out next block as fallthrough.
             unsigned BrOpcForSetc = Prev->getOpcode();
+            MachineBasicBlock *CondFallthroughBB = nullptr;
             if (FallthroughBB == JumpTargetBB) {
               Kind = ExitKind::Cond;
               TargetBB = BrTargetBB;
+              CondFallthroughBB = JumpTargetBB;
               SetcOpc = pickSetc(BrOpcForSetc);
             } else if (FallthroughBB == BrTargetBB) {
               Kind = ExitKind::Cond;
               TargetBB = JumpTargetBB;
+              CondFallthroughBB = BrTargetBB;
               BrOpcForSetc = invertBranch(BrOpcForSetc);
               SetcOpc = pickSetc(BrOpcForSetc);
             } else {
@@ -2130,6 +3471,7 @@ public:
 
               Kind = ExitKind::Cond;
               TargetBB = BrTargetBB;
+              CondFallthroughBB = TrampBB;
               SetcOpc = pickSetc(BrOpcForSetc);
             }
 
@@ -2209,9 +3551,11 @@ public:
 		            }
 
 			            if (!EmittedImmSetc) {
-			              auto tryEmitZextWSetcUW = [&]() -> bool {
-			                if (BrOpcForSetc != LinxISA::BEQ && BrOpcForSetc != LinxISA::BNE)
-			                  return false;
+				              auto tryEmitZextWSetcUW = [&]() -> bool {
+				                if (!linxEnableSetcSrcRTypeFlags())
+				                  return false;
+				                if (BrOpcForSetc != LinxISA::BEQ && BrOpcForSetc != LinxISA::BNE)
+				                  return false;
 			                if ((LHSReg == LinxISA::R0) == (RHSReg == LinxISA::R0))
 			                  return false;
 
@@ -2227,12 +3571,13 @@ public:
 			                    (BrOpcForSetc == LinxISA::BEQ) ? LinxISA::SETC_EQ
 			                                                  : LinxISA::SETC_NE;
 			                auto SetcIt = findSetcInsertPt(MBB, *Prev, LinxISA::R0, OrigSrc);
-		                MachineInstr *NewMI =
-		                    BuildMI(MBB, SetcIt, DebugLoc(), TII.get(NewSetcOpc))
-		                        .addReg(LinxISA::R0)
-		                        .addReg(OrigSrc)
-		                        .getInstr();
-		                (void)NewMI;
+			                MachineInstr *NewMI =
+			                    BuildMI(MBB, SetcIt, DebugLoc(), TII.get(NewSetcOpc))
+			                        .addReg(LinxISA::R0)
+			                        .addReg(OrigSrc)
+			                        .getInstr();
+			                NewMI->getOperand(1).setTargetFlags(
+			                    NewMI->getOperand(1).getTargetFlags() | LinxII::MO_SRCR_UW);
 
 			                SrlMI->eraseFromParent();
 			                SllMI->eraseFromParent();
@@ -2243,33 +3588,58 @@ public:
 			                EmittedImmSetc = true;
 			              }
 
-			              // Peephole: `and/or` feeding a nonzero branch against zero:
+			              // Peephole: `and/or` feeding a branch against zero:
 			              //   tmp = and/or x, y
-			              //   bne tmp, zero, label
+			              //   {bne,beq} tmp, zero, label
 			              // =>
-		              //   setc.and/or x, y
-		              //
-		              // and similarly for immediate ANDI/ORI:
-		              //   tmp = andi/ori x, imm
-		              //   bne tmp, zero, label
-		              // =>
-		              //   setc.andi/ori x, imm
-		              auto tryEmitLogicSetcNZ = [&]() -> bool {
-		                if (BrOpcForSetc != LinxISA::BNE)
+			              //   setc.and/or x, y
+			              //
+			              // and similarly for immediate ANDI/ORI:
+			              //   tmp = andi/ori x, imm
+			              //   {bne,beq} tmp, zero, label
+			              // =>
+			              //   setc.andi/ori x, imm
+		              auto tryEmitLogicSetcMask = [&]() -> bool {
+		                if (!linxEnableMaskSetcFold())
+		                  return false;
+		                if (BrOpcForSetc != LinxISA::BNE && BrOpcForSetc != LinxISA::BEQ)
 		                  return false;
 
-		                Register ZeroSide = Register();
 		                Register ValSide = Register();
-		                if (LHSReg == LinxISA::R0 && RHSReg != LinxISA::R0) {
-		                  ZeroSide = LHSReg;
+		                MachineInstr *ZeroDefMI = nullptr;
+		                if (LHSReg == LinxISA::R0 && RHSReg != LinxISA::R0)
 		                  ValSide = RHSReg;
-		                } else if (RHSReg == LinxISA::R0 && LHSReg != LinxISA::R0) {
-		                  ZeroSide = RHSReg;
+		                else if (RHSReg == LinxISA::R0 && LHSReg != LinxISA::R0)
 		                  ValSide = LHSReg;
-		                } else {
-		                  return false;
+		                else {
+		                  auto isZeroFromR0 = [&](Register Reg,
+		                                          MachineInstr *&DefMIOut) -> bool {
+		                    if (!Reg)
+		                      return false;
+		                    if (auto Imm =
+		                            getSingleUseImmFromZero(*Prev, Reg, DefMIOut))
+		                      return *Imm == 0;
+		                    return false;
+		                  };
+
+		                  MachineInstr *LZeroDefMI = nullptr;
+		                  MachineInstr *RZeroDefMI = nullptr;
+		                  const bool LZero = isZeroFromR0(LHSReg, LZeroDefMI);
+		                  const bool RZero = isZeroFromR0(RHSReg, RZeroDefMI);
+		                  if (LZero == RZero)
+		                    return false;
+		                  if (LZero) {
+		                    ValSide = RHSReg;
+		                    ZeroDefMI = LZeroDefMI;
+		                  } else {
+		                    ValSide = LHSReg;
+		                    ZeroDefMI = RZeroDefMI;
+		                  }
 		                }
-		                (void)ZeroSide;
+
+		                const bool NeedsInvert = (BrOpcForSetc == LinxISA::BEQ);
+		                if (NeedsInvert && !CondFallthroughBB)
+		                  return false;
 
 		                // Find defining instruction of ValSide (nearest preceding def).
 		                MachineInstr *DefMI = nullptr;
@@ -2345,6 +3715,12 @@ public:
 		                if (!hasSingleNonDbgUseInMBB(ValSide, Prev, DefMI))
 		                  return false;
 
+		                if (NeedsInvert) {
+		                  BrOpcForSetc = LinxISA::BNE;
+		                  SetcOpc = pickSetc(BrOpcForSetc);
+		                  TargetBB = CondFallthroughBB;
+		                }
+
 		                auto SetcIt = findSetcInsertPt(MBB, *Prev, SrcA, IsImm ? Register() : SrcB);
 		                if (IsImm) {
 		                  BuildMI(MBB, SetcIt, DebugLoc(), TII.get(NewSetcOpc))
@@ -2355,12 +3731,14 @@ public:
 		                      .addReg(SrcA)
 		                      .addReg(SrcB);
 		                }
+		                if (ZeroDefMI)
+		                  ZeroDefMI->eraseFromParent();
 		                DefMI->eraseFromParent();
 		                EmittedImmSetc = true;
 		                return true;
 		              };
 
-			              if (!EmittedImmSetc && !tryEmitLogicSetcNZ()) {
+			              if (!EmittedImmSetc && !tryEmitLogicSetcMask()) {
 			                auto SetcIt = findSetcInsertPt(MBB, *Prev, LHSReg, RHSReg);
 			                BuildMI(MBB, SetcIt, DebugLoc(), TII.get(SetcOpc))
 			                    .addReg(LHSReg)
@@ -2563,10 +3941,12 @@ public:
 	          }
 
 			          if (!EmittedImmSetc) {
-			            auto tryEmitZextWSetcUW = [&]() -> bool {
-			              if (Last->getOpcode() != LinxISA::BEQ &&
-			                  Last->getOpcode() != LinxISA::BNE)
-			                return false;
+				            auto tryEmitZextWSetcUW = [&]() -> bool {
+				              if (!linxEnableSetcSrcRTypeFlags())
+				                return false;
+				              if (Last->getOpcode() != LinxISA::BEQ &&
+				                  Last->getOpcode() != LinxISA::BNE)
+				                return false;
 			              if ((LHSReg == LinxISA::R0) == (RHSReg == LinxISA::R0))
 			                return false;
 
@@ -2582,12 +3962,13 @@ public:
 			                  (Last->getOpcode() == LinxISA::BEQ) ? LinxISA::SETC_EQ
 			                                                     : LinxISA::SETC_NE;
 			              auto SetcIt = findSetcInsertPt(MBB, *Last, LinxISA::R0, OrigSrc);
-				              MachineInstr *NewMI =
-				                  BuildMI(MBB, SetcIt, DebugLoc(), TII.get(NewSetcOpc))
-				                      .addReg(LinxISA::R0)
-				                      .addReg(OrigSrc)
-				                      .getInstr();
-				              (void)NewMI;
+			              MachineInstr *NewMI =
+			                  BuildMI(MBB, SetcIt, DebugLoc(), TII.get(NewSetcOpc))
+			                      .addReg(LinxISA::R0)
+			                      .addReg(OrigSrc)
+			                      .getInstr();
+			              NewMI->getOperand(1).setTargetFlags(
+			                  NewMI->getOperand(1).getTargetFlags() | LinxII::MO_SRCR_UW);
 
 			              SrlMI->eraseFromParent();
 			              SllMI->eraseFromParent();
@@ -2597,17 +3978,42 @@ public:
 			            if (tryEmitZextWSetcUW())
 			              EmittedImmSetc = true;
 
-			            auto tryEmitLogicSetcNZ = [&]() -> bool {
-			              if (Last->getOpcode() != LinxISA::BNE)
+			            auto tryEmitLogicSetcMask = [&]() -> bool {
+		              if (!linxEnableMaskSetcFold())
+			                return false;
+		              if (Last->getOpcode() != LinxISA::BNE)
 			                return false;
 
 		              Register ValSide = Register();
+		              MachineInstr *ZeroDefMI = nullptr;
 		              if (LHSReg == LinxISA::R0 && RHSReg != LinxISA::R0)
 		                ValSide = RHSReg;
 		              else if (RHSReg == LinxISA::R0 && LHSReg != LinxISA::R0)
 		                ValSide = LHSReg;
-		              else
-		                return false;
+		              else {
+		                auto isZeroFromR0 = [&](Register Reg,
+		                                        MachineInstr *&DefMIOut) -> bool {
+		                  if (!Reg)
+		                    return false;
+		                  if (auto Imm =
+		                          getSingleUseImmFromZero(*Last, Reg, DefMIOut))
+		                    return *Imm == 0;
+		                  return false;
+		                };
+		                MachineInstr *LZeroDefMI = nullptr;
+		                MachineInstr *RZeroDefMI = nullptr;
+		                const bool LZero = isZeroFromR0(LHSReg, LZeroDefMI);
+		                const bool RZero = isZeroFromR0(RHSReg, RZeroDefMI);
+		                if (LZero == RZero)
+		                  return false;
+		                if (LZero) {
+		                  ValSide = RHSReg;
+		                  ZeroDefMI = LZeroDefMI;
+		                } else {
+		                  ValSide = LHSReg;
+		                  ZeroDefMI = RZeroDefMI;
+		                }
+		              }
 
 		              MachineInstr *DefMI = nullptr;
 		              for (auto It = Last->getIterator(); It != MBB.begin();) {
@@ -2688,11 +4094,13 @@ public:
 		                    .addReg(SrcA)
 		                    .addReg(SrcB);
 		              }
+		              if (ZeroDefMI)
+		                ZeroDefMI->eraseFromParent();
 		              DefMI->eraseFromParent();
 		              return true;
 		            };
 
-			            if (!EmittedImmSetc && !tryEmitLogicSetcNZ()) {
+			            if (!EmittedImmSetc && !tryEmitLogicSetcMask()) {
 			              auto SetcIt = findSetcInsertPt(MBB, *Last, LHSReg, RHSReg);
 			              BuildMI(MBB, SetcIt, DebugLoc(), TII.get(SetcOpc))
 			                  .addReg(LHSReg)
@@ -2840,10 +4248,14 @@ public:
 		            (Opc == LinxISA::CSETC_EQ || Opc == LinxISA::SETC_EQ);
 		        const bool IsNe =
 		            (Opc == LinxISA::CSETC_NE || Opc == LinxISA::SETC_NE);
-		        if (!IsEq && !IsNe) {
-		          ++It;
-		          continue;
-		        }
+			        if (!IsEq && !IsNe) {
+			          ++It;
+			          continue;
+			        }
+			        if (!linxEnableSetcSrcRTypeFlags()) {
+			          ++It;
+			          continue;
+			        }
 
 		        if (MI.getNumOperands() < 2 || !MI.getOperand(0).isReg() ||
 		            !MI.getOperand(1).isReg()) {
@@ -2877,7 +4289,8 @@ public:
 		                .addReg(LinxISA::R0)
 		                .addReg(OrigSrc)
 		                .getInstr();
-		        (void)NewMI;
+		        NewMI->getOperand(1).setTargetFlags(
+		            NewMI->getOperand(1).getTargetFlags() | LinxII::MO_SRCR_UW);
 
 		        auto NextIt = std::next(It);
 		        MI.eraseFromParent();
@@ -2895,12 +4308,16 @@ public:
 		        }
 
 		        const unsigned Opc = MI.getOpcode();
-		        const bool IsEq = (Opc == LinxISA::CMPEQ);
-		        const bool IsNe = (Opc == LinxISA::CMPNE);
-		        if (!IsEq && !IsNe) {
-		          ++It;
-		          continue;
-		        }
+			        const bool IsEq = (Opc == LinxISA::CMPEQ);
+			        const bool IsNe = (Opc == LinxISA::CMPNE);
+			        if (!IsEq && !IsNe) {
+			          ++It;
+			          continue;
+			        }
+			        if (!linxEnableSetcSrcRTypeFlags()) {
+			          ++It;
+			          continue;
+			        }
 
 		        if (MI.getNumOperands() < 3 || !MI.getOperand(1).isReg() ||
 		            !MI.getOperand(2).isReg()) {
@@ -2930,6 +4347,8 @@ public:
 
 		        MI.getOperand(1).setReg(LinxISA::R0);
 		        MI.getOperand(2).setReg(OrigSrc);
+		        MI.getOperand(2).setTargetFlags(
+		            MI.getOperand(2).getTargetFlags() | LinxII::MO_SRCR_UW);
 
 		        auto NextIt = std::next(It);
 		        SrlMI->eraseFromParent();
@@ -3555,20 +4974,12 @@ public:
                        .getInstr();
         break;
       case ExitKind::Direct:
-        if (CallTargetOp) {
-          BStartMI = BuildMI(MBB, InsertBStart, DebugLoc(),
-                             TII.get(LinxISA::BSTART_STD_DIRECT))
-                         .add(*CallTargetOp)
-                         .getInstr();
-        } else {
-          if (!TargetBB)
-            report_fatal_error("Linx: missing direct branch target");
+        if (TargetBB)
           TargetBB->setLabelMustBeEmitted();
-          BStartMI = BuildMI(MBB, InsertBStart, DebugLoc(),
-                             TII.get(LinxISA::BSTART_STD_DIRECT))
-                         .addMBB(TargetBB)
-                         .getInstr();
-        }
+        BStartMI = BuildMI(MBB, InsertBStart, DebugLoc(),
+                           TII.get(LinxISA::BSTART_STD_DIRECT))
+                       .addMBB(TargetBB)
+                       .getInstr();
         break;
       case ExitKind::Cond:
         if (TargetBB)
@@ -3819,6 +5230,146 @@ public:
           Changed = true;
         }
 
+        if (linxEnableT1Motion()) {
+          auto isPureSingleDefCandidate = [&](const MachineInstr &MI) -> bool {
+            if (MI.isDebugInstr() || isMarkerInstr(MI) || MI.isCFIInstruction())
+              return false;
+            if (MI.isInlineAsm() || MI.isCall() || MI.isTerminator())
+              return false;
+            if (MI.mayLoadOrStore() || MI.hasUnmodeledSideEffects())
+              return false;
+
+            switch (MI.getOpcode()) {
+            case LinxISA::ADDrr:
+            case LinxISA::SUBrr:
+            case LinxISA::ANDrr:
+            case LinxISA::ORrr:
+            case LinxISA::XORrr:
+            case LinxISA::ADDWrr:
+            case LinxISA::SUBWrr:
+            case LinxISA::ANDWrr:
+            case LinxISA::ORWrr:
+            case LinxISA::XORWrr:
+            case LinxISA::ADDIri:
+            case LinxISA::SUBIri:
+            case LinxISA::ANDIri:
+            case LinxISA::ORIri:
+            case LinxISA::XORIri:
+            case LinxISA::ADDIWri:
+            case LinxISA::SUBIWri:
+            case LinxISA::ANDIWri:
+            case LinxISA::ORIWri:
+            case LinxISA::XORIWri:
+            case LinxISA::SLLIri:
+            case LinxISA::SRLIri:
+            case LinxISA::SRAIri:
+            case LinxISA::SLLIWri:
+            case LinxISA::SRLIWri:
+            case LinxISA::SRAIWri:
+              return true;
+            default:
+              return false;
+            }
+          };
+
+          auto getSingleDefReg = [&](MachineInstr &MI) -> Register {
+            Register DefReg;
+            for (const MachineOperand &MO : MI.operands()) {
+              if (!MO.isReg() || MO.isImplicit() || !MO.isDef())
+                continue;
+              if (!MO.getReg().isPhysical())
+                return Register();
+              if (DefReg)
+                return Register();
+              DefReg = MO.getReg();
+            }
+            return DefReg;
+          };
+
+          auto findSingleUseMI = [&](MachineInstr &DefMI,
+                                     Register DefReg) -> MachineInstr * {
+            MachineInstr *UseMI = nullptr;
+            for (auto UI = std::next(DefMI.getIterator()), UE = MBB.instr_end();
+                 UI != UE; ++UI) {
+              MachineInstr &MI = *UI;
+              if (MI.isDebugInstr() || isMarkerInstr(MI))
+                continue;
+              for (const MachineOperand &MO : MI.operands()) {
+                if (!MO.isReg() || MO.isImplicit() || MO.isDef())
+                  continue;
+                if (MO.getReg() != DefReg)
+                  continue;
+                if (UseMI && UseMI != &MI)
+                  return nullptr;
+                UseMI = &MI;
+                break;
+              }
+            }
+            return UseMI;
+          };
+
+          auto canSinkBeforeUse = [&](MachineInstr &DefMI, MachineInstr &UseMI,
+                                      Register DefReg) -> bool {
+            if (&DefMI == &UseMI)
+              return false;
+            if (!hasSingleNonDbgUseInMBB(DefReg, &UseMI, &DefMI))
+              return false;
+            if (isPhysRegLiveOutOfBlock(DefReg))
+              return false;
+
+            SmallVector<Register, 4> SrcRegs;
+            for (const MachineOperand &MO : DefMI.operands()) {
+              if (!MO.isReg() || MO.isImplicit() || MO.isDef())
+                continue;
+              Register R = MO.getReg();
+              if (R)
+                SrcRegs.push_back(R);
+            }
+
+            for (auto It = std::next(DefMI.getIterator()); &*It != &UseMI; ++It) {
+              MachineInstr &Mid = *It;
+              if (Mid.isDebugInstr() || Mid.isCFIInstruction())
+                continue;
+              if (isMarkerInstr(Mid))
+                return false;
+              if (Mid.isInlineAsm() || Mid.isCall() || Mid.isTerminator())
+                return false;
+              if (Mid.mayLoadOrStore() || Mid.hasUnmodeledSideEffects())
+                return false;
+              if (Mid.readsRegister(DefReg, &TRI) || Mid.definesRegister(DefReg, &TRI))
+                return false;
+              for (Register SrcReg : SrcRegs)
+                if (SrcReg && Mid.definesRegister(SrcReg, &TRI))
+                  return false;
+            }
+            return true;
+          };
+
+          SmallPtrSet<MachineInstr *, 8> BlockedUseMIs;
+          for (auto It = MBB.begin(), E = MBB.end(); It != E;) {
+            MachineInstr &MI = *It;
+            ++It;
+            if (!isPureSingleDefCandidate(MI))
+              continue;
+
+            Register DefReg = getSingleDefReg(MI);
+            if (!DefReg)
+              continue;
+
+            MachineInstr *UseMI = findSingleUseMI(MI, DefReg);
+            if (!UseMI || std::next(MI.getIterator()) == UseMI->getIterator())
+              continue;
+            if (BlockedUseMIs.contains(UseMI))
+              continue;
+            if (!canSinkBeforeUse(MI, *UseMI, DefReg))
+              continue;
+
+            MI.moveBefore(UseMI);
+            BlockedUseMIs.insert(UseMI);
+            Changed = true;
+          }
+        }
+
 		      auto isCandidatePhysReg = [&](Register Reg) -> bool {
 		        if (!Reg || !Reg.isPhysical())
 		          return false;
@@ -3949,6 +5500,13 @@ public:
               return isInt<5>(MI.getOperand(2).getImm());
             return false;
           }
+          case LinxISA::SLLIri:
+          case LinxISA::SRLIri:
+            if (!linxEnableCShift16())
+              return false;
+            if (MI.getNumOperands() >= 3 && MI.getOperand(2).isImm())
+              return isUInt<5>(MI.getOperand(2).getImm());
+            return false;
           default:
             return false;
           }
@@ -4349,6 +5907,36 @@ public:
             std::prev(InsertBStop)->getOpcode() != LinxISA::BSTOP) {
           BuildMI(MBB, InsertBStop, DebugLoc(), TII.get(LinxISA::BSTOP));
           Changed = true;
+        }
+      }
+    }
+
+    // Enforce decoupled SIMT body contract: body-style headers must carry
+    // a B.TEXT pointer before the next marker.
+    for (MachineBasicBlock &MBB : MF) {
+      for (auto It = MBB.begin(), E = MBB.end(); It != E; ++It) {
+        if (!isSimtBodyHeaderOpcode(It->getOpcode()))
+          continue;
+
+        bool HasBodyPtr = false;
+        auto J = std::next(It);
+        for (; J != E; ++J) {
+          if (J->isDebugInstr())
+            continue;
+          if (J->getOpcode() == LinxISA::B_TEXT) {
+            HasBodyPtr = true;
+            break;
+          }
+          if (isMarkerInstr(*J) || isFrameMacroInstr(*J))
+            break;
+          if (!isHeaderDescriptorOpcode(J->getOpcode()))
+            break;
+        }
+
+        if (!HasBodyPtr) {
+          report_fatal_error(
+              "Linx: BSTART.{MPAR,MSEQ,VPAR,VSEQ} must include B.TEXT in the "
+              "decoupled header");
         }
       }
     }

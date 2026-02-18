@@ -17,95 +17,144 @@ using namespace clang::CodeGen;
 llvm::Value *CodeGenFunction::EmitLinxISABuiltinExpr(unsigned BuiltinID,
                                                      const CallExpr *E,
                                                      ReturnValueSlot) {
+  auto castToI32 = [&](llvm::Value *V) {
+    return Builder.CreateIntCast(V, Builder.getInt32Ty(), /*isSigned=*/false);
+  };
+  auto castToI64 = [&](llvm::Value *V) {
+    return Builder.CreateIntCast(V, Builder.getInt64Ty(), /*isSigned=*/false);
+  };
+
   switch (BuiltinID) {
-  case LinxISA::BI__builtin_linx_tma_tload: {
+  case LinxISA::BI__builtin_linx_tile_tload: {
     llvm::Value *Base = EmitScalarExpr(E->getArg(0));
-    llvm::Value *Size = EmitScalarExpr(E->getArg(1));
-    Size = Builder.CreateIntCast(Size, Builder.getInt32Ty(), /*isSigned=*/false);
-
-    llvm::Type *TileTy = ConvertType(E->getType());
-    llvm::Function *F =
-        CGM.getIntrinsic(llvm::Intrinsic::linx_tma_tload, {TileTy});
-    return Builder.CreateCall(F, {Base, Size}, "linx.tload");
-  }
-  case LinxISA::BI__builtin_linx_tma_tstore: {
-    llvm::Value *Base = EmitScalarExpr(E->getArg(0));
-    llvm::Value *Tile = EmitScalarExpr(E->getArg(1));
-    llvm::Value *Size = EmitScalarExpr(E->getArg(2));
-    Size = Builder.CreateIntCast(Size, Builder.getInt32Ty(), /*isSigned=*/false);
-
-    llvm::Function *F =
-        CGM.getIntrinsic(llvm::Intrinsic::linx_tma_tstore, {Tile->getType()});
-    return Builder.CreateCall(F, {Base, Tile, Size});
-  }
-  case LinxISA::BI__builtin_linx_tma_tload_desc: {
-    llvm::Value *Base = EmitScalarExpr(E->getArg(0));
-    llvm::Value *Layout = EmitScalarExpr(E->getArg(1));
-    llvm::Value *LB0 = EmitScalarExpr(E->getArg(2));
-    llvm::Value *LB1 = EmitScalarExpr(E->getArg(3));
-    llvm::Value *Size = EmitScalarExpr(E->getArg(4));
-    llvm::Type *I32 = Builder.getInt32Ty();
-    Layout = Builder.CreateIntCast(Layout, I32, /*isSigned=*/false);
-    LB0 = Builder.CreateIntCast(LB0, I32, /*isSigned=*/false);
-    LB1 = Builder.CreateIntCast(LB1, I32, /*isSigned=*/false);
-    Size = Builder.CreateIntCast(Size, I32, /*isSigned=*/false);
+    llvm::Value *Size = castToI32(EmitScalarExpr(E->getArg(1)));
+    llvm::Value *DType = castToI32(EmitScalarExpr(E->getArg(2)));
+    llvm::Value *Layout = castToI32(EmitScalarExpr(E->getArg(3)));
+    llvm::Value *LB0 = castToI32(EmitScalarExpr(E->getArg(4)));
+    llvm::Value *LB1 = castToI32(EmitScalarExpr(E->getArg(5)));
+    llvm::Value *Stride = castToI64(EmitScalarExpr(E->getArg(6)));
 
     llvm::Type *TileTy = ConvertType(E->getType());
     llvm::Function *F =
         CGM.getIntrinsic(llvm::Intrinsic::linx_tma_tload_desc, {TileTy});
-    return Builder.CreateCall(F, {Base, Layout, LB0, LB1, Size},
-                              "linx.tload.desc");
+    return Builder.CreateCall(F, {Base, DType, Layout, LB0, LB1, Size, Stride},
+                              "linx.tile.tload");
   }
-  case LinxISA::BI__builtin_linx_tma_tstore_desc: {
+  case LinxISA::BI__builtin_linx_tile_tstore: {
     llvm::Value *Base = EmitScalarExpr(E->getArg(0));
     llvm::Value *Tile = EmitScalarExpr(E->getArg(1));
-    llvm::Value *Layout = EmitScalarExpr(E->getArg(2));
-    llvm::Value *LB0 = EmitScalarExpr(E->getArg(3));
-    llvm::Value *LB1 = EmitScalarExpr(E->getArg(4));
-    llvm::Value *Size = EmitScalarExpr(E->getArg(5));
-    llvm::Type *I32 = Builder.getInt32Ty();
-    Layout = Builder.CreateIntCast(Layout, I32, /*isSigned=*/false);
-    LB0 = Builder.CreateIntCast(LB0, I32, /*isSigned=*/false);
-    LB1 = Builder.CreateIntCast(LB1, I32, /*isSigned=*/false);
-    Size = Builder.CreateIntCast(Size, I32, /*isSigned=*/false);
+    llvm::Value *Size = castToI32(EmitScalarExpr(E->getArg(2)));
+    llvm::Value *DType = castToI32(EmitScalarExpr(E->getArg(3)));
+    llvm::Value *Layout = castToI32(EmitScalarExpr(E->getArg(4)));
+    llvm::Value *LB0 = castToI32(EmitScalarExpr(E->getArg(5)));
+    llvm::Value *LB1 = castToI32(EmitScalarExpr(E->getArg(6)));
+    llvm::Value *Stride = castToI64(EmitScalarExpr(E->getArg(7)));
 
     llvm::Function *F =
         CGM.getIntrinsic(llvm::Intrinsic::linx_tma_tstore_desc,
                          {Tile->getType()});
-    return Builder.CreateCall(F, {Base, Tile, Layout, LB0, LB1, Size});
+    return Builder.CreateCall(F,
+                              {Base, Tile, DType, Layout, LB0, LB1, Size,
+                               Stride});
+  }
+  case LinxISA::BI__builtin_linx_tile_tmov: {
+    llvm::Value *Src = EmitScalarExpr(E->getArg(0));
+    llvm::Value *Mode = castToI32(EmitScalarExpr(E->getArg(1)));
+    llvm::Value *Size = castToI32(EmitScalarExpr(E->getArg(2)));
+    llvm::Value *DType = castToI32(EmitScalarExpr(E->getArg(3)));
+    llvm::Value *Layout = castToI64(EmitScalarExpr(E->getArg(4)));
+    llvm::Value *HasLayout = EmitScalarExpr(E->getArg(5));
+    if (HasLayout->getType() != Builder.getInt1Ty())
+      HasLayout =
+          Builder.CreateIntCast(HasLayout, Builder.getInt1Ty(), false);
+
+    llvm::Function *F = CGM.getIntrinsic(
+        llvm::Intrinsic::linx_tile_tmov_legacy, {Src->getType()});
+    return Builder.CreateCall(F, {Src, Mode, Size, DType, Layout, HasLayout},
+                              "linx.tile.tmov");
   }
   case LinxISA::BI__builtin_linx_cube_mamulb: {
     llvm::Value *A = EmitScalarExpr(E->getArg(0));
     llvm::Value *B = EmitScalarExpr(E->getArg(1));
-    llvm::Value *M = EmitScalarExpr(E->getArg(2));
-    llvm::Value *N = EmitScalarExpr(E->getArg(3));
-    llvm::Value *K = EmitScalarExpr(E->getArg(4));
+    llvm::Value *M = castToI32(EmitScalarExpr(E->getArg(2)));
+    llvm::Value *N = castToI32(EmitScalarExpr(E->getArg(3)));
+    llvm::Value *K = castToI32(EmitScalarExpr(E->getArg(4)));
 
-    llvm::Type *I32 = Builder.getInt32Ty();
-    M = Builder.CreateIntCast(M, I32, /*isSigned=*/false);
-    N = Builder.CreateIntCast(N, I32, /*isSigned=*/false);
-    K = Builder.CreateIntCast(K, I32, /*isSigned=*/false);
-
-    llvm::Function *F =
-        CGM.getIntrinsic(llvm::Intrinsic::linx_cube_mamulb, {A->getType()});
+    llvm::Function *F = CGM.getIntrinsic(
+        llvm::Intrinsic::linx_cube_mamulb_legacy, {A->getType()});
     return Builder.CreateCall(F, {A, B, M, N, K}, "linx.mamulb");
   }
   case LinxISA::BI__builtin_linx_cube_mamulb_acc: {
     llvm::Value *Acc = EmitScalarExpr(E->getArg(0));
     llvm::Value *A = EmitScalarExpr(E->getArg(1));
     llvm::Value *B = EmitScalarExpr(E->getArg(2));
-    llvm::Value *M = EmitScalarExpr(E->getArg(3));
-    llvm::Value *N = EmitScalarExpr(E->getArg(4));
-    llvm::Value *K = EmitScalarExpr(E->getArg(5));
+    llvm::Value *M = castToI32(EmitScalarExpr(E->getArg(3)));
+    llvm::Value *N = castToI32(EmitScalarExpr(E->getArg(4)));
+    llvm::Value *K = castToI32(EmitScalarExpr(E->getArg(5)));
 
-    llvm::Type *I32 = Builder.getInt32Ty();
-    M = Builder.CreateIntCast(M, I32, /*isSigned=*/false);
-    N = Builder.CreateIntCast(N, I32, /*isSigned=*/false);
-    K = Builder.CreateIntCast(K, I32, /*isSigned=*/false);
-
-    llvm::Function *F = CGM.getIntrinsic(llvm::Intrinsic::linx_cube_mamulb_acc,
-                                         {Acc->getType()});
+    llvm::Function *F = CGM.getIntrinsic(
+        llvm::Intrinsic::linx_cube_mamulb_acc_legacy, {Acc->getType()});
     return Builder.CreateCall(F, {Acc, A, B, M, N, K}, "linx.mamulb.acc");
+  }
+  case LinxISA::BI__builtin_linx_cube_acccvt: {
+    llvm::Value *Acc = EmitScalarExpr(E->getArg(0));
+    llvm::Value *Size = castToI32(EmitScalarExpr(E->getArg(1)));
+    llvm::Value *DType = castToI32(EmitScalarExpr(E->getArg(2)));
+    llvm::Value *QArg0 = castToI64(EmitScalarExpr(E->getArg(3)));
+    llvm::Value *QArg1 = castToI64(EmitScalarExpr(E->getArg(4)));
+
+    llvm::Function *F = CGM.getIntrinsic(
+        llvm::Intrinsic::linx_cube_acccvt_legacy, {Acc->getType()});
+    return Builder.CreateCall(F, {Acc, Size, DType, QArg0, QArg1},
+                              "linx.acccvt");
+  }
+  case LinxISA::BI__builtin_linx_tepl_unary: {
+    llvm::Value *Src = EmitScalarExpr(E->getArg(0));
+    llvm::Value *TileOp = castToI32(EmitScalarExpr(E->getArg(1)));
+    llvm::Value *Size = castToI32(EmitScalarExpr(E->getArg(2)));
+    llvm::Value *DType = castToI32(EmitScalarExpr(E->getArg(3)));
+
+    llvm::Function *F = CGM.getIntrinsic(
+        llvm::Intrinsic::linx_tepl_unary_legacy, {Src->getType()});
+    return Builder.CreateCall(F, {Src, TileOp, Size, DType}, "linx.tepl.u");
+  }
+  case LinxISA::BI__builtin_linx_tepl_binary: {
+    llvm::Value *A = EmitScalarExpr(E->getArg(0));
+    llvm::Value *B = EmitScalarExpr(E->getArg(1));
+    llvm::Value *TileOp = castToI32(EmitScalarExpr(E->getArg(2)));
+    llvm::Value *Size = castToI32(EmitScalarExpr(E->getArg(3)));
+    llvm::Value *DType = castToI32(EmitScalarExpr(E->getArg(4)));
+
+    llvm::Function *F = CGM.getIntrinsic(
+        llvm::Intrinsic::linx_tepl_binary_legacy, {A->getType()});
+    return Builder.CreateCall(F, {A, B, TileOp, Size, DType},
+                              "linx.tepl.b");
+  }
+  case LinxISA::BI__builtin_linx_tepl_binary_scalar: {
+    llvm::Value *A = EmitScalarExpr(E->getArg(0));
+    llvm::Value *Scalar = castToI64(EmitScalarExpr(E->getArg(1)));
+    llvm::Value *TileOp = castToI32(EmitScalarExpr(E->getArg(2)));
+    llvm::Value *Size = castToI32(EmitScalarExpr(E->getArg(3)));
+    llvm::Value *DType = castToI32(EmitScalarExpr(E->getArg(4)));
+    llvm::Value *Mode = castToI32(EmitScalarExpr(E->getArg(5)));
+
+    llvm::Function *F = CGM.getIntrinsic(
+        llvm::Intrinsic::linx_tepl_binary_scalar_legacy, {A->getType()});
+    return Builder.CreateCall(F, {A, Scalar, TileOp, Size, DType, Mode},
+                              "linx.tepl.bs");
+  }
+  case LinxISA::BI__builtin_linx_tepl_splat: {
+    llvm::Value *Scalar = castToI64(EmitScalarExpr(E->getArg(0)));
+    llvm::Value *TileOp = castToI32(EmitScalarExpr(E->getArg(1)));
+    llvm::Value *Size = castToI32(EmitScalarExpr(E->getArg(2)));
+    llvm::Value *DType = castToI32(EmitScalarExpr(E->getArg(3)));
+    llvm::Value *Mode = castToI32(EmitScalarExpr(E->getArg(4)));
+
+    llvm::Type *TileTy = ConvertType(E->getType());
+    llvm::Function *F = CGM.getIntrinsic(
+        llvm::Intrinsic::linx_tepl_splat_legacy, {TileTy});
+    return Builder.CreateCall(F, {Scalar, TileOp, Size, DType, Mode},
+                              "linx.tepl.splat");
   }
   case LinxISA::BI__builtin_linx_vblock_launch: {
     llvm::Value *VKind = EmitScalarExpr(E->getArg(0));
@@ -115,33 +164,33 @@ llvm::Value *CodeGenFunction::EmitLinxISABuiltinExpr(unsigned BuiltinID,
     llvm::Value *Dim2 = EmitScalarExpr(E->getArg(4));
     llvm::Value *Attr = EmitScalarExpr(E->getArg(5));
 
-    VKind = Builder.CreateIntCast(VKind, Builder.getInt32Ty(), /*isSigned=*/false);
-    Dim0 = Builder.CreateIntCast(Dim0, Builder.getInt64Ty(), /*isSigned=*/false);
-    Dim1 = Builder.CreateIntCast(Dim1, Builder.getInt64Ty(), /*isSigned=*/false);
-    Dim2 = Builder.CreateIntCast(Dim2, Builder.getInt64Ty(), /*isSigned=*/false);
-    Attr = Builder.CreateIntCast(Attr, Builder.getInt32Ty(), /*isSigned=*/false);
+    VKind = castToI32(VKind);
+    Dim0 = castToI64(Dim0);
+    Dim1 = castToI64(Dim1);
+    Dim2 = castToI64(Dim2);
+    Attr = castToI32(Attr);
 
     llvm::Function *F = CGM.getIntrinsic(llvm::Intrinsic::linx_vblock_launch);
-    return Builder.CreateCall(F, {VKind, Body, Dim0, Dim1, Dim2, Attr});
+    llvm::Value *Z = Builder.getInt64(0);
+    return Builder.CreateCall(F, {VKind, Body, Dim0, Dim1, Dim2, Attr,
+                                  Z, Z, Z, Z, Z, Z});
   }
   case LinxISA::BI__builtin_linx_vpar_tadd: {
     llvm::Value *A = EmitScalarExpr(E->getArg(0));
     llvm::Value *B = EmitScalarExpr(E->getArg(1));
-    llvm::Value *Size = EmitScalarExpr(E->getArg(2));
-    Size = Builder.CreateIntCast(Size, Builder.getInt32Ty(), /*isSigned=*/false);
+    llvm::Value *Size = castToI32(EmitScalarExpr(E->getArg(2)));
 
     llvm::Function *F =
-        CGM.getIntrinsic(llvm::Intrinsic::linx_vpar_tadd, {A->getType()});
+        CGM.getIntrinsic(llvm::Intrinsic::linx_vpar_tadd_legacy, {A->getType()});
     return Builder.CreateCall(F, {A, B, Size}, "linx.vpar.tadd");
   }
   case LinxISA::BI__builtin_linx_vpar_tsub: {
     llvm::Value *A = EmitScalarExpr(E->getArg(0));
     llvm::Value *B = EmitScalarExpr(E->getArg(1));
-    llvm::Value *Size = EmitScalarExpr(E->getArg(2));
-    Size = Builder.CreateIntCast(Size, Builder.getInt32Ty(), /*isSigned=*/false);
+    llvm::Value *Size = castToI32(EmitScalarExpr(E->getArg(2)));
 
     llvm::Function *F =
-        CGM.getIntrinsic(llvm::Intrinsic::linx_vpar_tsub, {A->getType()});
+        CGM.getIntrinsic(llvm::Intrinsic::linx_vpar_tsub_legacy, {A->getType()});
     return Builder.CreateCall(F, {A, B, Size}, "linx.vpar.tsub");
   }
   default:

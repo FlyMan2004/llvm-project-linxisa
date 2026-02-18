@@ -48,6 +48,7 @@ public:
   }
   bool isPICDefaultForced() const override { return false; }
   bool SupportsProfiling() const override { return false; }
+  const char *getDefaultLinker() const override;
 
   StringRef getOSLibName() const override { return "baremetal"; }
 

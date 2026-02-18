@@ -181,6 +181,7 @@ namespace Intrinsic {
       AMX,
       PPCQuad,
       AArch64Svcount,
+      LinxTile,
     } Kind;
 
     union {
