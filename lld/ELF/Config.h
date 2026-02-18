@@ -365,6 +365,7 @@ struct Config {
   std::optional<uint64_t> randomizeSectionPadding;
   bool rejectMismatch;
   bool relax;
+  bool linxRelaxSeqFusion;
   bool relaxGP;
   bool relocatable;
   bool resolveGroups;

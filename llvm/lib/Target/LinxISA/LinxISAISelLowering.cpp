@@ -1554,7 +1554,6 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
   for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
     const CCValAssign &VA = ArgLocs[i];
     MVT LocVT = VA.getLocVT();
-    MVT ValVT = VA.getValVT();
 
     SDValue V;
     if (VA.isRegLoc()) {
@@ -1614,7 +1613,6 @@ static SDValue lowerCallResult(SDValue Chain, SDValue InGlue,
 
   for (const CCValAssign &VA : RVLocs) {
     MVT LocVT = VA.getLocVT();
-    MVT ValVT = VA.getValVT();
 
     SDValue Copy = DAG.getCopyFromReg(Chain, DL, VA.getLocReg(), LocVT, InGlue);
     SDValue V = Copy.getValue(0);
@@ -1633,8 +1631,9 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
   SelectionDAG &DAG = CLI.DAG;
   SDLoc DL(CLI.DL);
 
-  // Bring-up: do not attempt tail call lowering.
-  CLI.IsTailCall = false;
+  const bool IsMustTail = CLI.IsTailCall && CLI.CB && CLI.CB->isMustTailCall();
+  // Tail-call rollout is musttail-first for Linx.
+  CLI.IsTailCall = IsMustTail;
 
   SDValue Chain = CLI.Chain;
   SDValue Callee = CLI.Callee;
@@ -1657,7 +1656,17 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
   unsigned NumBytes = CCInfo.getStackSize();
   // Keep the stack aligned at call boundaries.
   NumBytes = alignTo(NumBytes, 16u);
-  Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
+  const bool UseTailCall = CLI.IsTailCall;
+  if (UseTailCall) {
+    if (NumBytes != 0) {
+      report_fatal_error("Linx: musttail with stack arguments is not supported");
+    }
+    if (IsVarArg) {
+      report_fatal_error("Linx: musttail varargs calls are not supported");
+    }
+  } else {
+    Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, DL);
+  }
 
   SmallVector<std::pair<unsigned, SDValue>, 8> RegsToPass;
   SmallVector<SDValue, 16> MemOpChains;
@@ -1676,6 +1685,8 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
     }
 
     assert(VA.isMemLoc() && "Unknown call argument location");
+    if (UseTailCall)
+      report_fatal_error("Linx: musttail with memory argument location is not supported");
 
     if (!StackPtr.getNode())
       StackPtr = DAG.getCopyFromReg(Chain, DL, LinxISA::R1, PtrVT);
@@ -1726,9 +1737,15 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
   if (InGlue.getNode())
     Ops.push_back(InGlue);
 
-  MachineSDNode *Call = DAG.getMachineNode(LinxISA::PSEUDO_CALL, DL, NodeTys, Ops);
+  const unsigned CallOpc =
+      UseTailCall ? LinxISA::PSEUDO_TAILCALL : LinxISA::PSEUDO_CALL;
+  MachineSDNode *Call = DAG.getMachineNode(CallOpc, DL, NodeTys, Ops);
   Chain = SDValue(Call, 0);
   InGlue = SDValue(Call, 1);
+
+  if (UseTailCall) {
+    return Chain;
+  }
 
   Chain = DAG.getCALLSEQ_END(Chain, NumBytes, 0, InGlue, DL);
   InGlue = Chain.getValue(1);

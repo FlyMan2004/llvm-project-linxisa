@@ -423,6 +423,9 @@ defm relax_gp: BB<"relax-gp",
   "Enable global pointer relaxation",
   "Disable global pointer relaxation (default)">;
 
+def linx_relax_seq_fusion: F<"linx-relax-seq-fusion">,
+  HelpText<"Enable experimental Linx relaxation sequence fusion">;
+
 defm remap_inputs: EEq<"remap-inputs",
   "Remap input files matching <from-glob> to <to-file>">,
   MetaVarName<"<from-glob>=<to-file>">;

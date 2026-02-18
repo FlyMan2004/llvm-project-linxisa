@@ -1021,6 +1021,11 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       } else {
         LastTileHeader = LastTileHeaderKind::None;
       }
+
+      LastParTileOp = ParStateOp;
+      LastParTileOpValid = true;
+      printAnnotation(OS, Annot);
+      return;
     }
 
     if (!Alias.empty()) {

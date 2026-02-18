@@ -6,10 +6,13 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "OutputSections.h"
 #include "Symbols.h"
 #include "Target.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/Support/Endian.h"
+#include <cstring>
+#include <optional>
 
 using namespace llvm;
 using namespace llvm::object;
@@ -194,6 +197,251 @@ static uint64_t encodeHLPcr29Store(Ctx &ctx, uint8_t *loc, int64_t value,
   return patch;
 }
 
+static uint64_t read48le(const uint8_t *loc) {
+  uint64_t v = 0;
+  for (unsigned i = 0; i < 6; ++i)
+    v |= static_cast<uint64_t>(loc[i]) << (i * 8);
+  return v;
+}
+
+static bool isEvenUnsignedN(int64_t v, unsigned bitsAfterShift) {
+  if (v < 0 || (v & 1))
+    return false;
+  return isUIntN(bitsAfterShift, static_cast<uint64_t>(v >> 1));
+}
+
+// Internal marker used by Linx relaxation to rewrite a relocation into
+// R_LINX_NONE while still participating in section-shrink accounting.
+static constexpr RelType INTERNAL_R_LINX_REMOVE =
+    static_cast<RelType>(0x80000000u);
+
+struct SeqFusionMatch {
+  RelType newType;
+  uint32_t newInsnBits;
+};
+
+static std::optional<SeqFusionMatch>
+tryRelaxAddrSeqToPcr(Ctx &ctx, const Relocation &hiRel, const Relocation &loRel,
+                     ArrayRef<uint8_t> content) {
+  if (!ctx.arg.linxRelaxSeqFusion)
+    return std::nullopt;
+  if (hiRel.type != R_LINX_PCREL_HI20 || loRel.type != R_LINX_LO12)
+    return std::nullopt;
+  if (loRel.offset != hiRel.offset + 4)
+    return std::nullopt;
+  if (!hiRel.sym || hiRel.sym != loRel.sym)
+    return std::nullopt;
+  if (hiRel.addend != loRel.addend)
+    return std::nullopt;
+  if (hiRel.sym->isPreemptible || hiRel.sym->isGnuIFunc())
+    return std::nullopt;
+  if (ctx.arg.isPic) {
+    if (auto *d = dyn_cast<Defined>(hiRel.sym); d && !d->section)
+      return std::nullopt;
+  }
+  if (hiRel.offset + 12 > content.size())
+    return std::nullopt;
+
+  const uint32_t addtpc = read32le(content.data() + hiRel.offset);
+  const uint32_t addi = read32le(content.data() + loRel.offset);
+  const uint32_t mem = read32le(content.data() + loRel.offset + 4);
+
+  // ADDTPC + ADDI/ADDIW.
+  if ((addtpc & 0x7fu) != 0x07u)
+    return std::nullopt;
+  const uint32_t addiOpc = addi & 0x7fu;
+  if (addiOpc != 0x15u && addiOpc != 0x35u)
+    return std::nullopt;
+
+  // Queue-based destinations (->t/->u) don't use the same encoded register
+  // number as queue consumers (t#1/u#1). Accept the known producer->consumer
+  // pairs in addition to direct register equality.
+  auto isQueueFlow = [](uint32_t producerDst, uint32_t consumerSrc) {
+    if (producerDst == 31u && consumerSrc == 24u) // ->t  to t#1
+      return true;
+    if (producerDst == 30u && consumerSrc == 28u) // ->u  to u#1
+      return true;
+    return producerDst == consumerSrc;
+  };
+
+  const uint32_t addtpcDst = (addtpc >> 7) & 0x1fu;
+  const uint32_t addiSrc = (addi >> 15) & 0x1fu;
+  if (!isQueueFlow(addtpcDst, addiSrc))
+    return std::nullopt;
+  // Keep the first cut conservative: only fuse when ADDI(W) carries no
+  // explicit immediate bits in-place (symbol addends still come from relocs).
+  if (((addi >> 20) & 0x0fffu) != 0)
+    return std::nullopt;
+
+  const uint32_t memKind = mem & 0x707fu;
+
+  // LDI/LWI [addiDst, 0], ->rd  ==>  LD/LW.PCR [sym], ->rd
+  if (memKind == 0x3019u || memKind == 0x2019u) {
+    const uint32_t base = (mem >> 15) & 0x1fu;
+    const uint32_t imm12 = (mem >> 20) & 0x0fffu;
+    if (base != addiSrc || imm12 != 0)
+      return std::nullopt;
+    const uint32_t rd = (mem >> 7) & 0x1fu;
+    const uint32_t pcrBase = (memKind == 0x3019u) ? 0x3039u : 0x2039u;
+    return SeqFusionMatch{R_LINX_PCR17_LOAD, pcrBase | (rd << 7)};
+  }
+
+  // SDI/SWI rs, [addiDst, 0]  ==>  SD/SW.PCR rs, [sym]
+  if (memKind == 0x3059u || memKind == 0x2059u) {
+    const uint32_t base = (mem >> 20) & 0x1fu;
+    const uint32_t imm12 =
+        (((mem >> 25) & 0x7fu) << 5) | ((mem >> 7) & 0x1fu);
+    if (base != addiSrc || imm12 != 0)
+      return std::nullopt;
+    const uint32_t src = (mem >> 15) & 0x1fu;
+    const uint32_t pcrBase = (memKind == 0x3059u) ? 0x3069u : 0x2069u;
+    return SeqFusionMatch{R_LINX_PCR17_STORE, pcrBase | (src << 15)};
+  }
+
+  return std::nullopt;
+}
+
+static bool relax(Ctx &ctx, InputSection &sec) {
+  if (!ctx.arg.relax)
+    return false;
+
+  MutableArrayRef<Relocation> relocs = sec.relocs();
+  if (relocs.empty())
+    return false;
+
+  auto &aux = *sec.relaxAux;
+  ArrayRef<uint8_t> content = sec.content();
+  const uint64_t secAddr = sec.getVA();
+  ArrayRef<SymbolAnchor> sa = ArrayRef(aux.anchors);
+  uint64_t delta = 0;
+  bool changed = false;
+  struct PendingFusion {
+    size_t relocIndex;
+    RelType newType;
+    uint32_t newInsnBits;
+    uint32_t remove;
+  };
+  std::optional<PendingFusion> pendingFusion;
+
+  aux.writes.clear();
+  for (auto [i, rel] : llvm::enumerate(relocs)) {
+    uint32_t &curDelta = aux.relocDeltas[i];
+    const RelType prevType = aux.relocTypes[i];
+    RelType newType = R_LINX_NONE;
+    uint32_t remove = 0;
+    uint32_t newInsnBits = 0;
+
+    const uint64_t loc = secAddr + rel.offset - delta;
+    const int64_t sval =
+        static_cast<int64_t>(sec.getRelocTargetVA(ctx, rel, loc));
+    const uint8_t *insn = content.data() + rel.offset;
+
+    if (pendingFusion && pendingFusion->relocIndex == i) {
+      newType = pendingFusion->newType;
+      remove = pendingFusion->remove;
+      newInsnBits = pendingFusion->newInsnBits;
+      pendingFusion.reset();
+    } else {
+      if (i + 1 < relocs.size()) {
+        if (std::optional<SeqFusionMatch> m =
+                tryRelaxAddrSeqToPcr(ctx, rel, relocs[i + 1], content)) {
+          // Ensure the fused relocation fits the signed 17-bit *.PCR range at
+          // the final fused instruction location.
+          Relocation fusedRel{R_PC, m->newType, rel.offset, rel.addend, rel.sym};
+          const int64_t pcrVal = static_cast<int64_t>(
+              sec.getRelocTargetVA(ctx, fusedRel, loc));
+          if (isInt<17>(pcrVal)) {
+            // Reloc i: drop ADDTPC (4 bytes) and clear its relocation.
+            // Reloc i+1: rewrite ADDI(W)+mem into a single *.PCR op and
+            //            retarget the LO12 relocation to PCR17_*.
+            newType = INTERNAL_R_LINX_REMOVE;
+            remove = 4;
+            pendingFusion =
+                PendingFusion{i + 1, m->newType, m->newInsnBits, 4};
+          }
+        }
+      }
+    }
+
+    if (newType == R_LINX_NONE) {
+      switch (rel.type) {
+      case R_LINX_HL_PCR29_LOAD:
+        if (isInt<17>(sval) && rel.offset + 6 <= content.size()) {
+          newType = R_LINX_PCR17_LOAD;
+          remove = 2;
+          newInsnBits = static_cast<uint32_t>(read48le(insn) >> 16);
+        }
+        break;
+      case R_LINX_HL_PCR29_STORE:
+        if (isInt<17>(sval) && rel.offset + 6 <= content.size()) {
+          newType = R_LINX_PCR17_STORE;
+          remove = 2;
+          newInsnBits = static_cast<uint32_t>(read48le(insn) >> 16);
+        }
+        break;
+      case R_LINX_HL_SETRET32_PCREL:
+        if (rel.offset + 6 > content.size())
+          break;
+        if (isEvenUnsignedN(sval, /*bitsAfterShift=*/5)) {
+          const uint64_t oldInsn = read48le(insn);
+          const uint16_t csetret =
+              static_cast<uint16_t>(0x5016u | (((oldInsn >> 28) & 0x1Fu) << 6));
+          newType = R_LINX_CSETRET5_PCREL;
+          remove = 4;
+          newInsnBits = csetret;
+        } else if (isEvenUnsignedN(sval, /*bitsAfterShift=*/20)) {
+          newType = R_LINX_SETRET20_PCREL;
+          remove = 2;
+          newInsnBits = static_cast<uint32_t>(read48le(insn) >> 16);
+        }
+        break;
+      case R_LINX_HL_BSTART30_PCREL:
+        if (isInt<17>(sval) && (sval & 1) == 0 &&
+            rel.offset + 6 <= content.size()) {
+          newType =
+              (rel.expr == R_PLT_PC) ? R_LINX_B17_PLT : R_LINX_B17_PCREL;
+          remove = 2;
+          newInsnBits = static_cast<uint32_t>(read48le(insn) >> 16);
+        }
+        break;
+      default:
+        break;
+      }
+    }
+
+    // For all anchors whose offsets are <= rel.offset, they are preceded by
+    // the previous relocation whose relocDeltas value equals `delta`.
+    for (; sa.size() && sa[0].offset <= rel.offset; sa = sa.slice(1)) {
+      if (sa[0].end)
+        sa[0].d->size = sa[0].offset - delta - sa[0].d->value;
+      else
+        sa[0].d->value = sa[0].offset - delta;
+    }
+
+    aux.relocTypes[i] = newType;
+    if (newType != R_LINX_NONE && newType != INTERNAL_R_LINX_REMOVE)
+      aux.writes.push_back(newInsnBits);
+
+    delta += remove;
+    if (curDelta != delta || prevType != newType) {
+      changed = true;
+      curDelta = delta;
+    }
+  }
+
+  for (const SymbolAnchor &a : sa) {
+    if (a.end)
+      a.d->size = a.offset - delta - a.d->value;
+    else
+      a.d->value = a.offset - delta;
+  }
+
+  if (!isUInt<32>(delta))
+    Err(ctx) << "section size decrease is too large: " << delta;
+  sec.bytesDropped = delta;
+  return changed;
+}
+
 class LinxISA final : public TargetInfo {
 public:
   LinxISA(Ctx &ctx);
@@ -204,6 +452,8 @@ public:
   void writeGotPlt(uint8_t *buf, const Symbol &s) const override;
   void writePlt(uint8_t *buf, const Symbol &sym,
                 uint64_t pltEntryAddr) const override;
+  bool relaxOnce(int pass) const override;
+  void finalizeRelax(int passes) const override;
   void relocate(uint8_t *loc, const Relocation &rel,
                 uint64_t val) const override;
 };
@@ -259,12 +509,12 @@ RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
                             const uint8_t *loc) const {
   switch (type) {
   case R_LINX_B17_PLT:
+  case R_LINX_HL_BSTART30_PCREL:
     return R_PLT_PC;
   case R_LINX_B12_PCREL:
   case R_LINX_J22_PCREL:
   case R_LINX_CBSTART12_PCREL:
   case R_LINX_B17_PCREL:
-  case R_LINX_HL_BSTART30_PCREL:
   case R_LINX_B25_PCREL:
   case R_LINX_CSETRET5_PCREL:
   case R_LINX_SETRET20_PCREL:
@@ -273,9 +523,14 @@ RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
   case R_LINX_PCR17_STORE:
   case R_LINX_HL_PCR29_LOAD:
   case R_LINX_HL_PCR29_STORE:
+  case R_LINX_32_PCREL:
     return R_PC;
+  case R_LINX_GOT_HI20:
+    return RE_AARCH64_GOT_PAGE_PC;
   case R_LINX_PCREL_HI20:
     return RE_AARCH64_PAGE_PC;
+  case R_LINX_GOT_LO12:
+    return R_GOT;
   case R_LINX_LO12:
     return R_ABS;
   case R_LINX_TLS_DTPREL64:
@@ -292,6 +547,7 @@ RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
 bool LinxISA::usesOnlyLowPageBits(RelType type) const {
   switch (type) {
   case R_LINX_LO12:
+  case R_LINX_GOT_LO12:
     return true;
   default:
     return false;
@@ -359,6 +615,27 @@ void LinxISA::writePlt(uint8_t *buf, const Symbol &sym,
   write32le(buf + 16, BSTOP);
 }
 
+bool LinxISA::relaxOnce(int pass) const {
+  (void)pass;
+  /*
+   * Runtime-stability mode: keep Linx relaxation disabled.
+   *
+   * Current Linx relaxation shrinks instruction streams based on relocations.
+   * Some intra-section BSTART/CALL encodings are resolved by the assembler and
+   * carry no relocation records; shrinking code before those instructions can
+   * leave stale immediates that jump to the wrong block target at runtime.
+   *
+   * Until non-relocated intra-section control-flow encodings are rewritten or
+   * represented with relocations, disabling relaxation is safer than producing
+   * silently misdirected branch/call targets.
+   */
+  return false;
+}
+
+void LinxISA::finalizeRelax(int passes) const {
+  (void)passes;
+}
+
 void LinxISA::relocate(uint8_t *loc, const Relocation &rel,
                        uint64_t val) const {
   int64_t sval = static_cast<int64_t>(val);
@@ -367,6 +644,10 @@ void LinxISA::relocate(uint8_t *loc, const Relocation &rel,
     return;
   case R_LINX_32:
     checkIntUInt(ctx, loc, val, 32, rel);
+    write32le(loc, val);
+    return;
+  case R_LINX_32_PCREL:
+    checkInt(ctx, loc, sval, 32, rel);
     write32le(loc, val);
     return;
   case R_LINX_64:
@@ -450,7 +731,19 @@ void LinxISA::relocate(uint8_t *loc, const Relocation &rel,
     write32le(loc, cur);
     return;
   }
+  case R_LINX_GOT_HI20: {
+    uint32_t cur = read32le(loc);
+    cur |= encodePcrelHi20(ctx, loc, sval, rel);
+    write32le(loc, cur);
+    return;
+  }
   case R_LINX_LO12: {
+    uint32_t cur = read32le(loc);
+    cur |= encodeLo12(ctx, loc, sval, rel);
+    write32le(loc, cur);
+    return;
+  }
+  case R_LINX_GOT_LO12: {
     uint32_t cur = read32le(loc);
     cur |= encodeLo12(ctx, loc, sval, rel);
     write32le(loc, cur);
