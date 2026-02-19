@@ -14,6 +14,7 @@
 #include "clang/Basic/Builtins.h"
 #include "clang/Basic/MacroBuilder.h"
 #include "clang/Basic/TargetBuiltins.h"
+#include "llvm/ADT/StringSwitch.h"
 
 using namespace clang;
 using namespace clang::targets;
@@ -140,8 +141,70 @@ bool LinxISATargetInfo::validateAsmConstraint(
   }
 }
 
+bool LinxISATargetInfo::hasFeature(StringRef Feature) const {
+  const bool Is64Bit = getTriple().isArch64Bit();
+  return llvm::StringSwitch<bool>(Feature)
+      .Case("linx32", !Is64Bit)
+      .Case("linx64", Is64Bit)
+      .Case("lnx-s32", HasExtS32)
+      .Case("lnx-s64", HasExtS64)
+      .Case("lnx-c", HasExtC)
+      .Case("lnx-f", HasExtF)
+      .Case("lnx-a", HasExtA)
+      .Case("lnx-sys", HasExtSys)
+      .Case("lnx-v", HasExtV)
+      .Case("lnx-m", HasExtM)
+      .Default(false);
+}
+
+bool LinxISATargetInfo::handleTargetFeatures(std::vector<std::string> &Features,
+                                             DiagnosticsEngine &Diags) {
+  (void)Diags;
+  for (const auto &Feature : Features) {
+    if (Feature == "+lnx-s32")
+      HasExtS32 = true;
+    else if (Feature == "-lnx-s32")
+      HasExtS32 = false;
+    else if (Feature == "+lnx-s64")
+      HasExtS64 = true;
+    else if (Feature == "-lnx-s64")
+      HasExtS64 = false;
+    else if (Feature == "+lnx-c")
+      HasExtC = true;
+    else if (Feature == "-lnx-c")
+      HasExtC = false;
+    else if (Feature == "+lnx-f")
+      HasExtF = true;
+    else if (Feature == "-lnx-f")
+      HasExtF = false;
+    else if (Feature == "+lnx-a")
+      HasExtA = true;
+    else if (Feature == "-lnx-a")
+      HasExtA = false;
+    else if (Feature == "+lnx-sys")
+      HasExtSys = true;
+    else if (Feature == "-lnx-sys")
+      HasExtSys = false;
+    else if (Feature == "+lnx-v")
+      HasExtV = true;
+    else if (Feature == "-lnx-v")
+      HasExtV = false;
+    else if (Feature == "+lnx-m")
+      HasExtM = true;
+    else if (Feature == "-lnx-m")
+      HasExtM = false;
+  }
+
+  if (HasExtS64 || HasExtC || HasExtF || HasExtA || HasExtSys || HasExtV ||
+      HasExtM)
+    HasExtS32 = true;
+
+  return true;
+}
+
 void LinxISATargetInfo::getTargetDefines(const LangOptions &Opts,
                                         MacroBuilder &Builder) const {
+  (void)Opts;
   Builder.defineMacro("__LINX__");
   Builder.defineMacro("__linx__");
   Builder.defineMacro("__LINXISA__");
@@ -153,6 +216,23 @@ void LinxISATargetInfo::getTargetDefines(const LangOptions &Opts,
     Builder.defineMacro("__LINX32__");
     Builder.defineMacro("__linx32__");
   }
+
+  if (HasExtS32)
+    Builder.defineMacro("__LINX_EXT_S32__");
+  if (HasExtS64)
+    Builder.defineMacro("__LINX_EXT_S64__");
+  if (HasExtC)
+    Builder.defineMacro("__LINX_EXT_C__");
+  if (HasExtF)
+    Builder.defineMacro("__LINX_EXT_F__");
+  if (HasExtA)
+    Builder.defineMacro("__LINX_EXT_A__");
+  if (HasExtSys)
+    Builder.defineMacro("__LINX_EXT_SYS__");
+  if (HasExtV)
+    Builder.defineMacro("__LINX_EXT_V__");
+  if (HasExtM)
+    Builder.defineMacro("__LINX_EXT_M__");
 
   Builder.defineMacro("__ELF__");
 }

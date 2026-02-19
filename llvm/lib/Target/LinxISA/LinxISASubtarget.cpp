@@ -10,6 +10,7 @@
 #include "LinxISAFrameLowering.h"
 #include "LinxISAISelLowering.h"
 #include "LinxISAInstrInfo.h"
+#include "MCTargetDesc/LinxISAMCTargetDesc.h"
 #include "llvm/Target/TargetMachine.h"
 
 #define DEBUG_TYPE "linx-subtarget"

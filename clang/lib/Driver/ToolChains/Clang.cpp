@@ -1548,6 +1548,11 @@ void Clang::RenderTargetOptions(const llvm::Triple &EffectiveTriple,
     AddLoongArchTargetArgs(Args, CmdArgs);
     break;
 
+  case llvm::Triple::linx32:
+  case llvm::Triple::linx64:
+    AddLinxISATargetArgs(Args, CmdArgs);
+    break;
+
   case llvm::Triple::mips:
   case llvm::Triple::mipsel:
   case llvm::Triple::mips64:
@@ -1767,6 +1772,19 @@ void Clang::AddLoongArchTargetArgs(const ArgList &Args,
       CmdArgs.push_back("-mllvm");
       CmdArgs.push_back("-loongarch-annotate-tablejump");
     }
+  }
+}
+
+void Clang::AddLinxISATargetArgs(const ArgList &Args,
+                                 ArgStringList &CmdArgs) const {
+  // These options are consumed by driver-side Linx target parsing in
+  // ToolChains/Arch/LinxISA.cpp.
+  (void)Args.getLastArg(options::OPT_mcpu_EQ);
+  (void)Args.getLastArg(options::OPT_march_EQ);
+
+  if (const Arg *A = Args.getLastArg(options::OPT_mtune_EQ)) {
+    CmdArgs.push_back("-tune-cpu");
+    CmdArgs.push_back(A->getValue());
   }
 }
 

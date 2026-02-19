@@ -1553,6 +1553,7 @@ SDValue LinxISATargetLowering::LowerFormalArguments(
 
   for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
     const CCValAssign &VA = ArgLocs[i];
+    MVT ValVT = VA.getValVT();
     MVT LocVT = VA.getLocVT();
 
     SDValue V;
@@ -1612,6 +1613,7 @@ static SDValue lowerCallResult(SDValue Chain, SDValue InGlue,
   CCInfo.AnalyzeCallResult(Ins, Is64 ? RetCC_Linx64 : RetCC_Linx32);
 
   for (const CCValAssign &VA : RVLocs) {
+    MVT ValVT = VA.getValVT();
     MVT LocVT = VA.getLocVT();
 
     SDValue Copy = DAG.getCopyFromReg(Chain, DL, VA.getLocReg(), LocVT, InGlue);
@@ -1737,8 +1739,7 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
   if (InGlue.getNode())
     Ops.push_back(InGlue);
 
-  const unsigned CallOpc =
-      UseTailCall ? LinxISA::PSEUDO_TAILCALL : LinxISA::PSEUDO_CALL;
+  const unsigned CallOpc = LinxISA::PSEUDO_CALL;
   MachineSDNode *Call = DAG.getMachineNode(CallOpc, DL, NodeTys, Ops);
   Chain = SDValue(Call, 0);
   InGlue = SDValue(Call, 1);

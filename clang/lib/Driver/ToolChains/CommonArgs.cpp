@@ -10,6 +10,7 @@
 #include "Arch/AArch64.h"
 #include "Arch/ARM.h"
 #include "Arch/CSKY.h"
+#include "Arch/LinxISA.h"
 #include "Arch/LoongArch.h"
 #include "Arch/M68k.h"
 #include "Arch/Mips.h"
@@ -828,6 +829,10 @@ std::string tools::getCPUName(const Driver &D, const ArgList &Args,
   case llvm::Triple::loongarch64:
     return loongarch::getLoongArchTargetCPU(Args, T);
 
+  case llvm::Triple::linx32:
+  case llvm::Triple::linx64:
+    return linxisa::getLinxISATargetCPU(D, T, Args);
+
   case llvm::Triple::xtensa:
     if (const Arg *A = Args.getLastArg(options::OPT_mcpu_EQ))
       return A->getValue();
@@ -919,6 +924,10 @@ void tools::getTargetFeatures(const Driver &D, const llvm::Triple &Triple,
   case llvm::Triple::loongarch32:
   case llvm::Triple::loongarch64:
     loongarch::getLoongArchTargetFeatures(D, Triple, Args, Features);
+    break;
+  case llvm::Triple::linx32:
+  case llvm::Triple::linx64:
+    linxisa::getLinxISATargetFeatures(D, Triple, Args, Features);
     break;
   }
 

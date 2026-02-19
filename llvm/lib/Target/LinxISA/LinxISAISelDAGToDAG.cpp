@@ -1608,7 +1608,7 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
 
     if (IntrID == Intrinsic::linx_vblock_launch) {
       // (chain, id, vkind, body_sym, dim0, dim1, dim2, attr_bits,
-      //  bind0..bind5)
+      //  bind0..bind11)
       auto *VKindC = dyn_cast<ConstantSDNode>(N->getOperand(2));
       auto *Dim0C = dyn_cast<ConstantSDNode>(N->getOperand(4));
       auto *Dim2C = dyn_cast<ConstantSDNode>(N->getOperand(6));
@@ -1642,19 +1642,27 @@ void LinxISADAGToDAGISel::Select(SDNode *N) {
       SDValue Bind3 = forceGpr(N->getOperand(11));
       SDValue Bind4 = forceGpr(N->getOperand(12));
       SDValue Bind5 = forceGpr(N->getOperand(13));
+      SDValue Bind6 = forceGpr(N->getOperand(14));
+      SDValue Bind7 = forceGpr(N->getOperand(15));
+      SDValue Bind8 = forceGpr(N->getOperand(16));
+      SDValue Bind9 = forceGpr(N->getOperand(17));
+      SDValue Bind10 = forceGpr(N->getOperand(18));
+      SDValue Bind11 = forceGpr(N->getOperand(19));
 
       SDNode *Res = nullptr;
       if (auto *Dim1C = dyn_cast<ConstantSDNode>(N->getOperand(5))) {
         SDValue Dim1Imm =
             CurDAG->getTargetConstant(Dim1C->getZExtValue(), DL, MVT::i64);
         SDValue Ops[] = {VKindImm, Dim0Imm, Dim1Imm, Dim2Imm, AttrImm, Bind0,
-                         Bind1,    Bind2,    Bind3,    Bind4,    Bind5, Chain};
+                         Bind1,    Bind2,    Bind3,    Bind4,    Bind5, Bind6,
+                         Bind7,    Bind8,    Bind9,    Bind10,   Bind11, Chain};
         Res = CurDAG->getMachineNode(LinxISA::PSEUDO_VBLOCK_LAUNCH, DL,
                                      MVT::Other, Ops);
       } else {
         SDValue Dim1Reg = forceGpr(N->getOperand(5));
         SDValue Ops[] = {VKindImm, Dim0Imm, Dim1Reg, Dim2Imm, AttrImm, Bind0,
-                         Bind1,    Bind2,    Bind3,   Bind4,    Bind5, Chain};
+                         Bind1,    Bind2,    Bind3,   Bind4,    Bind5, Bind6,
+                         Bind7,    Bind8,    Bind9,   Bind10,   Bind11, Chain};
         Res = CurDAG->getMachineNode(LinxISA::PSEUDO_VBLOCK_LAUNCH_DYN1, DL,
                                      MVT::Other, Ops);
       }
