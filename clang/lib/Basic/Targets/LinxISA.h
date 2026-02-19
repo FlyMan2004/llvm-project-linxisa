@@ -17,14 +17,33 @@
 #include "clang/Basic/TargetOptions.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/TargetParser/Triple.h"
+#include <vector>
 
 namespace clang {
 namespace targets {
 
 class LLVM_LIBRARY_VISIBILITY LinxISATargetInfo : public TargetInfo {
+protected:
+  bool HasExtS32;
+  bool HasExtS64;
+  bool HasExtC;
+  bool HasExtF;
+  bool HasExtA;
+  bool HasExtSys;
+  bool HasExtV;
+  bool HasExtM;
+
 public:
   LinxISATargetInfo(const llvm::Triple &Triple, const TargetOptions &)
       : TargetInfo(Triple) {
+    HasExtS32 = true;
+    HasExtS64 = Triple.isArch64Bit();
+    HasExtC = false;
+    HasExtF = false;
+    HasExtA = false;
+    HasExtSys = false;
+    HasExtV = false;
+    HasExtM = false;
     WCharType = SignedInt;
     WIntType = UnsignedInt;
     // Bring-up toolchain convention: `long double` is the same as `double`.
@@ -51,6 +70,10 @@ public:
 
   bool validateAsmConstraint(const char *&Name,
                              TargetInfo::ConstraintInfo &Info) const override;
+
+  bool hasFeature(StringRef Feature) const override;
+  bool handleTargetFeatures(std::vector<std::string> &Features,
+                            DiagnosticsEngine &Diags) override;
 
   int getEHDataRegisterNumber(unsigned RegNo) const override {
     if (RegNo == 0)

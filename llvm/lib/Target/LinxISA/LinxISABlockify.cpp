@@ -948,11 +948,30 @@ public:
         return true;
       };
 
+      if (Head.equals_insensitive("c.movr")) {
+        StringRef SrcPart;
+        ParsedVReg Dst;
+        if (!parseArrow(Rest, SrcPart, Dst))
+          fail("expected '->Dst' in c.movr");
+        SmallVector<StringRef, 2> Ops;
+        splitCSV(SrcPart, Ops);
+        if (Ops.size() != 1)
+          fail("expected one source operand for c.movr");
+        auto SrcL = parseVecRegToken(Ops[0]);
+        if (!SrcL)
+          fail("failed to parse source operand for c.movr");
+        BuildMI(BodyBB, BodyBB.end(), DebugLoc(),
+                TII.get(LinxISA::PSEUDO_V_C_MOVR))
+            .addImm(Dst.Code)
+            .addImm(SrcL->Code);
+        return;
+      }
+
       if (Head.equals_insensitive("v.add") || Head.equals_insensitive("v.sub")) {
         StringRef SrcPart;
         ParsedVReg Dst;
         if (!parseArrow(Rest, SrcPart, Dst))
-          fail("expected '->Dst' in vector ALU op");
+	          fail("expected '->Dst' in vector ALU op");
         SmallVector<StringRef, 4> Ops;
         splitCSV(SrcPart, Ops);
         if (Ops.size() != 2)
@@ -970,13 +989,33 @@ public:
             .addImm(SrcR->Code)
             .addImm(SrcR->SrcRType)
             .addImm(SrcR->Shamt);
-        return;
-      }
+	        return;
+	      }
 
-      if (Head.equals_insensitive("v.fadd") || Head.equals_insensitive("v.fsub") ||
-          Head.equals_insensitive("v.fmul") || Head.equals_insensitive("v.fdiv")) {
-        StringRef SrcPart;
-        ParsedVReg Dst;
+	      if (Head.equals_insensitive("v.mul")) {
+	        StringRef SrcPart;
+	        ParsedVReg Dst;
+	        if (!parseArrow(Rest, SrcPart, Dst))
+	          fail("expected '->Dst' in vector mul op");
+	        SmallVector<StringRef, 4> Ops;
+	        splitCSV(SrcPart, Ops);
+	        if (Ops.size() != 2)
+	          fail("expected two source operands for vector mul op");
+	        auto SrcL = parseVecRegToken(Ops[0]);
+	        auto SrcR = parseVecRegToken(Ops[1]);
+	        if (!SrcL || !SrcR)
+	          fail("failed to parse source operands for vector mul op");
+	        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(LinxISA::PSEUDO_V_MUL))
+	            .addImm(Dst.Code)
+	            .addImm(SrcL->Code)
+	            .addImm(SrcR->Code);
+	        return;
+	      }
+
+	      if (Head.equals_insensitive("v.fadd") || Head.equals_insensitive("v.fsub") ||
+	          Head.equals_insensitive("v.fmul") || Head.equals_insensitive("v.fdiv")) {
+	        StringRef SrcPart;
+	        ParsedVReg Dst;
         if (!parseArrow(Rest, SrcPart, Dst))
           fail("expected '->Dst' in vector FP op");
         SmallVector<StringRef, 4> Ops;
@@ -998,13 +1037,34 @@ public:
             .addImm(Dst.Code)
             .addImm(SrcL->Code)
             .addImm(SrcR->Code);
-        return;
-      }
+	        return;
+	      }
 
-      if (Head.starts_with_insensitive("v.cmp.")) {
-        StringRef SrcPart;
-        ParsedVReg Dst;
-        if (!parseArrow(Rest, SrcPart, Dst))
+	      if (Head.equals_insensitive("v.fabs") || Head.equals_insensitive("v.fsqrt")) {
+	        StringRef SrcPart;
+	        ParsedVReg Dst;
+	        if (!parseArrow(Rest, SrcPart, Dst))
+	          fail("expected '->Dst' in vector FP unop");
+	        SmallVector<StringRef, 2> Ops;
+	        splitCSV(SrcPart, Ops);
+	        if (Ops.size() != 1)
+	          fail("expected one source operand for vector FP unop");
+	        auto SrcL = parseVecRegToken(Ops[0]);
+	        if (!SrcL)
+	          fail("failed to parse source operand for vector FP unop");
+	        const unsigned Opc = Head.equals_insensitive("v.fabs")
+	                                 ? LinxISA::PSEUDO_V_FABS
+	                                 : LinxISA::PSEUDO_V_FSQRT;
+	        BuildMI(BodyBB, BodyBB.end(), DebugLoc(), TII.get(Opc))
+	            .addImm(Dst.Code)
+	            .addImm(SrcL->Code);
+	        return;
+	      }
+
+	      if (Head.starts_with_insensitive("v.cmp.")) {
+	        StringRef SrcPart;
+	        ParsedVReg Dst;
+	        if (!parseArrow(Rest, SrcPart, Dst))
           fail("expected '->Dst' in vector compare op");
         SmallVector<StringRef, 4> Ops;
         splitCSV(SrcPart, Ops);
@@ -1407,8 +1467,7 @@ public:
       for (MachineInstr &MI : *MBB) {
         if (MI.isDebugInstr())
           continue;
-        if (MI.getOpcode() != LinxISA::PSEUDO_CALL &&
-            MI.getOpcode() != LinxISA::PSEUDO_TAILCALL)
+        if (MI.getOpcode() != LinxISA::PSEUDO_CALL)
           continue;
 
         auto Next = std::next(MI.getIterator());
@@ -2428,7 +2487,8 @@ public:
       case LinxISA::PSEUDO_VBLOCK_LAUNCH:
       case LinxISA::PSEUDO_VBLOCK_LAUNCH_DYN1: {
         // Expand into a decoupled vector block header:
-        //   BSTART.MSEQ/MPAR + B.TEXT body + B.IOR(binds) + B.DIM(LB0..2)
+        //   BSTART.{MSEQ,MPAR,VSEQ,VPAR} + B.TEXT body + B.IOR(binds) +
+        //   B.DIM(LB0..2)
         const bool DynDim1 =
             (PseudoMI->getOpcode() == LinxISA::PSEUDO_VBLOCK_LAUNCH_DYN1);
         const int64_t VKind = PseudoMI->getOperand(0).getImm();
@@ -2445,20 +2505,22 @@ public:
         const Register Bind3 = PseudoMI->getOperand(8).getReg();
         const Register Bind4 = PseudoMI->getOperand(9).getReg();
         const Register Bind5 = PseudoMI->getOperand(10).getReg();
-
-        const Register Bind0 = PseudoMI->getOperand(5).getReg();
-        const Register Bind1 = PseudoMI->getOperand(6).getReg();
-        const Register Bind2 = PseudoMI->getOperand(7).getReg();
-        const Register Bind3 = PseudoMI->getOperand(8).getReg();
-        const Register Bind4 = PseudoMI->getOperand(9).getReg();
-        const Register Bind5 = PseudoMI->getOperand(10).getReg();
+        const Register Bind6 = PseudoMI->getOperand(11).getReg();
+        const Register Bind7 = PseudoMI->getOperand(12).getReg();
+        const Register Bind8 = PseudoMI->getOperand(13).getReg();
+        const Register Bind9 = PseudoMI->getOperand(14).getReg();
+        const Register Bind10 = PseudoMI->getOperand(15).getReg();
+        const Register Bind11 = PseudoMI->getOperand(16).getReg();
 
         const unsigned Mode = 0; // bring-up default
-        const unsigned BStartOpc = (VKind == 0)   ? LinxISA::BSTART_MSEQ
-                                 : (VKind == 1) ? LinxISA::BSTART_MPAR
-                                                : 0;
+        const unsigned BStartOpc =
+            (VKind == 0)   ? LinxISA::BSTART_MSEQ
+            : (VKind == 1) ? LinxISA::BSTART_MPAR
+            : (VKind == 2) ? LinxISA::BSTART_VSEQ
+            : (VKind == 3) ? LinxISA::BSTART_VPAR
+                           : 0;
         if (!BStartOpc)
-          report_fatal_error("Linx: vblock.launch vkind must be 0(MSEQ) or 1(MPAR)");
+          report_fatal_error("Linx: vblock.launch vkind must be 0(MSEQ), 1(MPAR), 2(VSEQ), or 3(VPAR)");
 
         BuildMI(MBB, InsertPt, DL, TII.get(BStartOpc)).addImm(Mode);
         BuildMI(MBB, InsertPt, DL, TII.get(LinxISA::B_TEXT))
@@ -2500,6 +2562,8 @@ public:
 
         emitIOR(Bind0, Bind1, Bind2);
         emitIOR(Bind3, Bind4, Bind5);
+        emitIOR(Bind6, Bind7, Bind8);
+        emitIOR(Bind9, Bind10, Bind11);
 
         emitDim(MBB, InsertPt, /*LoopNest=*/0, Dim0);
         if (DynDim1)
@@ -2819,6 +2883,11 @@ public:
 	        // Guard virtual registers up front so we never fold a producer that
 	        // still has uses in successor blocks.
 	        if (Reg.isVirtual() && !MRI.hasOneNonDBGUse(Reg))
+	          return false;
+	        // After regalloc, physical registers may also have cross-block users.
+	        // Be conservative: if the physreg is live-out of this block, don't
+	        // claim it has a single use based on the local scan.
+	        if (Reg.isPhysical() && isPhysRegLiveOutOfBlock(Reg))
 	          return false;
 
 	        unsigned Count = 0;
@@ -3278,18 +3347,6 @@ public:
             ReturnBB = nullptr;
           if (!ReturnBB)
             ReturnBB = &MBB;
-          Last->eraseFromParent();
-          Changed = true;
-          break;
-        }
-        case LinxISA::PSEUDO_TAILCALL: {
-          CallTargetOp = Last->getOperand(0);
-          if (CallTargetOp->isReg()) {
-            Kind = ExitKind::Ind;
-            HeaderSetcTgtReg = CallTargetOp->getReg();
-          } else {
-            Kind = ExitKind::Direct;
-          }
           Last->eraseFromParent();
           Changed = true;
           break;

@@ -1,10 +1,13 @@
 ; RUN: llc -mtriple=linx64 -O2 < %s | FileCheck %s
 
-declare void @llvm.linx.vblock.launch(i32, ptr, i64, i64, i64, i32, i64, i64, i64, i64, i64, i64)
+declare void @llvm.linx.vblock.launch(i32, ptr, i64, i64, i64, i32,
+                                      i64, i64, i64, i64, i64, i64,
+                                      i64, i64, i64, i64, i64, i64)
 
 define void @vseq() {
 entry:
   call void @llvm.linx.vblock.launch(i32 0, ptr null, i64 2, i64 3, i64 4, i32 0,
+                                     i64 0, i64 0, i64 0, i64 0, i64 0, i64 0,
                                      i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)
   ret void
 }
@@ -12,6 +15,23 @@ entry:
 define void @vseq_rdc() #0 {
 entry:
   call void @llvm.linx.vblock.launch(i32 0, ptr null, i64 8, i64 1, i64 1, i32 0,
+                                     i64 0, i64 0, i64 0, i64 0, i64 0, i64 0,
+                                     i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)
+  ret void
+}
+
+define void @vseq_tile() {
+entry:
+  call void @llvm.linx.vblock.launch(i32 2, ptr null, i64 2, i64 1, i64 1, i32 0,
+                                     i64 0, i64 0, i64 0, i64 0, i64 0, i64 0,
+                                     i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)
+  ret void
+}
+
+define void @vpar_tile() {
+entry:
+  call void @llvm.linx.vblock.launch(i32 3, ptr null, i64 2, i64 1, i64 1, i32 0,
+                                     i64 0, i64 0, i64 0, i64 0, i64 0, i64 0,
                                      i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)
   ret void
 }
@@ -31,5 +51,13 @@ entry:
 ; CHECK:      {{^\.__linx_vblock_body\.[0-9]+:}}
 ; CHECK:      v.rdadd vt#1, ->a0
 ; CHECK:      C.BSTOP
+
+; CHECK-LABEL: vseq_tile:
+; CHECK:      BSTART.VSEQ
+; CHECK:      B.TEXT {{\.__linx_vblock_body\.[0-9]+}}
+
+; CHECK-LABEL: vpar_tile:
+; CHECK:      BSTART.VPAR
+; CHECK:      B.TEXT {{\.__linx_vblock_body\.[0-9]+}}
 
 attributes #0 = { "linx-vblock-body-asm"="  v.rdadd vt#1.sw, ->a0\0A  C.BSTOP\0A" }

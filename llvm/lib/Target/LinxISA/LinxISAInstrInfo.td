@@ -517,7 +517,10 @@ def PSEUDO_VBLOCK_LAUNCH : Pseudo<(outs),
                                        i64imm:$dim2, i64imm:$attr_bits,
                                        GPR_Arch:$bind0, GPR_Arch:$bind1,
                                        GPR_Arch:$bind2, GPR_Arch:$bind3,
-                                       GPR_Arch:$bind4, GPR_Arch:$bind5),
+                                       GPR_Arch:$bind4, GPR_Arch:$bind5,
+                                       GPR_Arch:$bind6, GPR_Arch:$bind7,
+                                       GPR_Arch:$bind8, GPR_Arch:$bind9,
+                                       GPR_Arch:$bind10, GPR_Arch:$bind11),
                                   "# PSEUDO_VBLOCK_LAUNCH", []>;
 
 // Dynamic-dimension variant used when Dim1 (group count) is runtime-varying.
@@ -528,7 +531,10 @@ def PSEUDO_VBLOCK_LAUNCH_DYN1 : Pseudo<(outs),
                                             i64imm:$dim2, i64imm:$attr_bits,
                                             GPR_Arch:$bind0, GPR_Arch:$bind1,
                                             GPR_Arch:$bind2, GPR_Arch:$bind3,
-                                            GPR_Arch:$bind4, GPR_Arch:$bind5),
+                                            GPR_Arch:$bind4, GPR_Arch:$bind5,
+                                            GPR_Arch:$bind6, GPR_Arch:$bind7,
+                                            GPR_Arch:$bind8, GPR_Arch:$bind9,
+                                            GPR_Arch:$bind10, GPR_Arch:$bind11),
                                        "# PSEUDO_VBLOCK_LAUNCH_DYN1", []>;
 
 // SIMT tile binary ops (auto-mode): lowered in Blockify into decoupled
@@ -549,23 +555,29 @@ let hasSideEffects = 1, isBarrier = 1, Size = 4 in {
 // Vector body pseudo ops. These carry lane-register encodings (ri*/vt/vu/vm/vn
 // namespace IDs) as immediates and are lowered in MCInstLower to canonical
 // strict-v0.3 V.* encodings.
-let hasSideEffects = 1, Size = 4 in {
-  def PSEUDO_V_ADD : Pseudo<(outs),
-                            (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR,
-                                 i64imm:$srcRType, i64imm:$shamt),
-                            "# PSEUDO_V_ADD", []>;
-  def PSEUDO_V_SUB : Pseudo<(outs),
-                            (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR,
-                                 i64imm:$srcRType, i64imm:$shamt),
-                            "# PSEUDO_V_SUB", []>;
-  def PSEUDO_V_FADD : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
-                             "# PSEUDO_V_FADD", []>;
-  def PSEUDO_V_FSUB : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
-                             "# PSEUDO_V_FSUB", []>;
-  def PSEUDO_V_FMUL : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
-                             "# PSEUDO_V_FMUL", []>;
-  def PSEUDO_V_FDIV : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
-                             "# PSEUDO_V_FDIV", []>;
+	let hasSideEffects = 1, Size = 4 in {
+	  def PSEUDO_V_ADD : Pseudo<(outs),
+	                            (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR,
+	                                 i64imm:$srcRType, i64imm:$shamt),
+	                            "# PSEUDO_V_ADD", []>;
+	  def PSEUDO_V_SUB : Pseudo<(outs),
+	                            (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR,
+	                                 i64imm:$srcRType, i64imm:$shamt),
+	                            "# PSEUDO_V_SUB", []>;
+	  def PSEUDO_V_MUL : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+	                            "# PSEUDO_V_MUL", []>;
+	  def PSEUDO_V_FADD : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+	                             "# PSEUDO_V_FADD", []>;
+	  def PSEUDO_V_FSUB : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+	                             "# PSEUDO_V_FSUB", []>;
+	  def PSEUDO_V_FMUL : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+	                             "# PSEUDO_V_FMUL", []>;
+	  def PSEUDO_V_FDIV : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
+	                             "# PSEUDO_V_FDIV", []>;
+	  def PSEUDO_V_FABS : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL),
+	                             "# PSEUDO_V_FABS", []>;
+	  def PSEUDO_V_FSQRT : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL),
+	                              "# PSEUDO_V_FSQRT", []>;
 
   def PSEUDO_V_CMP_EQ : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL, i64imm:$srcR),
                                "# PSEUDO_V_CMP_EQ", []>;
@@ -645,6 +657,14 @@ let hasSideEffects = 1, Size = 4 in {
 
 let hasSideEffects = 1, isTerminator = 1, isBarrier = 1, Size = 4 in
 def PSEUDO_V_J : Pseudo<(outs), (ins BrTarget:$target), "# PSEUDO_V_J", []>;
+
+// Scalar body pseudo ops. These carry scalar register encodings as immediates
+// (same namespace used in vector bodies) and are lowered in MCInstLower to
+// strict-v0.3 scalar encodings.
+let hasSideEffects = 1, Size = 2 in {
+  def PSEUDO_V_C_MOVR : Pseudo<(outs), (ins i64imm:$dst, i64imm:$srcL),
+                               "# PSEUDO_V_C_MOVR", []>;
+}
 
 // Real tile-block descriptor instructions (emitted after register allocation).
 let hasSideEffects = 1, isBarrier = 1, Size = 4 in {

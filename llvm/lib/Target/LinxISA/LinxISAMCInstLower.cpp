@@ -525,6 +525,11 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
          {"shamt", I(4)}});
     return;
   }
+  case LinxISA::PSEUDO_V_MUL: {
+    emitNamedImmFields(getSpecOpcode("V.MUL", /*LengthBits=*/64, /*Fields=*/3),
+                       {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
   case LinxISA::PSEUDO_V_FADD: {
     emitNamedImmFields(getSpecOpcode("V.FADD", /*LengthBits=*/64, /*Fields=*/3),
                        {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
@@ -543,6 +548,18 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
   case LinxISA::PSEUDO_V_FDIV: {
     emitNamedImmFields(getSpecOpcode("V.FDIV", /*LengthBits=*/64, /*Fields=*/3),
                        {{"RegDst", I(0)}, {"SrcL", I(1)}, {"SrcR", I(2)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_FABS: {
+    emitNamedImmFields(
+        getSpecOpcode("V.FABS", /*LengthBits=*/64, /*Fields=*/2),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}});
+    return;
+  }
+  case LinxISA::PSEUDO_V_FSQRT: {
+    emitNamedImmFields(
+        getSpecOpcode("V.FSQRT", /*LengthBits=*/64, /*Fields=*/2),
+        {{"RegDst", I(0)}, {"SrcL", I(1)}});
     return;
   }
   case LinxISA::PSEUDO_V_CMP_EQ: {
@@ -727,6 +744,12 @@ void LinxISAMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
     OutMI.addOperand(MCOperand::createImm(I(0))); // SrcL
     OutMI.addOperand(MCOperand::createImm(I(1))); // SrcR
     OutMI.addOperand(lowerBranchTarget(2));       // simm12 (pcrel)
+    return;
+  }
+  case LinxISA::PSEUDO_V_C_MOVR: {
+    OutMI.setOpcode(getSpecOpcode("C.MOVR", /*LengthBits=*/16, /*Fields=*/2));
+    OutMI.addOperand(MCOperand::createImm(I(0))); // RegDst
+    OutMI.addOperand(MCOperand::createImm(I(1))); // SrcL
     return;
   }
   case LinxISA::PSEUDO_V_J: {

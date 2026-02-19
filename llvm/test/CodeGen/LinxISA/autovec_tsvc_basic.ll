@@ -89,6 +89,10 @@ exit:
 ; REMARK: "reason":"lowered_vblock_mseq_affine"
 ; REMARK: "configured_mode":"mseq"
 ; REMARK: "selected_mode":"mseq"
+; REMARK: "header_kind":"mseq"
+; REMARK: "touches_memory":true
+; REMARK: "tripcount_source":"scev_constant"
+; REMARK: "address_model":"affine"
 ; REMARK-NOT: "fallback_marker"
 ; REMARK: "function":"nested_store"
 ; REMARK: "status":"lowered"
