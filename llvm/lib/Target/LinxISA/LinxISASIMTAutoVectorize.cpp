@@ -2295,9 +2295,117 @@ public:
 	          return *Dst;
 	        };
 
-		        std::function<std::optional<std::string>(Value *)> emitValue;
-		        std::function<std::optional<std::string>(Value *)> emitCondition;
-		        std::function<std::optional<std::string>(Value *)> emitF32;
+	        std::function<std::optional<std::string>(Value *)> emitValue;
+	        std::function<std::optional<std::string>(Value *)> emitCondition;
+	        std::function<std::optional<std::string>(Value *)> emitF32;
+
+	        auto emitIntegerAffineAddRecValue =
+	            [&](Value *IV, bool EdgeFresh) -> std::optional<std::string> {
+	              if (!IV || !IV->getType()->isIntegerTy() ||
+	                  IV->getType()->getScalarSizeInBits() > 64) {
+	                return std::nullopt;
+	              }
+
+	              if (!EdgeFresh) {
+	                auto It = ValOp.find(IV);
+	                if (It != ValOp.end())
+	                  return It->second;
+	              }
+
+	              const SCEV *PS = SE.getSCEVAtScope(IV, L);
+	              const auto *AR = dyn_cast<SCEVAddRecExpr>(PS);
+	              if (!AR || AR->getLoop() != L || !AR->isAffine()) {
+	                return std::nullopt;
+	              }
+	              const SCEV *StartS = AR->getStart();
+	              const SCEV *StepS = AR->getStepRecurrence(SE);
+	              if (!StartS || !StepS)
+	                return std::nullopt;
+
+	              // Prefer constant-step lowering when available; fall back to a
+	              // vector multiply for dynamic step values.
+	              std::optional<int64_t> StepConst;
+	              if (auto *StepC = dyn_cast<SCEVConstant>(StepS)) {
+	                StepConst = StepC->getAPInt().getSExtValue();
+	                if (*StepConst == 0)
+	                  return std::nullopt;
+	                if (*StepConst > 4096 || *StepConst < -4096)
+	                  StepConst.reset();
+	              }
+
+	              std::optional<std::string> ScaledIndex;
+	              if (StepConst) {
+	                if (*StepConst == 1) {
+	                  ScaledIndex = LinearIndexReg;
+	                } else {
+	                  ScaledIndex = emitScaledLc0(*StepConst);
+	                }
+	              } else {
+	                Value *StepV = Exp.expandCodeFor(StepS, StepS->getType(),
+	                                                 Preheader->getTerminator());
+	                if (!StepV)
+	                  return std::nullopt;
+	                if (!StepV->getType()->isIntegerTy())
+	                  return std::nullopt;
+	                if (StepV->getType()->getScalarSizeInBits() > 64)
+	                  return std::nullopt;
+	                if (StepV->getType() != I64Ty)
+	                  StepV = PB.CreateSExtOrTrunc(StepV, I64Ty);
+	                auto StepTok = emitValue(StepV);
+	                if (!StepTok)
+	                  return std::nullopt;
+	                auto Mul = allocVec();
+	                if (!Mul)
+	                  return std::nullopt;
+	                OS << "  v.mul " << LinearIndexReg << ", " << *StepTok
+	                   << ", ->" << *Mul << "\n";
+	                ScaledIndex = *Mul;
+	              }
+	              if (!ScaledIndex)
+	                return std::nullopt;
+
+	              std::optional<int64_t> StartConst;
+	              if (auto *StartC = dyn_cast<SCEVConstant>(StartS))
+	                StartConst = StartC->getAPInt().getSExtValue();
+
+	              if (StartConst && *StartConst == 0) {
+	                if (!EdgeFresh)
+	                  ValOp[IV] = *ScaledIndex;
+	                return *ScaledIndex;
+	              }
+
+	              std::optional<std::string> StartTok;
+	              if (StartConst) {
+	                auto *C64 = ConstantInt::get(I64Ty, (uint64_t)*StartConst);
+	                auto Bind = bindI64(C64);
+	                if (!Bind)
+	                  return std::nullopt;
+	                StartTok = "ri" + std::to_string(*Bind);
+	              } else {
+	                Value *StartV = Exp.expandCodeFor(StartS, StartS->getType(),
+	                                                  Preheader->getTerminator());
+	                if (!StartV)
+	                  return std::nullopt;
+	                if (!StartV->getType()->isIntegerTy())
+	                  return std::nullopt;
+	                if (StartV->getType()->getScalarSizeInBits() > 64)
+	                  return std::nullopt;
+	                if (StartV->getType() != I64Ty)
+	                  StartV = PB.CreateSExtOrTrunc(StartV, I64Ty);
+	                StartTok = emitValue(StartV);
+	              }
+	              if (!StartTok)
+	                return std::nullopt;
+
+	              auto Dst = allocVec();
+	              if (!Dst)
+	                return std::nullopt;
+	              OS << "  v.add " << *ScaledIndex << ", " << *StartTok << ", ->"
+	                 << *Dst << "\n";
+	              if (!EdgeFresh)
+	                ValOp[IV] = *Dst;
+	              return *Dst;
+	            };
 
 		        auto bindPtrGeneral = [&](Value *Ptr)
 		            -> std::optional<std::pair<unsigned, std::string>> {
@@ -3087,96 +3195,8 @@ public:
 
 	            if (PN->getType()->isIntegerTy() &&
 	                PN->getType()->getScalarSizeInBits() <= 64) {
-	              const SCEV *PS = SE.getSCEVAtScope(PN, L);
-	              const auto *AR = dyn_cast<SCEVAddRecExpr>(PS);
-	              if (AR && AR->getLoop() == L && AR->isAffine()) {
-	                const SCEV *StartS = AR->getStart();
-	                const SCEV *StepS = AR->getStepRecurrence(SE);
-	                if (!StartS || !StepS)
-	                  return std::nullopt;
-
-	                // Prefer constant-step lowering when available; fall back to a
-	                // vector multiply for dynamic step values.
-	                std::optional<int64_t> StepConst;
-	                if (auto *StepC = dyn_cast<SCEVConstant>(StepS)) {
-	                  StepConst = StepC->getAPInt().getSExtValue();
-	                  if (*StepConst == 0)
-	                    return std::nullopt;
-	                  if (*StepConst > 4096 || *StepConst < -4096)
-	                    StepConst.reset();
-	                }
-
-	                std::optional<std::string> ScaledIndex;
-	                if (StepConst) {
-	                  if (*StepConst == 1) {
-	                    ScaledIndex = LinearIndexReg;
-	                  } else {
-	                    ScaledIndex = emitScaledLc0(*StepConst);
-	                  }
-	                } else {
-	                  Value *StepV = Exp.expandCodeFor(StepS, StepS->getType(),
-	                                                   Preheader->getTerminator());
-	                  if (!StepV)
-	                    return std::nullopt;
-	                  if (!StepV->getType()->isIntegerTy())
-	                    return std::nullopt;
-	                  if (StepV->getType()->getScalarSizeInBits() > 64)
-	                    return std::nullopt;
-	                  if (StepV->getType() != I64Ty)
-	                    StepV = PB.CreateSExtOrTrunc(StepV, I64Ty);
-	                  auto StepTok = emitValue(StepV);
-	                  if (!StepTok)
-	                    return std::nullopt;
-	                  auto Mul = allocVec();
-	                  if (!Mul)
-	                    return std::nullopt;
-	                  OS << "  v.mul " << LinearIndexReg << ", " << *StepTok
-	                     << ", ->" << *Mul << "\n";
-	                  ScaledIndex = *Mul;
-	                }
-	                if (!ScaledIndex)
-	                  return std::nullopt;
-
-	                std::optional<int64_t> StartConst;
-	                if (auto *StartC = dyn_cast<SCEVConstant>(StartS))
-	                  StartConst = StartC->getAPInt().getSExtValue();
-
-	                if (StartConst && *StartConst == 0) {
-	                  ValOp[V] = *ScaledIndex;
-	                  return *ScaledIndex;
-	                }
-
-	                std::optional<std::string> StartTok;
-	                if (StartConst) {
-	                  auto *C64 = ConstantInt::get(I64Ty, (uint64_t)*StartConst);
-	                  auto Bind = bindI64(C64);
-	                  if (!Bind)
-	                    return std::nullopt;
-	                  StartTok = "ri" + std::to_string(*Bind);
-	                } else {
-	                  Value *StartV = Exp.expandCodeFor(StartS, StartS->getType(),
-	                                                    Preheader->getTerminator());
-	                  if (!StartV)
-	                    return std::nullopt;
-	                  if (!StartV->getType()->isIntegerTy())
-	                    return std::nullopt;
-	                  if (StartV->getType()->getScalarSizeInBits() > 64)
-	                    return std::nullopt;
-	                  if (StartV->getType() != I64Ty)
-	                    StartV = PB.CreateSExtOrTrunc(StartV, I64Ty);
-	                  StartTok = emitValue(StartV);
-	                }
-	                if (!StartTok)
-	                  return std::nullopt;
-
-	                auto Dst = allocVec();
-	                if (!Dst)
-	                  return std::nullopt;
-	                OS << "  v.add " << *ScaledIndex << ", " << *StartTok << ", ->"
-	                   << *Dst << "\n";
-	                ValOp[V] = *Dst;
-	                return *Dst;
-	              }
+	              if (auto Dst = emitIntegerAffineAddRecValue(PN, /*EdgeFresh=*/false))
+	                return Dst;
 	            }
 
 	            // Loop-invariant PHIs can appear in nested loops (outer IVs). Treat
@@ -4480,7 +4500,24 @@ public:
 			                  return false;
 			                }
 			                Value *InV = Phi->getIncomingValue(Idx);
-			                auto SrcTok = emitValue(InV);
+			                std::optional<std::string> SrcTok;
+			                bool NeedsEdgeFresh = false;
+			                if (InV->getType()->isIntegerTy() &&
+			                    InV->getType()->getScalarSizeInBits() <= 64) {
+			                  const SCEV *InS = SE.getSCEVAtScope(InV, L);
+			                  const auto *AR = dyn_cast<SCEVAddRecExpr>(InS);
+			                  if (AR && AR->getLoop() == L && AR->isAffine()) {
+			                    NeedsEdgeFresh = true;
+			                    SrcTok = emitIntegerAffineAddRecValue(
+			                        InV, /*EdgeFresh=*/true);
+			                  }
+			                }
+			                if (NeedsEdgeFresh && !SrcTok) {
+			                  reject("phi_incoming_addrec_emit_failed");
+			                  return false;
+			                }
+			                if (!SrcTok)
+			                  SrcTok = emitValue(InV);
 			                if (!SrcTok) {
 			                  reject("phi_incoming_emit_failed");
 			                  return false;
