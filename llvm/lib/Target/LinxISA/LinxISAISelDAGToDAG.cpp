@@ -319,7 +319,8 @@ static bool isWhitelistedTEPLTileOp10(uint64_t TileOp10) {
   case 0x024: // TCOLMAX
   case 0x025: // TCOLMIN
   case 0x026: // TCOLSUM
-  case 0x027: // TCOLEXPAND
+  case 0x0C0: // TCOLEXPAND
+  case 0x0C1: // TROWEXPAND
   case 0x040: // TEXP
   case 0x041: // TLOG
   case 0x042: // TSQRT
@@ -348,7 +349,8 @@ static void validateWhitelistedTEPLTileOp10(uint64_t TileOp10,
 static constexpr uint64_t TEPL_TILEOP_TADD = 0x000u;
 static constexpr uint64_t TEPL_TILEOP_TSUB = 0x001u;
 static constexpr uint64_t TEPL_TILEOP_TROWMAX = 0x020u;
-static constexpr uint64_t TEPL_TILEOP_TCOLEXPAND = 0x027u;
+static constexpr uint64_t TEPL_TILEOP_TCOLEXPAND = 0x0C0u;
+static constexpr uint64_t TEPL_TILEOP_TROWEXPAND = 0x0C1u;
 static constexpr uint64_t TEPL_TILEOP_TEXPANDS = 0x045u;
 static constexpr uint64_t TEPL_MODE_VV = 0u;
 static constexpr uint64_t TEPL_MODE_VS = 1u;
