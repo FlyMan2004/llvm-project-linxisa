@@ -236,8 +236,10 @@ static StringRef teplAliasMnemonic(unsigned TileOp10) {
     return "BSTART.TCOLMIN";
   case 0x026:
     return "BSTART.TCOLSUM";
-  case 0x027:
+  case 0x0C0:
     return "BSTART.TCOLEXPAND";
+  case 0x0C1:
+    return "BSTART.TROWEXPAND";
   case 0x040:
     return "BSTART.TEXP";
   case 0x041:

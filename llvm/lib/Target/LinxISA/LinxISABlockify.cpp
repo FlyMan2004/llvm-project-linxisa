@@ -134,7 +134,8 @@ static bool isWhitelistedTEPLTileOp10(int64_t TileOp10) {
   case 0x024:
   case 0x025:
   case 0x026:
-  case 0x027:
+  case 0x0c0: // TCOLEXPAND (strict v0.3)
+  case 0x0c1: // TROWEXPAND (strict v0.3)
   case 0x040:
   case 0x041:
   case 0x042:
