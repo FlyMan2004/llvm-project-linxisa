@@ -62,8 +62,8 @@ def RetCC_Linx32 : CallingConv<[
   CCIfType<[f32], CCBitConvertToType<i32>>,
   CCIfType<[f64], CCBitConvertToType<i64>>,
 
-  // Return values in a0 (and a1 for multi-reg returns in the future).
-  CCIfType<[i32, i64], CCAssignToReg<[R2]>>
+  // Return values in a0/a1 when multiple result registers are required.
+  CCIfType<[i32, i64], CCAssignToReg<[R2, R3]>>
 ]>;
 
 //===----------------------------------------------------------------------===//
@@ -114,6 +114,6 @@ def RetCC_Linx64 : CallingConv<[
   // Promote small integers to i64.
   CCIfType<[i1, i8, i16, i32], CCPromoteToType<i64>>,
 
-  // Return values in a0 (and a1 for multi-reg returns in the future).
-  CCIfType<[i64], CCAssignToReg<[R2]>>
+  // Return values in a0/a1 when multiple result registers are required.
+  CCIfType<[i64], CCAssignToReg<[R2, R3]>>
 ]>;

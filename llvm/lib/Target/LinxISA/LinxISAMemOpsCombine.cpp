@@ -202,37 +202,43 @@ static bool tryCombinePair(MachineFunction &MF, MachineBasicBlock &MBB,
     return false;
 
   const DebugLoc DL = MI0.getDebugLoc();
-  MachineInstrBuilder NewMI = BuildMI(MBB, I, DL, TII.get(PairOpc));
-
+  MachineInstr *NewInstr = nullptr;
   if (MI0.mayLoad()) {
     const Register Dst0 = MI0.getOperand(0).getReg();
     const Register Dst1 = MI1.getOperand(0).getReg();
     if (Dst0 == Base0 || Dst1 == Base0 || Dst0 == Dst1)
       return false;
+    MachineInstrBuilder NewMI = BuildMI(MBB, I, DL, TII.get(PairOpc));
+    NewInstr = NewMI.getInstr();
     NewMI.addReg(Dst0, RegState::Define);
     NewMI.addReg(Dst1, RegState::Define);
     NewMI.addReg(Base0);
     NewMI.addImm(Off0);
+    for (MachineMemOperand *MMO : MI0.memoperands())
+      NewMI.addMemOperand(MMO);
+    for (MachineMemOperand *MMO : MI1.memoperands())
+      NewMI.addMemOperand(MMO);
   } else if (MI0.mayStore()) {
     const Register Src0 = MI0.getOperand(0).getReg();
     const Register Src1 = MI1.getOperand(0).getReg();
+    MachineInstrBuilder NewMI = BuildMI(MBB, I, DL, TII.get(PairOpc));
+    NewInstr = NewMI.getInstr();
     NewMI.addReg(Src0);
     NewMI.addReg(Src1);
     NewMI.addReg(Base0);
     NewMI.addImm(Off0);
+    for (MachineMemOperand *MMO : MI0.memoperands())
+      NewMI.addMemOperand(MMO);
+    for (MachineMemOperand *MMO : MI1.memoperands())
+      NewMI.addMemOperand(MMO);
   } else {
     return false;
   }
 
-  for (MachineMemOperand *MMO : MI0.memoperands())
-    NewMI.addMemOperand(MMO);
-  for (MachineMemOperand *MMO : MI1.memoperands())
-    NewMI.addMemOperand(MMO);
-
   MI0.eraseFromParent();
   MI1.eraseFromParent();
 
-  I = std::next(NewMI.getInstr()->getIterator());
+  I = std::next(NewInstr->getIterator());
   return true;
 }
 
@@ -293,33 +299,37 @@ static bool tryCombinePostIndex(MachineFunction &MF, MachineBasicBlock &MBB,
     return false;
 
   const DebugLoc DL = Mem.getDebugLoc();
-  MachineInstrBuilder NewMI = BuildMI(MBB, I, DL, TII.get(NewOpc));
-
+  MachineInstr *NewInstr = nullptr;
   if (Mem.mayLoad()) {
     const Register Dst = Mem.getOperand(0).getReg();
     if (Dst == Base || Dst == WbDst)
       return false;
+    MachineInstrBuilder NewMI = BuildMI(MBB, I, DL, TII.get(NewOpc));
+    NewInstr = NewMI.getInstr();
     NewMI.addReg(Dst, RegState::Define);
     NewMI.addReg(WbDst, RegState::Define);
     NewMI.addReg(Base);
     NewMI.addImm(OffField);
+    for (MachineMemOperand *MMO : Mem.memoperands())
+      NewMI.addMemOperand(MMO);
   } else if (Mem.mayStore()) {
     const Register Val = Mem.getOperand(0).getReg();
+    MachineInstrBuilder NewMI = BuildMI(MBB, I, DL, TII.get(NewOpc));
+    NewInstr = NewMI.getInstr();
     NewMI.addReg(WbDst, RegState::Define);
     NewMI.addReg(Val);
     NewMI.addReg(Base);
     NewMI.addImm(OffField);
+    for (MachineMemOperand *MMO : Mem.memoperands())
+      NewMI.addMemOperand(MMO);
   } else {
     return false;
   }
 
-  for (MachineMemOperand *MMO : Mem.memoperands())
-    NewMI.addMemOperand(MMO);
-
   Mem.eraseFromParent();
   Add.eraseFromParent();
 
-  I = std::next(NewMI.getInstr()->getIterator());
+  I = std::next(NewInstr->getIterator());
   return true;
 }
 
@@ -382,33 +392,37 @@ static bool tryCombinePreIndex(MachineFunction &MF, MachineBasicBlock &MBB,
     return false;
 
   const DebugLoc DL = Add.getDebugLoc();
-  MachineInstrBuilder NewMI = BuildMI(MBB, I, DL, TII.get(NewOpc));
-
+  MachineInstr *NewInstr = nullptr;
   if (Mem.mayLoad()) {
     const Register Dst = Mem.getOperand(0).getReg();
     if (Dst == NewBase || Dst == OldBase)
       return false;
+    MachineInstrBuilder NewMI = BuildMI(MBB, I, DL, TII.get(NewOpc));
+    NewInstr = NewMI.getInstr();
     NewMI.addReg(Dst, RegState::Define);
     NewMI.addReg(NewBase, RegState::Define);
     NewMI.addReg(OldBase);
     NewMI.addImm(OffField);
+    for (MachineMemOperand *MMO : Mem.memoperands())
+      NewMI.addMemOperand(MMO);
   } else if (Mem.mayStore()) {
     const Register Val = Mem.getOperand(0).getReg();
+    MachineInstrBuilder NewMI = BuildMI(MBB, I, DL, TII.get(NewOpc));
+    NewInstr = NewMI.getInstr();
     NewMI.addReg(NewBase, RegState::Define);
     NewMI.addReg(Val);
     NewMI.addReg(OldBase);
     NewMI.addImm(OffField);
+    for (MachineMemOperand *MMO : Mem.memoperands())
+      NewMI.addMemOperand(MMO);
   } else {
     return false;
   }
 
-  for (MachineMemOperand *MMO : Mem.memoperands())
-    NewMI.addMemOperand(MMO);
-
   Add.eraseFromParent();
   Mem.eraseFromParent();
 
-  I = std::next(NewMI.getInstr()->getIterator());
+  I = std::next(NewInstr->getIterator());
   return true;
 }
 

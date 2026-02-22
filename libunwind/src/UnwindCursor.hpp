@@ -1242,6 +1242,12 @@ private:
   }
 #endif
 
+#if defined(_LIBUNWIND_TARGET_LINX)
+  bool compactSaysUseDwarf(Registers_linx &, uint32_t *) const {
+    return true;
+  }
+#endif
+
 #endif // defined(_LIBUNWIND_SUPPORT_COMPACT_UNWIND)
 
 #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
@@ -1312,6 +1318,12 @@ private:
 
 #if defined(_LIBUNWIND_TARGET_LOONGARCH)
   compact_unwind_encoding_t dwarfEncoding(Registers_loongarch &) const {
+    return 0;
+  }
+#endif
+
+#if defined(_LIBUNWIND_TARGET_LINX)
+  compact_unwind_encoding_t dwarfEncoding(Registers_linx &) const {
     return 0;
   }
 #endif

@@ -1223,6 +1223,48 @@ DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
   jmp %o7
    clr %o0                   // return UNW_ESUCCESS
 
+#elif defined(__LINX__) || defined(__linx__)
+
+#
+# extern int __unw_getcontext(unw_context_t* thread_state)
+#
+# On entry:
+#  thread_state pointer is in a0
+#
+DEFINE_LIBUNWIND_FUNCTION(__unw_getcontext)
+  C.BSTART.STD
+  // slot 0 stores pc.
+  sdi ra, [a0, 0]
+  // slots 1..23 store r1..r23.
+  sdi sp, [a0, 8]
+  sdi a0, [a0, 16]
+  sdi a1, [a0, 24]
+  sdi a2, [a0, 32]
+  sdi a3, [a0, 40]
+  sdi a4, [a0, 48]
+  sdi a5, [a0, 56]
+  sdi a6, [a0, 64]
+  sdi a7, [a0, 72]
+  sdi ra, [a0, 80]
+  sdi s0, [a0, 88]
+  sdi s1, [a0, 96]
+  sdi s2, [a0, 104]
+  sdi s3, [a0, 112]
+  sdi s4, [a0, 120]
+  sdi s5, [a0, 128]
+  sdi s6, [a0, 136]
+  sdi s7, [a0, 144]
+  sdi s8, [a0, 152]
+  sdi x0, [a0, 160]
+  sdi x1, [a0, 168]
+  sdi x2, [a0, 176]
+  sdi x3, [a0, 184]
+
+  c.movr zero, ->a0
+  C.BSTART.STD IND
+  setc.tgt ra
+  C.BSTOP
+
 #elif defined(__riscv)
 
 #

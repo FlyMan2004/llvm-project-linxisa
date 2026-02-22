@@ -26,6 +26,7 @@
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
+#include <algorithm>
 
 using namespace llvm;
 
@@ -50,6 +51,39 @@ getFentryRangeEnc(const MachineFunction &MF) {
     RegEndEnc = std::max<unsigned>(RegEndEnc, TRI.getEncodingValue(CS.getReg()));
 
   return {RegBeginEnc, RegEndEnc};
+}
+
+static constexpr uint64_t kFentryStackAlign = 8;
+static constexpr uint64_t kFentryStackImmBits = 15;
+static constexpr uint64_t kFentryStackMax =
+    ((1ULL << kFentryStackImmBits) - 1) & ~(kFentryStackAlign - 1);
+static constexpr uint64_t kStackAdjustImmMax = 4095;
+static constexpr uint64_t kStackAdjustChunk =
+    kStackAdjustImmMax & ~(kFentryStackAlign - 1);
+
+static std::pair<uint64_t, uint64_t> splitFentryStack(uint64_t StackSize) {
+  const uint64_t MacroStack = std::min<uint64_t>(StackSize, kFentryStackMax);
+  return {MacroStack, StackSize - MacroStack};
+}
+
+static void emitStackAdjustChunks(MachineBasicBlock &MBB,
+                                  MachineBasicBlock::iterator InsertPt,
+                                  const LinxISAInstrInfo &TII,
+                                  uint64_t StackBytes, bool IsAllocate) {
+  if (StackBytes == 0)
+    return;
+
+  const unsigned Opc = IsAllocate ? LinxISA::SUBIri : LinxISA::ADDIri;
+  while (StackBytes > 0) {
+    uint64_t Chunk = std::min<uint64_t>(StackBytes, kStackAdjustChunk);
+    if (Chunk == 0 || Chunk > kStackAdjustImmMax)
+      report_fatal_error("Linx: invalid stack adjustment chunk");
+
+    BuildMI(MBB, InsertPt, DebugLoc(), TII.get(Opc), LinxISA::R1)
+        .addReg(LinxISA::R1)
+        .addImm(Chunk);
+    StackBytes -= Chunk;
+  }
 }
 
 void LinxISAFrameLowering::determineCalleeSaves(MachineFunction &MF,
@@ -120,8 +154,10 @@ void LinxISAFrameLowering::emitPrologue(MachineFunction &MF,
 
   MachineFrameInfo &MFI = MF.getFrameInfo();
   const uint64_t StackSize = MFI.getStackSize();
-  if (!isUInt<15>(StackSize) || (StackSize & 7) != 0)
-    report_fatal_error("Linx: invalid stack size for FENTRY/FRET (must be 15-bit, 8-byte aligned)");
+  if ((StackSize & (kFentryStackAlign - 1)) != 0)
+    report_fatal_error(
+        "Linx: invalid stack size for FENTRY/FRET (must be 8-byte aligned)");
+  auto [MacroStack, ExtraStack] = splitFentryStack(StackSize);
 
   const LinxISAInstrInfo &TII =
       *static_cast<const LinxISAInstrInfo *>(MF.getSubtarget().getInstrInfo());
@@ -141,7 +177,8 @@ void LinxISAFrameLowering::emitPrologue(MachineFunction &MF,
   BuildMI(*PrologueBB, PrologueBB->end(), DebugLoc(), TII.get(LinxISA::FENTRY))
       .addImm(RegBeginEnc)
       .addImm(RegEndEnc)
-      .addImm(StackSize);
+      .addImm(MacroStack);
+  emitStackAdjustChunks(*PrologueBB, PrologueBB->end(), TII, ExtraStack, true);
 }
 
 void LinxISAFrameLowering::emitEpilogue(MachineFunction &MF,
@@ -151,8 +188,10 @@ void LinxISAFrameLowering::emitEpilogue(MachineFunction &MF,
 
   MachineFrameInfo &MFI = MF.getFrameInfo();
   const uint64_t StackSize = MFI.getStackSize();
-  if (!isUInt<15>(StackSize) || (StackSize & 7) != 0)
-    report_fatal_error("Linx: invalid stack size for FENTRY/FRET (must be 15-bit, 8-byte aligned)");
+  if ((StackSize & (kFentryStackAlign - 1)) != 0)
+    report_fatal_error(
+        "Linx: invalid stack size for FENTRY/FRET (must be 8-byte aligned)");
+  auto [MacroStack, ExtraStack] = splitFentryStack(StackSize);
 
   const LinxISAInstrInfo &TII =
       *static_cast<const LinxISAInstrInfo *>(MF.getSubtarget().getInstrInfo());
@@ -201,10 +240,11 @@ void LinxISAFrameLowering::emitEpilogue(MachineFunction &MF,
     MBB.addSuccessor(FExitBB);
     FExitBB->addSuccessor(TailBB);
 
+    emitStackAdjustChunks(*FExitBB, FExitBB->end(), TII, ExtraStack, false);
     BuildMI(*FExitBB, FExitBB->end(), DebugLoc(), TII.get(LinxISA::FEXIT))
         .addImm(RegBeginEnc)
         .addImm(RegEndEnc)
-        .addImm(StackSize);
+        .addImm(MacroStack);
     FExitBB->addLiveIn(LinxISA::R1);
     FExitBB->addLiveIn(LinxISA::R10);
     return;
@@ -251,12 +291,13 @@ void LinxISAFrameLowering::emitEpilogue(MachineFunction &MF,
   MF.insert(std::next(MBB.getIterator()), EpilogueBB);
   MBB.addSuccessor(EpilogueBB);
 
+  emitStackAdjustChunks(*EpilogueBB, EpilogueBB->end(), TII, ExtraStack, false);
   MachineInstrBuilder MIB =
       BuildMI(*EpilogueBB, EpilogueBB->end(), DebugLoc(),
               TII.get(LinxISA::FRET_STK))
           .addImm(RegBeginEnc)
           .addImm(RegEndEnc)
-          .addImm(StackSize);
+          .addImm(MacroStack);
   for (Register Reg : RetValRegs)
     MIB.addReg(Reg, RegState::Implicit);
 

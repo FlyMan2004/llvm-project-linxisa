@@ -1406,4 +1406,32 @@ enum {
   UNW_LOONGARCH_F31 = 63,
 };
 
+// Linx ISA GPR registers (DWARF mapping matches LLVM Linx target).
+enum {
+  UNW_LINX_R0  = 0,
+  UNW_LINX_R1  = 1,
+  UNW_LINX_R2  = 2,
+  UNW_LINX_R3  = 3,
+  UNW_LINX_R4  = 4,
+  UNW_LINX_R5  = 5,
+  UNW_LINX_R6  = 6,
+  UNW_LINX_R7  = 7,
+  UNW_LINX_R8  = 8,
+  UNW_LINX_R9  = 9,
+  UNW_LINX_R10 = 10,
+  UNW_LINX_R11 = 11,
+  UNW_LINX_R12 = 12,
+  UNW_LINX_R13 = 13,
+  UNW_LINX_R14 = 14,
+  UNW_LINX_R15 = 15,
+  UNW_LINX_R16 = 16,
+  UNW_LINX_R17 = 17,
+  UNW_LINX_R18 = 18,
+  UNW_LINX_R19 = 19,
+  UNW_LINX_R20 = 20,
+  UNW_LINX_R21 = 21,
+  UNW_LINX_R22 = 22,
+  UNW_LINX_R23 = 23,
+};
+
 #endif

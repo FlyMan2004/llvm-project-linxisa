@@ -1204,6 +1204,46 @@ DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind15Registers_sparc6jumptoEv)
   jmp %o7
    nop
 
+#elif defined(__LINX__) || defined(__linx__)
+
+//
+// void libunwind::Registers_linx::jumpto()
+//
+// On entry:
+//  thread_state pointer is in a0
+//
+DEFINE_LIBUNWIND_FUNCTION(_ZN9libunwind14Registers_linx6jumptoEv)
+  C.BSTART.STD
+  // Keep jump target in x3; restore ra from slot 10.
+  ldi [a0, 0], ->x3
+  ldi [a0, 8], ->sp
+  ldi [a0, 24], ->a1
+  ldi [a0, 32], ->a2
+  ldi [a0, 40], ->a3
+  ldi [a0, 48], ->a4
+  ldi [a0, 56], ->a5
+  ldi [a0, 64], ->a6
+  ldi [a0, 72], ->a7
+  ldi [a0, 80], ->ra
+  ldi [a0, 88], ->s0
+  ldi [a0, 96], ->s1
+  ldi [a0, 104], ->s2
+  ldi [a0, 112], ->s3
+  ldi [a0, 120], ->s4
+  ldi [a0, 128], ->s5
+  ldi [a0, 136], ->s6
+  ldi [a0, 144], ->s7
+  ldi [a0, 152], ->s8
+  ldi [a0, 160], ->x0
+  ldi [a0, 168], ->x1
+  ldi [a0, 176], ->x2
+  // Keep a0 (slot 2) for last so the context base remains valid.
+  ldi [a0, 16], ->a0
+
+  C.BSTART.STD IND
+  setc.tgt x3
+  C.BSTOP
+
 #elif defined(__riscv)
 
 //

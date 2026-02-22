@@ -235,12 +235,16 @@ LinxISATargetLowering::LinxISATargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::FCOPYSIGN, MVT::f32, Expand);
   setOperationAction(ISD::FEXP2, MVT::f32, Expand);
   setOperationAction(ISD::FLOG2, MVT::f32, Expand);
+  setOperationAction(ISD::FPOW, MVT::f32, Expand);
+  setOperationAction(ISD::FPOWI, MVT::f32, Expand);
 
   setOperationAction(ISD::FREM, MVT::f64, Expand);
   setOperationAction(ISD::FSQRT, MVT::f64, Expand);
   setOperationAction(ISD::FCOPYSIGN, MVT::f64, Expand);
   setOperationAction(ISD::FEXP2, MVT::f64, Expand);
   setOperationAction(ISD::FLOG2, MVT::f64, Expand);
+  setOperationAction(ISD::FPOW, MVT::f64, Expand);
+  setOperationAction(ISD::FPOWI, MVT::f64, Expand);
 
   setOperationAction(ISD::FP_TO_SINT, MVT::i32, Custom);
   setOperationAction(ISD::FP_TO_UINT, MVT::i32, Custom);
