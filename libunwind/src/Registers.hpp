@@ -47,6 +47,7 @@ enum {
   REGISTERS_VE,
   REGISTERS_S390X,
   REGISTERS_LOONGARCH,
+  REGISTERS_LINX,
 };
 
 #if defined(_LIBUNWIND_TARGET_I386)
@@ -4516,6 +4517,164 @@ inline void Registers_riscv::setVectorRegister(int, v128) {
   _LIBUNWIND_ABORT("no riscv vector register support yet");
 }
 #endif // _LIBUNWIND_TARGET_RISCV
+
+#if defined(_LIBUNWIND_TARGET_LINX)
+/// Registers_linx holds the register state of a thread in a Linx process.
+class _LIBUNWIND_HIDDEN Registers_linx {
+public:
+  Registers_linx();
+  Registers_linx(const void *registers);
+
+  typedef uint64_t reg_t;
+  typedef uint64_t link_reg_t;
+  typedef const link_reg_t &link_hardened_reg_arg_t;
+
+  bool validRegister(int num) const;
+  uint64_t getRegister(int num) const;
+  void setRegister(int num, uint64_t value);
+  bool validFloatRegister(int) const;
+  double getFloatRegister(int num) const;
+  void setFloatRegister(int num, double value);
+  bool validVectorRegister(int) const;
+  v128 getVectorRegister(int num) const;
+  void setVectorRegister(int num, v128 value);
+  static const char *getRegisterName(int num);
+  void jumpto();
+  static constexpr int lastDwarfRegNum() {
+    return _LIBUNWIND_HIGHEST_DWARF_REGISTER_LINX;
+  }
+  static int getArch() { return REGISTERS_LINX; }
+
+  uint64_t getSP() const { return _registers[UNW_LINX_R1]; }
+  void setSP(uint64_t value) { _registers[UNW_LINX_R1] = value; }
+  uint64_t getIP() const { return _registers[0]; }
+  void setIP(uint64_t value) { _registers[0] = value; }
+
+private:
+  // Slot 0 stores PC. Slots 1..23 store r1..r23.
+  uint64_t _registers[24];
+};
+
+inline Registers_linx::Registers_linx(const void *registers) {
+  static_assert((check_fit<Registers_linx, unw_context_t>::does_fit),
+                "linx registers do not fit into unw_context_t");
+  memcpy(&_registers, registers, sizeof(_registers));
+}
+
+inline Registers_linx::Registers_linx() { memset(&_registers, 0, sizeof(_registers)); }
+
+inline bool Registers_linx::validRegister(int regNum) const {
+  if (regNum == UNW_REG_IP || regNum == UNW_REG_SP)
+    return true;
+  if (regNum < UNW_LINX_R0 || regNum > UNW_LINX_R23)
+    return false;
+  return true;
+}
+
+inline uint64_t Registers_linx::getRegister(int regNum) const {
+  if (regNum == UNW_REG_IP)
+    return _registers[0];
+  if (regNum == UNW_REG_SP)
+    return _registers[UNW_LINX_R1];
+  if (regNum == UNW_LINX_R0)
+    return 0;
+  if (regNum >= UNW_LINX_R1 && regNum <= UNW_LINX_R23)
+    return _registers[regNum];
+  _LIBUNWIND_ABORT("unsupported linx register");
+}
+
+inline void Registers_linx::setRegister(int regNum, uint64_t value) {
+  if (regNum == UNW_REG_IP)
+    _registers[0] = value;
+  else if (regNum == UNW_REG_SP)
+    _registers[UNW_LINX_R1] = value;
+  else if (regNum == UNW_LINX_R0)
+    return;
+  else if (regNum >= UNW_LINX_R1 && regNum <= UNW_LINX_R23)
+    _registers[regNum] = value;
+  else
+    _LIBUNWIND_ABORT("unsupported linx register");
+}
+
+inline const char *Registers_linx::getRegisterName(int regNum) {
+  switch (regNum) {
+  case UNW_REG_IP:
+    return "pc";
+  case UNW_REG_SP:
+    return "sp";
+  case UNW_LINX_R0:
+    return "zero";
+  case UNW_LINX_R1:
+    return "sp";
+  case UNW_LINX_R2:
+    return "a0";
+  case UNW_LINX_R3:
+    return "a1";
+  case UNW_LINX_R4:
+    return "a2";
+  case UNW_LINX_R5:
+    return "a3";
+  case UNW_LINX_R6:
+    return "a4";
+  case UNW_LINX_R7:
+    return "a5";
+  case UNW_LINX_R8:
+    return "a6";
+  case UNW_LINX_R9:
+    return "a7";
+  case UNW_LINX_R10:
+    return "ra";
+  case UNW_LINX_R11:
+    return "s0";
+  case UNW_LINX_R12:
+    return "s1";
+  case UNW_LINX_R13:
+    return "s2";
+  case UNW_LINX_R14:
+    return "s3";
+  case UNW_LINX_R15:
+    return "s4";
+  case UNW_LINX_R16:
+    return "s5";
+  case UNW_LINX_R17:
+    return "s6";
+  case UNW_LINX_R18:
+    return "s7";
+  case UNW_LINX_R19:
+    return "s8";
+  case UNW_LINX_R20:
+    return "x0";
+  case UNW_LINX_R21:
+    return "x1";
+  case UNW_LINX_R22:
+    return "x2";
+  case UNW_LINX_R23:
+    return "x3";
+  default:
+    return "unknown register";
+  }
+}
+
+inline bool Registers_linx::validFloatRegister(int) const { return false; }
+
+inline double Registers_linx::getFloatRegister(int) const {
+  _LIBUNWIND_ABORT("linx float register support not implemented");
+}
+
+inline void Registers_linx::setFloatRegister(int, double) {
+  _LIBUNWIND_ABORT("linx float register support not implemented");
+}
+
+inline bool Registers_linx::validVectorRegister(int) const { return false; }
+
+inline v128 Registers_linx::getVectorRegister(int) const {
+  _LIBUNWIND_ABORT("linx vector register support not implemented");
+}
+
+inline void Registers_linx::setVectorRegister(int, v128) {
+  _LIBUNWIND_ABORT("linx vector register support not implemented");
+}
+#endif // _LIBUNWIND_TARGET_LINX
 
 #if defined(_LIBUNWIND_TARGET_VE)
 /// Registers_ve holds the register state of a thread in a VE process.

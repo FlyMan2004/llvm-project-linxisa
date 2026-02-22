@@ -3323,14 +3323,26 @@ public:
         break;
       }
 
-      // Recognize exit shape from the end of the block.
-      if (Last) {
-        switch (Last->getOpcode()) {
-	        case LinxISA::PSEUDO_CALL: {
+	      // Recognize exit shape from the end of the block.
+	      if (Last) {
+	        switch (Last->getOpcode()) {
+	        case LinxISA::PSEUDO_TAILCALL: {
 	          CallTargetOp = Last->getOperand(0);
 	          if (CallTargetOp->isReg()) {
-	            Kind = ExitKind::ICall;
+	            Kind = ExitKind::Ind;
 	            ICallSetcTgtReg = CallTargetOp->getReg();
+	          } else {
+	            Kind = ExitKind::Direct;
+	          }
+	          Last->eraseFromParent();
+	          Changed = true;
+	          break;
+	        }
+		        case LinxISA::PSEUDO_CALL: {
+		          CallTargetOp = Last->getOperand(0);
+		          if (CallTargetOp->isReg()) {
+		            Kind = ExitKind::ICall;
+		            ICallSetcTgtReg = CallTargetOp->getReg();
 	          } else {
 	            Kind = ExitKind::Call;
 	          }

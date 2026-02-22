@@ -1,44 +1,37 @@
-# The LLVM Compiler Infrastructure
+# LinxISA LLVM Compiler
 
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/llvm/llvm-project/badge)](https://securityscorecards.dev/viewer/?uri=github.com/llvm/llvm-project)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/8273/badge)](https://www.bestpractices.dev/projects/8273)
-[![libc++](https://github.com/llvm/llvm-project/actions/workflows/libcxx-build-and-test.yaml/badge.svg?branch=main&event=schedule)](https://github.com/llvm/llvm-project/actions/workflows/libcxx-build-and-test.yaml?query=event%3Aschedule)
+## Scope
+`compiler/llvm` is the LinxISA LLVM fork used by this superproject for compiler, linker, and runtime bring-up. It is the canonical source for Linx target codegen, MC/asm, ABI lowering, and toolchain binaries used by AVS and Linux/QEMU integration.
 
-Welcome to the LLVM project!
+## Upstream
+- Repository: `https://github.com/LinxISA/llvm-project`
+- Merge-back target branch: `main`
 
-This repository contains the source code for LLVM, a toolkit for the
-construction of highly optimized compilers, optimizers, and run-time
-environments.
+## What This Submodule Owns
+- LinxISA LLVM backend (`llvm/lib/Target/Linx*`)
+- Linx-specific Clang/LLD integration
+- Linx toolchain artifacts used by superproject gates
 
-The LLVM project has multiple components. The core of the project is
-itself called "LLVM". This contains all of the tools, libraries, and header
-files needed to process intermediate representations and convert them into
-object files. Tools include an assembler, disassembler, bitcode analyzer, and
-bitcode optimizer.
+## Canonical Build and Test Commands
+Run from `/Users/zhoubot/linx-isa`.
 
-C-like languages use the [Clang](https://clang.llvm.org/) frontend. This
-component compiles C, C++, Objective-C, and Objective-C++ code into LLVM bitcode
--- and from there into object files, using LLVM.
+```bash
+cmake -S compiler/llvm/llvm -B compiler/llvm/build-linxisa-clang -G Ninja \
+  -DLLVM_ENABLE_PROJECTS="clang;lld" \
+  -DLLVM_TARGETS_TO_BUILD=Linx
+cmake --build compiler/llvm/build-linxisa-clang --target clang lld
 
-Other components include:
-the [libc++ C++ standard library](https://libcxx.llvm.org),
-the [LLD linker](https://lld.llvm.org), and more.
+cd /Users/zhoubot/linx-isa/avs/compiler/linx-llvm/tests
+CLANG=/Users/zhoubot/linx-isa/compiler/llvm/build-linxisa-clang/bin/clang ./run.sh
+CLANGXX=/Users/zhoubot/linx-isa/compiler/llvm/build-linxisa-clang/bin/clang++ ./run_cpp.sh
+```
 
-## Getting the Source Code and Building LLVM
+## LinxISA Integration Touchpoints
+- Primary compiler lane in `tools/regression/run.sh`
+- Strict cross-repo gate in `tools/regression/strict_cross_repo.sh`
+- ABI/runtime coupling with `lib/musl`, `lib/glibc`, and kernel userspace bring-up
 
-Consult the
-[Getting Started with LLVM](https://llvm.org/docs/GettingStarted.html#getting-the-source-code-and-building-llvm)
-page for information on building and running LLVM.
-
-For information on how to contribute to the LLVM project, please take a look at
-the [Contributing to LLVM](https://llvm.org/docs/Contributing.html) guide.
-
-## Getting in touch
-
-Join the [LLVM Discourse forums](https://discourse.llvm.org/), [Discord
-chat](https://discord.gg/xS7Z362),
-[LLVM Office Hours](https://llvm.org/docs/GettingInvolved.html#office-hours) or
-[Regular sync-ups](https://llvm.org/docs/GettingInvolved.html#online-sync-ups).
-
-The LLVM project has adopted a [code of conduct](https://llvm.org/docs/CodeOfConduct.html) for
-participants to all modes of communication within the project.
+## Related Docs
+- `/Users/zhoubot/linx-isa/docs/project/navigation.md`
+- `/Users/zhoubot/linx-isa/docs/bringup/`
+- `/Users/zhoubot/linx-isa/avs/compiler/linx-llvm/README.md`

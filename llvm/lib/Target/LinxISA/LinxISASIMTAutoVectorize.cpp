@@ -54,7 +54,7 @@ enum class SIMTAutoVecMode {
 cl::opt<bool>
     LinxSIMTAutoVec("linx-simt-autovec", cl::Hidden,
                     cl::desc("Enable Linx SIMT auto-vectorization pass"),
-                    cl::init(true));
+                    cl::init(false));
 
 cl::opt<SIMTAutoVecMode> LinxSIMTAutoVecMode(
     "linx-simt-autovec-mode", cl::Hidden,
