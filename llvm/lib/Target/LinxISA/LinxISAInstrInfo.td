@@ -193,6 +193,14 @@ def CallTarget : Operand<iPTR> {
 let isCall = 1, hasSideEffects = 1, Size = 6, Uses = [R1], Defs = [R10] in
 def PSEUDO_CALL : Pseudo<(outs), (ins CallTarget:$dst), "# PSEUDO_CALL", []>;
 
+// Tail call / tail transfer (musttail): terminates the function and must not
+// clobber `ra`. The frame is torn down via an explicit FEXIT block inserted by
+// PEI, and Blockify turns this into a DIRECT/IND block transfer.
+let isCall = 1, isReturn = 1, isTerminator = 1, hasSideEffects = 1, Size = 6,
+    Uses = [R1] in
+def PSEUDO_TAILCALL
+    : Pseudo<(outs), (ins CallTarget:$dst), "# PSEUDO_TAILCALL", []>;
+
 // Keep RA live at return. Return value registers are attached explicitly by
 // LowerReturn as operands on each PSEUDO_RET instance, so they must not be
 // hard-wired here (void returns would otherwise require undefined a0/a1).

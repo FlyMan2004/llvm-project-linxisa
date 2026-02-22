@@ -1743,7 +1743,10 @@ SDValue LinxISATargetLowering::LowerCall(CallLoweringInfo &CLI,
   if (InGlue.getNode())
     Ops.push_back(InGlue);
 
-  const unsigned CallOpc = LinxISA::PSEUDO_CALL;
+  if (UseTailCall)
+    DAG.getMachineFunction().getFrameInfo().setHasTailCall();
+  const unsigned CallOpc =
+      UseTailCall ? LinxISA::PSEUDO_TAILCALL : LinxISA::PSEUDO_CALL;
   MachineSDNode *Call = DAG.getMachineNode(CallOpc, DL, NodeTys, Ops);
   Chain = SDValue(Call, 0);
   InGlue = SDValue(Call, 1);

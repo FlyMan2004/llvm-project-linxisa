@@ -202,7 +202,7 @@ void LinxISAFrameLowering::emitEpilogue(MachineFunction &MF,
   for (MachineInstr &MI : llvm::reverse(MBB)) {
     if (MI.isDebugInstr() || MI.isCFIInstruction())
       continue;
-    if (MI.getOpcode() == LinxISA::PSEUDO_CALL) {
+    if (MI.getOpcode() == LinxISA::PSEUDO_TAILCALL) {
       TailCallMI = &MI;
       break;
     }
