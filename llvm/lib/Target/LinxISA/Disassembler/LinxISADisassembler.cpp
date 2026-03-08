@@ -75,10 +75,10 @@ static const linxisa_inst_form *findMatch(uint64_t Insn, unsigned Bits,
     if ((Insn & F.mask) != F.match)
       continue;
 
-    // Disambiguate packed tile/par headers from MSEQ/MPAR:
-    // in the v0.3 bit patterns, MSEQ/MPAR require bit[25]=0.
-    // Some generated masks are currently under-constrained and can otherwise
-    // steal TEPL/TMA/CUBE headers during disassembly.
+    // Disambiguate packed tile/par headers from MSEQ/MPAR in canonical v0.4:
+    // MSEQ/MPAR require bit[25]=0. Some generated masks are currently
+    // under-constrained and can otherwise steal TEPL/TMA/CUBE headers during
+    // disassembly.
     StringRef Mnem(F.mnemonic ? F.mnemonic : "");
     if ((Mnem == "BSTART.MSEQ" || Mnem == "BSTART.MPAR") &&
         (((Insn >> 25) & 0x1ULL) != 0ULL))
