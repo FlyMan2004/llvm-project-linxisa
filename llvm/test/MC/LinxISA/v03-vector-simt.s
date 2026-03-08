@@ -1,9 +1,9 @@
 # RUN: llvm-mc -triple=linx64 -filetype=obj %s -o - | llvm-objdump -d --triple=linx64 - | FileCheck %s
 
 	.text
-	.globl	test_v03_vector_simt
-	.type	test_v03_vector_simt,@function
-test_v03_vector_simt:
+	.globl	test_v04_vector_simt
+	.type	test_v04_vector_simt,@function
+test_v04_vector_simt:
 	BSTART.MSEQ 0
 	B.TEXT .body
 	B.ARG NORM.normal
@@ -21,9 +21,9 @@ test_v03_vector_simt:
 	v.sw.local	vt#1, [to, lc0<<2, lc1<<6]
 	v.lw.local	[to, lc0<<2, lc1<<6], ->vt.w
 	C.BSTOP
-	.size	test_v03_vector_simt, .-test_v03_vector_simt
+	.size	test_v04_vector_simt, .-test_v04_vector_simt
 
-# CHECK-LABEL: <test_v03_vector_simt>:
+# CHECK-LABEL: <test_v04_vector_simt>:
 # CHECK: BSTART.MSEQ
 # CHECK: B.TEXT
 # CHECK: B.ARG{{[[:space:]]+}}NORM.normal

@@ -365,6 +365,17 @@ static StringRef teplModeName(unsigned Mode) {
   }
 }
 
+static StringRef vectorBlockModeName(unsigned Mode) {
+  switch (Mode & 0x3u) {
+  case 0:
+    return "VS8";
+  case 1:
+    return "VS16";
+  default:
+    return StringRef();
+  }
+}
+
 static StringRef padValueName(unsigned Pad) {
   switch (Pad & 0x1fu) {
   case 0:
@@ -775,6 +786,24 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       }
     };
 
+    auto emitPrefetchModel = [&](unsigned Model) {
+      switch (Model & 0x1fu) {
+      case 0:
+        PrintedMnemonicTok += ".l1";
+        break;
+      case 1:
+        PrintedMnemonicTok += ".l2";
+        break;
+      case 2:
+        PrintedMnemonicTok += ".l3";
+        break;
+      default:
+        PrintedMnemonicTok += ".m";
+        PrintedMnemonicTok += utostr(Model & 0x1fu);
+        break;
+      }
+    };
+
     if (Tok.contains("{T}")) {
       const size_t Pos = Tok.find('{');
       PrintedMnemonicTok = Tok.take_front(Pos);
@@ -821,7 +850,86 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       return PrintedMnemonicTok;
     }
 
-    // v0.3 vector bridge: `<.local>` is a mnemonic qualifier driven by the L bit.
+    if (Tok.contains("{st2dt}")) {
+      const size_t Pos = Tok.find('{');
+      PrintedMnemonicTok = Tok.take_front(Pos);
+
+      unsigned SrcType = 0;
+      if (auto V = findFieldImm("SrcType"))
+        SrcType = static_cast<unsigned>(*V);
+
+      unsigned DstType = 0;
+      if (auto V = findFieldImm("DstType"))
+        DstType = static_cast<unsigned>(*V);
+
+      StringRef Mnem = Form.mnemonic ? StringRef(Form.mnemonic) : StringRef();
+      if (Mnem.equals_insensitive("V.FCVTI")) {
+        emitFpT(SrcType);
+        PrintedMnemonicTok += "2";
+        emitCvtIntDst(DstType);
+      } else if (Mnem.equals_insensitive("V.ICVT")) {
+        emitCvtIntSrc(SrcType, /*Signed=*/true);
+        PrintedMnemonicTok += "2";
+        emitCvtIntDst(DstType);
+      } else if (Mnem.equals_insensitive("V.ICVTF")) {
+        emitCvtIntSrc(SrcType, /*Signed=*/true);
+        PrintedMnemonicTok += "2";
+        emitCvtFpDst(DstType);
+      } else {
+        emitFpT(SrcType);
+        PrintedMnemonicTok += "2";
+        emitCvtFpDst(DstType);
+      }
+      return PrintedMnemonicTok;
+    }
+
+    if (Tok.contains("{.l1,.l2,.l3}")) {
+      const size_t Pos = Tok.find('{');
+      PrintedMnemonicTok = Tok.take_front(Pos);
+      const unsigned Model =
+          static_cast<unsigned>(findFieldImm("model").value_or(0)) & 0x1fu;
+      emitPrefetchModel(Model);
+      return PrintedMnemonicTok;
+    }
+
+    if (Tok.contains("{i,e,s,r,ie,is,ir,es,er,ies,ier}")) {
+      const size_t Pos = Tok.find('{');
+      PrintedMnemonicTok = Tok.take_front(Pos);
+      if ((findFieldImm("i").value_or(0) & 0x1) != 0)
+        PrintedMnemonicTok += "i";
+      if ((findFieldImm("e").value_or(0) & 0x1) != 0)
+        PrintedMnemonicTok += "e";
+      if ((findFieldImm("s").value_or(0) & 0x1) != 0)
+        PrintedMnemonicTok += "s";
+      if ((findFieldImm("r").value_or(0) & 0x1) != 0)
+        PrintedMnemonicTok += "r";
+      return PrintedMnemonicTok;
+    }
+
+    if (Tok.contains("{e,r,er}")) {
+      const size_t Pos = Tok.find('{');
+      PrintedMnemonicTok = Tok.take_front(Pos);
+      if ((findFieldImm("e").value_or(0) & 0x1) != 0)
+        PrintedMnemonicTok += "e";
+      if ((findFieldImm("r").value_or(0) & 0x1) != 0)
+        PrintedMnemonicTok += "r";
+      return PrintedMnemonicTok;
+    }
+
+    if (Tok.contains("{h,e,r,he,hr,er,her}")) {
+      const size_t Pos = Tok.find('{');
+      PrintedMnemonicTok = Tok.take_front(Pos);
+      if ((findFieldImm("h").value_or(0) & 0x1) != 0)
+        PrintedMnemonicTok += "h";
+      if ((findFieldImm("e").value_or(0) & 0x1) != 0)
+        PrintedMnemonicTok += "e";
+      if ((findFieldImm("r").value_or(0) & 0x1) != 0)
+        PrintedMnemonicTok += "r";
+      return PrintedMnemonicTok;
+    }
+
+    // Canonical v0.4 vector bridge: `<.local>` is a mnemonic qualifier driven
+    // by the L bit, while bridged/global forms stay on the base mnemonic.
     if (AsmFmt.contains("<.local>")) {
       if (auto L = findFieldImm("L")) {
         if (((*L) & 1) != 0) {
@@ -829,6 +937,37 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
           PrintedMnemonicTok += ".local";
           return PrintedMnemonicTok;
         }
+      }
+    }
+
+    if (AsmFmt.contains("<.{")) {
+      const unsigned Aq = static_cast<unsigned>(findFieldImm("aq").value_or(0)) & 0x1u;
+      const unsigned Rl = static_cast<unsigned>(findFieldImm("rl").value_or(0)) & 0x1u;
+      const unsigned Far = static_cast<unsigned>(findFieldImm("far").value_or(0)) & 0x1u;
+      const unsigned Rd = static_cast<unsigned>(findFieldImm("rd").value_or(0)) & 0x1u;
+
+      SmallString<8> Qual;
+      if (findField("aq")) {
+        if (Aq)
+          Qual += "aq";
+        if (Rl)
+          Qual += "rl";
+        if (Far)
+          Qual += "f";
+      } else {
+        if (Rl)
+          Qual += "rl";
+        if (Rd)
+          Qual += "rd";
+        if (Far)
+          Qual += "f";
+      }
+
+      if (!Qual.empty()) {
+        PrintedMnemonicTok += Tok;
+        PrintedMnemonicTok += ".";
+        PrintedMnemonicTok += Qual;
+        return PrintedMnemonicTok;
       }
     }
 
@@ -930,6 +1069,11 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
   const bool IsTypedTMA = AsmFmt.starts_with("BSTART.TMA");
   const bool IsTypedCUBE = AsmFmt.starts_with("BSTART.CUBE");
   const bool IsTypedTEPL = AsmFmt.starts_with("BSTART.TEPL");
+  const bool IsTypedFIXP = AsmFmt.starts_with("BSTART.FIXP");
+  const bool IsTypedVPAR = AsmFmt.starts_with("BSTART.VPAR");
+  const bool IsTypedVSEQ = AsmFmt.starts_with("BSTART.VSEQ");
+  const bool IsTypedMPAR = AsmFmt.starts_with("BSTART.MPAR");
+  const bool IsTypedMSEQ = AsmFmt.starts_with("BSTART.MSEQ");
   const StringRef TypedTok = stripAngleSuffix(RawTok);
   const bool IsDirectTMAAlias =
       TypedTok == "BSTART.TLOAD" || TypedTok == "BSTART.TSTORE" ||
@@ -941,7 +1085,8 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       TypedTok.starts_with("BSTART.T") && !IsDirectTMAAlias &&
       !IsDirectCUBEAlias && TypedTok != "BSTART.TMA" &&
       TypedTok != "BSTART.TEPL";
-  if (IsLegacyPacked || IsTypedTMA || IsTypedCUBE || IsTypedTEPL ||
+  if (IsLegacyPacked || IsTypedTMA || IsTypedCUBE || IsTypedTEPL || IsTypedFIXP ||
+      IsTypedVPAR || IsTypedVSEQ || IsTypedMPAR || IsTypedMSEQ ||
       IsDirectTMAAlias || IsDirectCUBEAlias || IsDirectTEPLAlias) {
     const unsigned DT = static_cast<unsigned>(
                             findFieldImm("DataType")
@@ -1018,6 +1163,33 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       return;
     }
 
+    if (IsTypedFIXP) {
+      const unsigned Function =
+          static_cast<unsigned>(findFieldImm("Function").value_or(0)) & 0x3ffu;
+      OS << "BSTART.FIXP\t" << utostr(Function) << ", ";
+      printDataType();
+      LastParTileOp = 0u;
+      LastParTileOpValid = false;
+      LastTileHeader = LastTileHeaderKind::None;
+      printAnnotation(OS, Annot);
+      return;
+    }
+
+    if (IsTypedVPAR || IsTypedVSEQ || IsTypedMPAR || IsTypedMSEQ) {
+      const unsigned Mode =
+          static_cast<unsigned>(findFieldImm("Mode").value_or(0)) & 0x3u;
+      OS << TypedTok << "\t";
+      if (StringRef Name = vectorBlockModeName(Mode); !Name.empty())
+        OS << Name;
+      else
+        OS << utostr(Mode);
+      LastParTileOp = 0u;
+      LastParTileOpValid = false;
+      LastTileHeader = LastTileHeaderKind::None;
+      printAnnotation(OS, Annot);
+      return;
+    }
+
     const unsigned TileOpcode =
         static_cast<unsigned>(findFieldImm("TileOpcode").value_or(0)) & 0x3ffu;
     ParStateOp = TileOpcode;
@@ -1077,6 +1249,34 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
 
   // Special-case: block split instructions. LLVM uses these as block
   // terminators; Linx uses halfword PC-relative offsets.
+  if (AsmFmt.starts_with("BSTART.CALL")) {
+    OS << "BSTART.CALL\t";
+    if (!emitPcRelTargetHex("simm12", /*Signed=*/true))
+      OS << "0x0";
+    OS << ", ";
+    if (auto V = findFieldImm("uimm5"))
+      OS << "0x" << utohexstr(static_cast<uint64_t>(*V), /*LowerCase=*/true);
+    else
+      OS << "0x0";
+    OS << ",\t->ra";
+    printAnnotation(OS, Annot);
+    return;
+  }
+
+  if (AsmFmt.starts_with("HL.BSTART.CALL")) {
+    OS << "HL.BSTART.CALL\t";
+    if (!emitPcRelTargetHex("simm25", /*Signed=*/true))
+      OS << "0x0";
+    OS << ", ";
+    if (auto V = findFieldImm("uimm5"))
+      OS << "0x" << utohexstr(static_cast<uint64_t>(*V), /*LowerCase=*/true);
+    else
+      OS << "0x0";
+    OS << ",\t->ra";
+    printAnnotation(OS, Annot);
+    return;
+  }
+
   const bool IsCBSTART = AsmFmt.starts_with("C.BSTART");
   const bool IsBSTART = AsmFmt.starts_with("HL.BSTART") ||
                         AsmFmt.starts_with("BSTART.STD") ||
@@ -1207,6 +1407,8 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       else if (auto V = findFieldImm("simm25"))
         Off = *V;
       else if (auto V = findFieldImm("simm12"))
+        Off = *V;
+      else if (auto V = findFieldImm("simm"))
         Off = *V;
       if (Off != 0)
         emitKindAndLabel("FALL");
@@ -1381,6 +1583,8 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
 
   // Special-case: GPR descriptor binding (B.IOR).
   if (AsmFmt.starts_with("B.IOR")) {
+    const unsigned Dst =
+        static_cast<unsigned>(findFieldImm("RegDst").value_or(0)) & 0x1fu;
     const unsigned Src0 =
         static_cast<unsigned>(findFieldImm("RegSrc0").value_or(0)) & 0x1fu;
     const unsigned Src1 =
@@ -1401,14 +1605,48 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     };
 
     OS << "B.IOR\t[";
-    // Disassembly contract: treat zero as absent and omit it.
-    //
-    // The common bring-up streams place base/stride in RegSrc1/RegSrc0 order
-    // (example: `[s0,a6]`).
-    printRegList({Src1, Src0});
+    printRegList({Src1, Src0, Src2});
     OS << "],[";
-    printRegList({Src2});
+    printRegList({Dst});
     OS << "]";
+    printAnnotation(OS, Annot);
+    return;
+  }
+
+  if (AsmFmt.starts_with("ERCOV") || AsmFmt.starts_with("ESAVE") ||
+      AsmFmt.starts_with("MCOPY") || AsmFmt.starts_with("MSET")) {
+    const unsigned Src0 = static_cast<unsigned>(
+                              findFieldImm("RegSrc0")
+                                  .value_or(findFieldImm("RegSrc0=BasePtr")
+                                                .value_or(findFieldImm("RegSrc0=DstAddr")
+                                                              .value_or(0)))) &
+                          0x1fu;
+    const unsigned Src1 = static_cast<unsigned>(
+                              findFieldImm("RegSrc1")
+                                  .value_or(findFieldImm("RegSrc1=LenBytes")
+                                                .value_or(findFieldImm("RegSrc1=SrcAddr")
+                                                              .value_or(findFieldImm("RegSrc1=Value")
+                                                                            .value_or(0))))) &
+                          0x1fu;
+    const unsigned Src2 = static_cast<unsigned>(
+                              findFieldImm("RegSrc2")
+                                  .value_or(findFieldImm("RegSrc2=Kind")
+                                                .value_or(findFieldImm("RegSrc2=Size")
+                                                              .value_or(0)))) &
+                          0x1fu;
+    OS << mnemonicTok("<op>") << "\t[";
+    OS << reg5Name(Src0) << ", " << reg5Name(Src1) << ", " << reg5Name(Src2)
+       << "]";
+    printAnnotation(OS, Annot);
+    return;
+  }
+
+  if (AsmFmt.starts_with("XB ")) {
+    const unsigned AcrId =
+        static_cast<unsigned>(findFieldImm("ACR-ID").value_or(0)) & 0x3ffu;
+    const unsigned CrossBid =
+        static_cast<unsigned>(findFieldImm("CROSS-BID").value_or(0)) & 0x3ffu;
+    OS << "XB\t" << AcrId << ", " << CrossBid;
     printAnnotation(OS, Annot);
     return;
   }
@@ -1469,7 +1707,8 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
 
     const unsigned ActiveParOp = LastParTileOpValid ? LastParTileOp : 0u;
 
-    // v0.3 bring-up: CUBE MAMULB-class blocks write an implicit accumulator.
+    // Canonical v0.4 CUBE contract: MAMULB-class blocks write an implicit
+    // accumulator destination.
     const bool IsAccDst = (LastTileHeader == LastTileHeaderKind::CUBE) &&
                           (ActiveParOp == 2u || ActiveParOp == 66u);
 
@@ -1547,7 +1786,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       if (!Name.empty()) {
         OS << Name;
       } else {
-        OS << Prefix << "=" << utostr(Format);
+        OS << utostr(Format);
       }
       printAnnotation(OS, Annot);
     };
@@ -1697,12 +1936,59 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
   }
 
   // Special-case: compressed block dimensions.
+  if (AsmFmt.starts_with("C.B.DIM ") || AsmFmt == "C.B.DIM RegSrc, ->{LB0, LB1, LB2}") {
+    const unsigned LoopNest =
+        static_cast<unsigned>(findFieldImm("LoopNest").value_or(0)) & 0x3u;
+    const unsigned Reg =
+        static_cast<unsigned>(findFieldImm("RegSrc").value_or(0)) & 0x1fu;
+    OS << "C.B.DIM\t" << reg5Name(Reg) << ", \t->lb" << utostr(LoopNest);
+    printAnnotation(OS, Annot);
+    return;
+  }
+
   if (AsmFmt.starts_with("C.B.DIMI")) {
     const unsigned LoopNest =
         static_cast<unsigned>(findFieldImm("LoopNest").value_or(0)) & 0x3u;
     const unsigned Imm =
         static_cast<unsigned>(findFieldImm("imm8").value_or(0)) & 0xffu;
     OS << "C.B.DIMI\t" << Imm << ", \t->lb" << utostr(LoopNest);
+    printAnnotation(OS, Annot);
+    return;
+  }
+
+  if (AsmFmt.starts_with("B.HINT TRACE")) {
+    const unsigned Begin =
+        static_cast<unsigned>(findFieldImm("B/E").value_or(0)) & 0x1u;
+    OS << "B.HINT\tTRACE." << (Begin ? "begin" : "end");
+    printAnnotation(OS, Annot);
+    return;
+  }
+
+  if (AsmFmt.starts_with("B.HINT ")) {
+    const unsigned Likely =
+        static_cast<unsigned>(findFieldImm("L/UL").value_or(0)) & 0x1u;
+    const unsigned Temp =
+        static_cast<unsigned>(findFieldImm("temp").value_or(0)) & 0x3u;
+    const unsigned Prefetch =
+        static_cast<unsigned>(findFieldImm("prefetch_size").value_or(0)) &
+        0xfffu;
+    const char *TempName = "hot";
+    switch (Temp) {
+    case 1:
+      TempName = "warm";
+      break;
+    case 2:
+      TempName = "cool";
+      break;
+    case 3:
+      TempName = "none";
+      break;
+    default:
+      TempName = "hot";
+      break;
+    }
+    OS << "B.HINT\t{BR." << (Likely ? "likely" : "unlikely")
+       << ", TEMP." << TempName << ", " << Prefetch << "}";
     printAnnotation(OS, Annot);
     return;
   }
@@ -1765,11 +2051,10 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     OS << mnemonicTok("<mem>");
     OS << "\t";
 
-    const bool HasDest = AsmFmt.contains("->");
-
     if (IsVector) {
       // Vector/SIMT memory ops: `[base, lc0<<k, idx|imm]`.
       StringRef BaseField = "SrcL";
+      bool VecUsesIndex = false;
       if (size_t L = AsmFmt.find('['); L != StringRef::npos) {
         StringRef Inside = AsmFmt.substr(L + 1).split(']').first;
         StringRef BasePart = Inside.split(',').first.trim();
@@ -1777,18 +2062,21 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
           BaseField = "SrcR";
         else if (BasePart.starts_with_insensitive("srcl"))
           BaseField = "SrcL";
+        VecUsesIndex =
+            findField("SrcR") && !Inside.contains_insensitive("simm") &&
+            !Inside.contains_insensitive("uimm");
       }
 
       std::optional<StringRef> ValueField;
-      if (!HasDest) {
-        StringRef Prefix = AsmFmt;
-        if (size_t L = Prefix.find('['); L != StringRef::npos)
-          Prefix = Prefix.take_front(L);
-        if (Prefix.contains_insensitive("SrcD"))
-          ValueField = "SrcD";
-        else if (Prefix.contains_insensitive("SrcL"))
-          ValueField = "SrcL";
-      }
+      StringRef Prefix = AsmFmt;
+      if (size_t L = Prefix.find('['); L != StringRef::npos)
+        Prefix = Prefix.take_front(L);
+      if (Prefix.contains_insensitive("SrcD"))
+        ValueField = "SrcD";
+      else if (Prefix.contains_insensitive("SrcL"))
+        ValueField = "SrcL";
+      const bool HasDest = AsmFmt.contains("->") ||
+                           (!ValueField.has_value() && findField("RegDst"));
 
       unsigned LaneScale = 0;
       if (AsmFmt.contains_insensitive("lc0<<3"))
@@ -1818,7 +2106,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       };
 
       auto emitVecIndex = [&]() -> bool {
-        if (!findField("SrcR"))
+        if (!VecUsesIndex || !findField("SrcR"))
           return false;
         emitReg("SrcR");
         if (auto Sh = findFieldImm("shamt")) {
@@ -1891,6 +2179,10 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
         Off = *V;
       else if (auto V = findFieldImm("uimm17"))
         Off = *V;
+      else if (auto V = findFieldImm("simm22"))
+        Off = *V;
+      else if (auto V = findFieldImm("uimm22"))
+        Off = *V;
       else if (auto V = findFieldImm("simm12"))
         Off = *V;
       else if (auto V = findFieldImm("uimm12"))
@@ -1945,6 +2237,17 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
       else if (Prefix.contains_insensitive("SrcL"))
         ValueField = "SrcL";
     }
+    const bool HasDest = AsmFmt.contains("->") ||
+                         (!ValueField.has_value() && findField("RegDst"));
+    StringRef PostMemFmt;
+    if (size_t R = AsmFmt.find(']'); R != StringRef::npos)
+      PostMemFmt = AsmFmt.drop_front(R + 1);
+    const bool HasPostMemSrcR =
+        !IsRegOffset && findField("SrcR") && PostMemFmt.contains_insensitive("SrcR");
+    const bool HasPostMemSrcD =
+        findField("SrcD") && PostMemFmt.contains_insensitive("SrcD");
+    const bool HasPostMemSrcD1 =
+        findField("SrcD1") && PostMemFmt.contains_insensitive("SrcD1");
 
     std::optional<int64_t> ForcedShift;
     if (AsmFmt.contains("<<1"))
@@ -1991,6 +2294,18 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
         OS << "0";
     }
     OS << "]";
+    if (HasPostMemSrcR) {
+      OS << ", ";
+      emitReg("SrcR");
+    }
+    if (HasPostMemSrcD) {
+      OS << ", ";
+      emitReg("SrcD");
+    }
+    if (HasPostMemSrcD1) {
+      OS << ", ";
+      emitReg("SrcD1");
+    }
     if (HasDest)
       emitArrowDest();
     printAnnotation(OS, Annot);
@@ -1998,7 +2313,9 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
   }
 
   // Pretty printer for the common "SrcL, SrcR<type><<shamt>" operand form.
-  if (Form.mnemonic && StringRef(Form.mnemonic).equals_insensitive("CSEL") &&
+  if (Form.mnemonic &&
+      (StringRef(Form.mnemonic).equals_insensitive("CSEL") ||
+       StringRef(Form.mnemonic).equals_insensitive("V.CSEL")) &&
       findField("SrcP") && findField("SrcL") && findField("SrcR") &&
       findField("SrcRType")) {
     OS << mnemonicTok("<op>");
@@ -2029,6 +2346,35 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
     return;
   }
 
+  if (findField("RegDst0") && findField("RegDst1") && findField("SrcL") &&
+      findField("SrcR") && !findField("SrcD") && !AsmFmt.contains('[')) {
+    OS << mnemonicTok("<op>");
+    OS << "\t";
+    emitReg("SrcL");
+    OS << ", ";
+    emitReg("SrcR");
+    if (auto V = findFieldImm("shamt")) {
+      OS << ", " << *V;
+    }
+    emitArrowDest();
+    printAnnotation(OS, Annot);
+    return;
+  }
+
+  if (findField("RegDst0") && findField("RegDst1") && findField("SrcL") &&
+      findField("SrcR") && findField("SrcD") && !AsmFmt.contains('[')) {
+    OS << mnemonicTok("<op>");
+    OS << "\t";
+    emitReg("SrcL");
+    OS << ", ";
+    emitReg("SrcR");
+    OS << ", ";
+    emitReg("SrcD");
+    emitArrowDest();
+    printAnnotation(OS, Annot);
+    return;
+  }
+
   // Generic printer: best-effort by listing fields in common ISA order.
   if (!AsmFmt.empty())
     OS << mnemonicTok("<invalid>");
@@ -2040,6 +2386,7 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
   const bool IsSetcImm =
       AsmFmt.starts_with_insensitive("setc.") && findField("shamt") &&
       (findField("simm12") || findField("uimm12"));
+  const bool HasSplitImm12 = findField("imml") && findField("imms");
 
   bool FirstOp = true;
   auto sep = [&]() {
@@ -2065,12 +2412,16 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
         (Name.equals_insensitive("shamt") || Name.equals_insensitive("simm12") ||
          Name.equals_insensitive("uimm12")))
       continue;
+    if (HasSplitImm12 &&
+        (Name.equals_insensitive("imml") || Name.equals_insensitive("imms")))
+      continue;
     if (Name.starts_with_insensitive("imm") ||
         Name.starts_with_insensitive("simm") ||
         Name.starts_with_insensitive("uimm") ||
         Name.starts_with_insensitive("shamt") || Name.equals_insensitive("BrType") ||
         Name.equals_insensitive("BlockType") || Name.equals_insensitive("SSR_ID") ||
-        Name.equals_insensitive("SSRID")) {
+        Name.equals_insensitive("SSRID") || Name.equals_insensitive("LSR_ID") ||
+        Name.equals_insensitive("ACR-ID") || Name.equals_insensitive("C-ID")) {
       sep();
       const MCOperand &Op = KV.second;
       if (Op.isImm()) {
@@ -2107,6 +2458,15 @@ void LinxISAInstPrinter::printInst(const MCInst *MI, uint64_t Address,
         OS << shlUnsigned64(static_cast<uint64_t>(Op->getImm()), Shamt);
       else if (Op->isExpr())
         MAI.printExpr(OS, *Op->getExpr());
+    }
+  }
+
+  if (HasSplitImm12) {
+    auto Low = findFieldImm("imml");
+    auto High = findFieldImm("imms");
+    if (Low && High) {
+      sep();
+      OS << (((*High & 0x3f) << 6) | (*Low & 0x3f));
     }
   }
 
