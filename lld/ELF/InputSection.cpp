@@ -745,6 +745,91 @@ static Relocation *getPCRelHi20(Ctx &ctx, const InputSectionBase *loSec,
   return nullptr;
 }
 
+static bool isLinxPCRelHi(RelType type) { return type == R_LINX_PCREL_HI20; }
+
+static const Relocation *findLinxPCRelHiByOffset(const InputSection *isec,
+                                                 uint64_t offset) {
+  Relocation hiReloc;
+  hiReloc.offset = offset;
+  auto range = std::equal_range(
+      isec->relocs().begin(), isec->relocs().end(), hiReloc,
+      [](const Relocation &lhs, const Relocation &rhs) {
+        return lhs.offset < rhs.offset;
+      });
+
+  for (auto it = range.first; it != range.second; ++it)
+    if (isLinxPCRelHi(it->type))
+      return &*it;
+  return nullptr;
+}
+
+static const Relocation *findLinxPCRelHiBySymbol(const InputSectionBase *sec,
+                                                 uint64_t loOffset,
+                                                 const Symbol *sym,
+                                                 int64_t addend) {
+  auto *isec = dyn_cast_or_null<InputSection>(sec);
+  if (!isec)
+    return nullptr;
+
+  auto it = llvm::lower_bound(
+      isec->relocs(), loOffset,
+      [](const Relocation &lhs, uint64_t rhs) { return lhs.offset < rhs; });
+  while (it != isec->relocs().begin()) {
+    --it;
+    if (it->sym == sym && it->addend == addend && isLinxPCRelHi(it->type))
+      return &*it;
+  }
+  return nullptr;
+}
+
+static const Relocation *getLinxPCRelHi20(Ctx &ctx,
+                                          const InputSectionBase *loSec,
+                                          const Relocation &loReloc) {
+  int64_t addend = loReloc.addend;
+  Symbol *sym = loReloc.sym;
+  std::string anchor = toStr(ctx, *sym);
+
+  if (const auto *d = dyn_cast<Defined>(sym)) {
+    if (d->section) {
+      InputSection *hiSec = dyn_cast<InputSection>(d->section);
+      if (!hiSec) {
+        if (auto *ms = dyn_cast<MergeInputSection>(d->section))
+          hiSec = ms->getParent();
+        else if (auto *eh = dyn_cast<EhInputSection>(d->section))
+          hiSec = eh->getParent();
+      }
+      if (!hiSec) {
+        Err(ctx) << loSec->getLocation(loReloc.offset)
+                 << ": R_LINX_LO12 relocation "
+                    "points to unsupported anchor section '"
+                 << d->section->name << "' for symbol '" << sym->getName()
+                 << "'";
+        return nullptr;
+      }
+
+      anchor = sym->getName().empty() ? "offset 0x" + utohexstr(d->value)
+                                      : toStr(ctx, *sym) + "+0x" +
+                                            utohexstr(d->value);
+      if (addend != 0)
+        Warn(ctx) << loSec->getLocation(loReloc.offset)
+                  << ": non-zero addend in "
+                     "R_LINX_LO12 relocation to "
+                  << anchor << " is ignored";
+      if (const Relocation *hiRel = findLinxPCRelHiByOffset(hiSec, d->value))
+        return hiRel;
+    }
+  }
+
+  if (const Relocation *hiRel =
+          findLinxPCRelHiBySymbol(loSec, loReloc.offset, sym, addend))
+    return hiRel;
+
+  Err(ctx) << loSec->getLocation(loReloc.offset)
+           << ": R_LINX_LO12 relocation points to " << anchor
+           << " without an associated R_LINX_PCREL_HI20 relocation";
+  return nullptr;
+}
+
 // A TLS symbol's virtual address is relative to the TLS segment. Add a
 // target-specific adjustment to produce a thread-pointer-relative offset.
 static int64_t getTlsTpOffset(Ctx &ctx, const Symbol &s) {
@@ -921,6 +1006,11 @@ uint64_t InputSectionBase::getRelocTargetVA(Ctx &ctx, const Relocation &r,
   }
   case RE_RISCV_PC_INDIRECT: {
     if (const Relocation *hiRel = getPCRelHi20<RISCVPCRel>(ctx, this, r))
+      return getRelocTargetVA(ctx, *hiRel, r.sym->getVA(ctx));
+    return 0;
+  }
+  case RE_LINX_PC_INDIRECT: {
+    if (const Relocation *hiRel = getLinxPCRelHi20(ctx, this, r))
       return getRelocTargetVA(ctx, *hiRel, r.sym->getVA(ctx));
     return 0;
   }

@@ -532,7 +532,7 @@ RelExpr LinxISA::getRelExpr(RelType type, const Symbol &s,
   case R_LINX_GOT_LO12:
     return R_GOT;
   case R_LINX_LO12:
-    return R_ABS;
+    return RE_LINX_PC_INDIRECT;
   case R_LINX_TLS_DTPREL64:
     return R_DTPREL;
   case R_LINX_TLS_TPREL64:
