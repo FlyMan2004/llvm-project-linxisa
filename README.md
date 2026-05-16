@@ -18,7 +18,7 @@ Run from `/Users/zhoubot/linx-isa`.
 ```bash
 cmake -S compiler/llvm/llvm -B compiler/llvm/build-linxisa-clang -G Ninja \
   -DLLVM_ENABLE_PROJECTS="clang;lld" \
-  -DLLVM_TARGETS_TO_BUILD=Linx
+  -DLLVM_TARGETS_TO_BUILD=LinxISA
 cmake --build compiler/llvm/build-linxisa-clang --target clang lld
 
 cd /Users/zhoubot/linx-isa/avs/compiler/linx-llvm/tests
